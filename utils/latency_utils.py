@@ -1,14 +1,20 @@
 # %%
+import os
+import time
+import numpy as  np
 import torch.nn as nn
+from PIL import Image
+from typing import Tuple
+import matplotlib.pyplot as plt
+from sam2.build_sam import build_sam2_video_predictor
 from sam2.modeling.backbones.hieradet import Hiera
 from sam2.modeling.memory_attention import MemoryAttention
 from sam2.modeling.memory_encoder import MemoryEncoder
 from sam2.modeling.sam.mask_decoder import MaskDecoder
 from sam2.modeling.sam.prompt_encoder import PromptEncoder
-
-import time
+from sam2.sam2_video_predictor import SAM2VideoPredictor
+from vis_utils import show_points, show_mask_video
 from collections import defaultdict
-from typing import Tuple
 
 
 
@@ -74,9 +80,6 @@ class ModuleProfiler:
 
 
 # %%
-import os
-from sam2.build_sam import build_sam2_video_predictor
-import matplotlib.pyplot as plt
 project_dir = ''
 checkpoint = '../sam2_ckts/sam2.1_hiera_small.pt'
 model_cfg = '../sam2/configs/sam2.1/sam2.1_hiera_s.yaml'
@@ -103,10 +106,6 @@ print(type(inference_state))
 predictor.reset_state(inference_state)
 
 # %%
-from PIL import Image
-from sam2.sam2_video_predictor import SAM2VideoPredictor
-import numpy as  np
-from vis_utils import show_points, show_mask_video
 
 def add_prompt(
     predictor:SAM2VideoPredictor, inference_state, points, labels, ann_frame_idx:int=0, ann_obj_id:int=1, show_point:bool=False):
