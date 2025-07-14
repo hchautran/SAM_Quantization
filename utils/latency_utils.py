@@ -1,4 +1,4 @@
-
+# %%
 import torch.nn as nn
 from sam2.modeling.backbones.hieradet import Hiera
 from sam2.modeling.memory_attention import MemoryAttention
@@ -9,6 +9,8 @@ from sam2.modeling.sam.prompt_encoder import PromptEncoder
 import time
 from collections import defaultdict
 from typing import Tuple
+
+
 
 
 class ModuleProfiler:
@@ -104,7 +106,7 @@ predictor.reset_state(inference_state)
 from PIL import Image
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 import numpy as  np
-from vis_utils import show_points, show_mask
+from vis_utils import show_points, show_mask_video
 
 def add_prompt(
     predictor:SAM2VideoPredictor, inference_state, points, labels, ann_frame_idx:int=0, ann_obj_id:int=1, show_point:bool=False):
@@ -123,7 +125,7 @@ def add_prompt(
         plt.title(f"frame {ann_frame_idx}")
         plt.imshow(Image.open(os.path.join(video_dir, frame_names[ann_frame_idx])))
         show_points(points, labels, plt.gca())
-        show_mask((out_mask_logits[0] > 0.0).cpu().numpy(), plt.gca(), obj_id=out_obj_ids[0])
+        show_mask_video((out_mask_logits[0] > 0.0).cpu().numpy(), plt.gca(), obj_id=out_obj_ids[0])
 # %%
 module_list = (Hiera, MemoryEncoder, MemoryAttention, MaskDecoder, PromptEncoder)
 profiler = ModuleProfiler(module_list)
@@ -156,7 +158,7 @@ for out_frame_idx in range(0, len(frame_names), vis_frame_stride):
     plt.title(f"frame {out_frame_idx}")
     plt.imshow(Image.open(os.path.join(video_dir, frame_names[out_frame_idx])))
     for out_obj_id, out_mask in video_segments[out_frame_idx].items():
-        show_mask(out_mask, plt.gca(), obj_id=out_obj_id)
+        show_mask_video(out_mask, plt.gca(), obj_id=out_obj_id)
 # %%
 print(profiler.get_results())
 profiler.get_profile_plot()
