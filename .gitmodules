@@ -1,6 +1,3 @@
 [submodule "sam2"]
 	path = sam2
 	url = https://github.com/hchautran/sam2.git
-[submodule "segment-anything"]
-	path = segment-anything
-	url = https://github.com/facebookresearch/segment-anything.git
