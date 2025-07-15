@@ -26,6 +26,7 @@ class Sam2MemProfiler(ObserverBase):
         torch.cuda.reset_peak_memory_stats()
         self.inference_video(self.predictor, video_path, show_video=False)
         peak_mem = torch.cuda.max_memory_allocated()
+        ObserverBase.dictionary['peak_mem'] = peak_mem
         print(f'PeakMem: {peak_mem/1024**3:.4f}, GiB')
 
         return peak_mem
