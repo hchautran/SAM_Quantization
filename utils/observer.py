@@ -1,4 +1,3 @@
-# %%
 import os
 import torch
 import torch.nn as nn
@@ -162,4 +161,5 @@ class ObserverBase:
                 borders=True
             )
 
-# %%
+    def profile(self):
+        raise NotImplementedError("Profile method is not implemented yet.")

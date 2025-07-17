@@ -442,28 +442,6 @@ for i in range(len(BlockObserver.observer_state['attn_input'])):
 # AttnObserver.clear_dict()
 # BlockObserver.clear_dict()
 
-# %%
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-
-# Step 1: Generate or load data
-# Simulate data for multiple channels (e.g., 4 channels with 100 samples each)
-data = to_numpy(high_input.reshape(-1, high_input.shape[-1]))
-
-# Convert data to a pandas DataFrame for easier handling
-channel_names = [f"{i+1}" for i in  range(high_input.shape[-1])]
-df = pd.DataFrame(data, columns=channel_names)
-
-# Step 2: Plot box plots for each channel
-plt.figure(figsize=(10, 6))
-df.boxplot(column=channel_names)
-plt.title("Box Plot for Each Channel")
-plt.xlabel("Channels")
-plt.ylabel("Values")
-plt.grid(True)
-plt.show()
-
 
 
 # %%

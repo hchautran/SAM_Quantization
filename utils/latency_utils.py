@@ -74,34 +74,24 @@ class LatencyObserver(ObserverBase):
 
 
 # %%
-project_dir = ''
-checkpoint = '../sam2_ckts/sam2.1_hiera_base_plus.pt'
-model_cfg = '../sam2/configs/sam2.1/sam2.1_hiera_b+.yaml'
-video_dir = '../sam2/notebooks/videos/bedroom'
-
-predictor = build_sam2_video_predictor(model_cfg, checkpoint)
-
-
-# %%
-# %%
-
-# %%
-
-# %%
-module_list = (Hiera, MemoryEncoder, MemoryAttention, MaskDecoder, PromptEncoder)
-profiler = LatencyObserver(module_list)
-profiler.register_latency_hooks(predictor)
-profiler.inference_video(predictor, video_dir)
-print(profiler.get_results())
-profiler.get_profile_plot()
+if __name__ == '__main__':
+    from const import *
+    ckt_path = f'{SAM2_CKT_PATH}/{SAM_2_L}'
+    config_path = f'{SAM2_CFG_PATH}/{SAM_2_L_CFG}'
+    video_dir = SAMPLE_VIDEO_PATH
 
 
-# %%
 
-# render the segmentation results every few frames
-# %%
-profiler.clear_hook()
-profiler.clear_dict()
+    predictor = build_sam2_video_predictor(config_path, ckt_path)
+
+    module_list = (Hiera, MemoryEncoder, MemoryAttention, MaskDecoder, PromptEncoder)
+    profiler = LatencyObserver(module_list)
+    profiler.register_latency_hooks(predictor)
+    profiler.inference_video(predictor, video_dir)
+    print(profiler.get_results())
+    profiler.get_profile_plot()
 
 
-# %%
+
+    profiler.clear_hook()
+    profiler.clear_dict()

@@ -21,7 +21,7 @@ from sam2.modeling.sam.transformer import TwoWayTransformer
 
 
 class GFLOPSCounter(ObserverBase):
-    def __init__(self, module_list: Tuple):
+    def __init__(self, module_list:Tuple):
         super(GFLOPSCounter, self).__init__(module_list)
         self.inputs = {}
         self.results = {}
@@ -75,14 +75,10 @@ class GFLOPSCounter(ObserverBase):
 
 
 if __name__ == "__main__":
+
     ckt_path = '../sam2_ckts/sam2.1_hiera_large.pt'
     config_path = '../sam2/configs/sam2.1/sam2.1_hiera_l.yaml'
     video_path= '../sam2/notebooks/videos/bedroom'
     image_path = '../sam2/notebooks/images/cars.jpg'
-
-
-
-
-
     profiler = GFLOPSCounter(module_list=(Hiera, MemoryEncoder, TwoWayTransformer))
     profiler.profile(ckt_path, config_path,  video_path=video_path)

@@ -10,6 +10,7 @@ from torch.profiler import profile,  ProfilerActivity, record_function
 from sam2.build_sam import build_sam2_video_predictor
 from observer import ObserverBase
 from vis_utils import show_points, show_mask_video
+from const import *
 from typing import List
 import torch
 
@@ -35,8 +36,7 @@ class Sam2MemProfiler(ObserverBase):
 
 
 if __name__ == '__main__':
-    ckt_path = '../sam2_ckts/sam2.1_hiera_small.pt'
-    config_path = '../sam2/configs/sam2.1/sam2.1_hiera_s.yaml'
-    video_path= '../sam2/notebooks/videos/bedroom'
+    ckt_path = f'{SAM2_CKT_PATH}/{SAM_2_L}'
+    config_path = f'{SAM2_CFG_PATH}/{SAM_2_L_CFG}'
     profiler = Sam2MemProfiler(checkpoint=ckt_path, model_cfg=config_path)
-    print(profiler.profile(video_path))
+    print(profiler.profile(SAMPLE_VIDEO_PATH))
