@@ -1,11 +1,17 @@
+
+
 from typing import List
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
 from segment_anything import sam_model_registry,  SamPredictor
+from typing import Union
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-from typing import Union
+from PIL import Image
+from torch.data.utils import Dataloader
+
+
 
 
 
@@ -17,12 +23,36 @@ class InferenceStrategy(ABC):
 
 
     @abstractmethod
-    def build_predictor(self)-> Union[SAM2VideoPredictor, Sam2ImagePredictor, SamPredictor]:
+    def build_predictor(self)-> Union[SAM2VideoPredictor, SAM2ImagePredictor, SamPredictor]:
         pass
 
+class DataLoaderStrategy(ABC):
+    @abstractmethod
+    def get_loader(self,  *args, **kwargs) -> :
+        pass
+
+    
 
 
-class Engine(ABC):
+
+class Sam2Engine:
+    def __init__(self, strategy:InferenceStrategy):
+        self._strategy = strategy
+
+    @property
+    def strategy(self):
+        return self._strategy
+
+    @strategy.setter
+    def strategy(self, strategy:InferenceStrategy):
+        self._strategy = strategy
+
+
+    
+
+
+
+class Sam2Engine:
     def __init__(self, strategy:InferenceStrategy):
         self._strategy = strategy
 
@@ -70,6 +100,47 @@ class Engine(ABC):
 
 
 
+class SamEngine:
+    def __init__(self, strategy:InferenceStrategy):
+        self._strategy = strategy
+
+    @property
+    def strategy(self):
+        return self._strategy
+
+    @strategy.setter
+    def strategy(self, strategy:InferenceStrategy):
+        self._strategy = strategy
+
+
+    @abstractmethod
+    def sample_image_inference(
+        self,
+        image_dir: torch.Tensor,
+        show_image:bool= False
+    ) -> torch.Tensor:
+        pass
+
+
+    @abstractmethod
+    def hq_image_inference(self):
+        pass
+
+    @abstractmethod
+    def image_inference(self):
+        pass
+
+
+
+
+
+
+
+if __name__ == '__main__':
+    sam_ckt = '../pretrained/sam_vit_b_4b8939.pth'
+    model_type = 'vit_b'
+    device = 'cuda'
+    sam = sam_model(model_type=model_type, checkpoint=sam_ckt, device=device)
 class SAMEngine(Engine):
     def __init__(self, predictor):
         super().__init__(SAMInferenceStrategy(predictor))
@@ -92,62 +163,6 @@ class SAMEngine(Engine):
         raise NotImplementedError("SAM model does not support inference for video")
 
 
-class SAM2Engine(Engine):
-    def __init__(self, strategy:InferenceStrategy):
-        super().__init__(strategy)
-        self.predictor = strategy.build_predictor()
-
-    def add_prompt(
-        self,
-        inference_state,
-        points,
-        labels,
-        video_dir:Optional[str]=None,
-        frame_names:Optional[List[str]]=None,
-        ann_frame_idx:int=0,
-        ann_obj_id:int=1,
-        show_point:bool=False,
-    ):
-
-        _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
-            inference_state=inference_state,
-            frame_idx=ann_frame_idx,
-            obj_id=ann_obj_id,
-            points=points,
-            labels=labels,
-        )
-
-        # show the results on the current (interacted) frame
-        if (
-            show_point and
-            isinstance(video_dir, str) and
-            isinstance(frame_names, list) and
-            isinstance(frame_names[ann_frame_idx], str)
-        ):
-            image = Image.open(os.path.join(video_dir, frame_names[ann_frame_idx]))
-            plt.figure(figsize=(9, 6))
-            plt.title(f"frame {ann_frame_idx}")
-            plt.imshow(image)
-            show_points(points, labels, plt.gca())
-            show_mask_video((out_mask_logits[0] > 0.0).cpu().numpy(), plt.gca(), obj_id=out_obj_ids[0])
-
-
-
-    def inference_image_sample(
-        self,
-        image_dir:str,
-        show_image:bool = False
-    ) -> torch.Tensor:
-        return self.strategy.inference(image_dir)
-
-
-    def inference_video_sample(
-        self,
-        video_dir:str='./notebooks/videos/bedroom',
-        show_video:bool=False
-    ) -> torch.Tensor:
-        with torch.inference_mode():
-            return self.strategy.inference(video_dir)
 
 
 if __name__ == '__main__':
