@@ -65,7 +65,10 @@ def get_act_scales_sam(model, batched_input, num_samples=512):
         dict: Dictionary mapping layer names to their activation scales (max absolute values per channel)
     """
     model.eval()
-    device = model.device
+    device = next(model.parameters()).device 
+    
+    print(device)
+    # exit()
     act_scales = {}
 
     def stat_tensor(name, tensor):
@@ -75,16 +78,11 @@ def get_act_scales_sam(model, batched_input, num_samples=512):
         if tensor.dim() < 2:
             return
         
-        # Get the last dimension as channel dimension
         hidden_dim = tensor.shape[-1]
-        # Flatten all dimensions except the last one (channel dimension)
         tensor = tensor.view(-1, hidden_dim).abs().detach()
-        
-        # Get maximum across all tokens/spatial positions for each channel
         current_max = torch.max(tensor, dim=0)[0].float().cpu()
         
         if name in act_scales:
-            # Keep the maximum across all samples
             act_scales[name] = torch.max(act_scales[name], current_max)
         else:
             act_scales[name] = current_max
@@ -97,14 +95,12 @@ def get_act_scales_sam(model, batched_input, num_samples=512):
             x = x[0]
         stat_tensor(name, x)
 
-    # Register hooks for all Linear layers in image encoder and prompt encoder
     hooks = []
     
     # Hook image encoder linear layers (focus on attention QKV and after QKV)
     for name, module in model.image_encoder.named_modules():
         if isinstance(module, nn.Linear):
             full_name = f"image_encoder.{name}"
-            # Focus on QKV projections and layers after them
             if any(pattern in name for pattern in ['attn.qkv','attn.proj','mlp.lin1', 'mlp.lin2' ]):
                 hooks.append(
                     module.register_forward_hook(functools.partial(stat_input_hook, name=full_name))
@@ -121,15 +117,15 @@ def get_act_scales_sam(model, batched_input, num_samples=512):
             )
 
     print("Collecting activation scales for SAM...")
-    
-    # Process samples
     num_samples = min(num_samples, len(batched_input))
     
     for i in tqdm(range(num_samples)):
         try:
-            # Get current sample
             current_input = [batched_input[i % len(batched_input)]]
-            
+            for input_dict in current_input:
+                for key, value in input_dict.items():
+                    if isinstance(value, torch.Tensor):
+                        input_dict[key] = value.to(device)
             # Process image through image encoder
             input_images = torch.stack(
                 [model.preprocess(x["image"]) for x in current_input], dim=0
@@ -170,40 +166,4 @@ def get_act_scales_sam(model, batched_input, num_samples=512):
     # Remove all hooks
     for hook in hooks:
         hook.remove()
-
-    # Filter and clean up the results
-    # filtered_scales = {}
-    # for name, scales in act_scales.items():
-    #     # Only keep scales from attention QKV and layers after QKV
-    #     if any(keyword in name.lower() for keyword in ['attn.qkv','attn.proj','mlp.lin1', 'mlp.lin2' , 'fc', 'linear']):
-    #         filtered_scales[name] = scales
-    #         print(f"Collected scales for {name}: shape {scales.shape}, max {scales.max():.4f}")
-
-    # print(f"Total layers with activation scales: {len(filtered_scales)}")
-    
     return act_scales
-
-def example_usage_sam_calibration():
-    """
-    Example of how to use get_act_scales_sam
-    """
-    # Assuming you have a SAM model and input data
-    model = sam_model_registry["vit_h"](checkpoint="path/to/checkpoint")
-    
-    # Prepare batched input
-    batched_input = [
-        {
-            "image": torch.randn(3, 1024, 1024),  # Example image
-            "original_size": (1024, 1024),
-            "point_coords": torch.tensor([[[500, 500]]]),  # Example point
-            "point_labels": torch.tensor([[1]]),
-        }
-    ] * 100  # Repeat for multiple samples
-    
-    # Get activation scales
-    act_scales = get_act_scales_sam(model, batched_input, num_samples=512)
-    
-    # Use scales for smoothing (if implementing SmoothQuant for SAM)
-    # smooth_sam(model, act_scales, alpha=0.5)
-    
-    pass

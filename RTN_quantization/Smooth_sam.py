@@ -5,8 +5,13 @@ import cv2
 import os
 import sys
 
+# Add the sam-hq directory to Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)  # Go up to SAM_Quantization
+sam_hq_path = os.path.join(project_root, "sam-hq")
+
+sys.path.insert(0, sam_hq_path)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append("../sam-hq")
 from segment_anything import sam_model_registry, SamPredictor
 from calibration import get_act_scales_sam
 from utils import smooth_sam
@@ -66,6 +71,7 @@ def show_res_multi(masks, scores, input_point, input_label, input_box, filename,
 def prepare_batched_input_for_calibration():
     """
     Prepare batched input in the format expected by get_act_scales_sam
+    Returns CPU tensors that can be moved to device later
     """
     batched_input = []
     
@@ -73,7 +79,10 @@ def prepare_batched_input_for_calibration():
         print(f"Preparing image: {i}")
         
         # Load and prepare image
-        image = cv2.imread(f'demo/input_imgs/example{i}.png')
+        image = cv2.imread(f'/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam-hq/demo/input_imgs/example{i}.png')
+        if image is None:
+            print(f"Error: Could not load image {i}")
+            continue
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
         # Convert to torch tensor and normalize (0-255 -> 0-1)
@@ -81,13 +90,13 @@ def prepare_batched_input_for_calibration():
         # Transpose from HWC to CHW format
         image_tensor = image_tensor.permute(2, 0, 1)
         
-        # Prepare input dictionary based on the example logic
+        # Prepare input dictionary - keep all tensors on CPU
         input_dict = {
-            "image": image_tensor,
+            "image": image_tensor,  # CPU tensor
             "original_size": image.shape[:2],  # (H, W)
         }
         
-        # Add prompts based on your existing logic
+        # Add prompts based on your existing logic - all CPU tensors
         if i == 0:
             input_box = np.array([[4, 13, 1007, 1023]])
             input_dict["boxes"] = torch.from_numpy(input_box).float()
@@ -133,9 +142,10 @@ def prepare_batched_input_for_calibration():
 
 
 if __name__ == "__main__":
-    sam_checkpoint = "./checkpoint_sam/sam_hq_vit_b_1.pth"  # Updated path
+    sam_checkpoint = "./checkpoint_sam/sam_hq_vit_l_1.pth"  # Updated path
     model_type = "vit_l"
     device = "cuda"
+    act_scales_file = None
     
     # Load SAM model (use sam-hq for HQ checkpoint)
     
@@ -143,24 +153,29 @@ if __name__ == "__main__":
     sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
     sam.to(device=device)
     sam.eval()
+  
     
-    print("Preparing calibration data...")
-    batched_input = prepare_batched_input_for_calibration()
+    # Load or calculate activation scales
+    act_scales_file = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam_activation_scales.pt"
+
+    if os.path.exists(act_scales_file):
+        print("Loading activation scales...")
+        act_scales = torch.load(act_scales_file)
+    else:
+        batched_input = prepare_batched_input_for_calibration()
+        act_scales = get_act_scales_sam(sam, batched_input, num_samples=len(batched_input))
+        torch.save(act_scales, act_scales_file)
+        print("Activation scales saved!")
+
+    # Apply smoothing
+    smoothed_sam = smooth_sam(sam, act_scales, alpha=0.5)
+
+    # Save smoothed model
+    torch.save(smoothed_sam.state_dict(), '/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/checkpoint_sam/smoothed_sam.pth')
+    print("Smoothed SAM model saved!")
     
-    print("Calculating activation scales...")
-    act_scales = get_act_scales_sam(sam, batched_input, num_samples=len(batched_input))
     
-    smoothed_sam= smooth_sam(sam, act_scales, alpha=0.5)
-    # Save the smoothed SAM model
-    torch.save(smoothed_sam.state_dict(), 'smoothed_sam.pth')
     
-    print(f"\nCollected activation scales for {len(act_scales)} layers:")
-    for name, scales in act_scales.items():
-        print(f"{name}: shape {scales.shape}, max {scales.max():.4f}, min {scales.min():.4f}")
-    
-    # Save activation scales for later use
-    torch.save(act_scales, "sam_activation_scales.pt")
-    print("Activation scales saved to 'sam_activation_scales.pt'")
 
 
     
