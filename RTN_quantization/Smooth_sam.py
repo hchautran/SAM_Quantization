@@ -2,8 +2,15 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import cv2
-from sam_hq.segment_anything import sam_model_registry, SamPredictor
 import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append("../sam-hq")
+from segment_anything import sam_model_registry, SamPredictor
+from calibration import get_act_scales_sam
+from utils import smooth_sam
+
 
 def show_mask(mask, ax, random_color=False):
     if random_color:
@@ -56,83 +63,104 @@ def show_res_multi(masks, scores, input_point, input_label, input_box, filename,
     plt.close()
 
 
-if __name__ == "__main__":
-    sam_checkpoint = "./pretrained_checkpoint/sam_hq_vit_tiny.pth"
-    model_type = "vit_tiny"
+def prepare_batched_input_for_calibration():
+    """
+    Prepare batched input in the format expected by get_act_scales_sam
+    """
+    batched_input = []
+    
+    for i in range(8):
+        print(f"Preparing image: {i}")
+        
+        # Load and prepare image
+        image = cv2.imread(f'demo/input_imgs/example{i}.png')
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # Convert to torch tensor and normalize (0-255 -> 0-1)
+        image_tensor = torch.from_numpy(image).float() / 255.0
+        # Transpose from HWC to CHW format
+        image_tensor = image_tensor.permute(2, 0, 1)
+        
+        # Prepare input dictionary based on the example logic
+        input_dict = {
+            "image": image_tensor,
+            "original_size": image.shape[:2],  # (H, W)
+        }
+        
+        # Add prompts based on your existing logic
+        if i == 0:
+            input_box = np.array([[4, 13, 1007, 1023]])
+            input_dict["boxes"] = torch.from_numpy(input_box).float()
+            
+        elif i == 1:
+            input_box = np.array([[306, 132, 925, 893]])
+            input_dict["boxes"] = torch.from_numpy(input_box).float()
+            
+        elif i == 2:
+            input_point = np.array([[495, 518], [217, 140]])
+            input_label = np.ones(input_point.shape[0], dtype=np.int32)
+            input_dict["point_coords"] = torch.from_numpy(input_point).float().unsqueeze(0)  # Add batch dim
+            input_dict["point_labels"] = torch.from_numpy(input_label).long().unsqueeze(0)   # Add batch dim
+            
+        elif i == 3:
+            input_point = np.array([[221, 482], [498, 633], [750, 379]])
+            input_label = np.ones(input_point.shape[0], dtype=np.int32)
+            input_dict["point_coords"] = torch.from_numpy(input_point).float().unsqueeze(0)
+            input_dict["point_labels"] = torch.from_numpy(input_label).long().unsqueeze(0)
+            
+        elif i == 4:
+            input_box = np.array([[64, 76, 940, 919]])
+            input_dict["boxes"] = torch.from_numpy(input_box).float()
+            
+        elif i == 5:
+            input_point = np.array([[373, 363], [452, 575]])
+            input_label = np.ones(input_point.shape[0], dtype=np.int32)
+            input_dict["point_coords"] = torch.from_numpy(input_point).float().unsqueeze(0)
+            input_dict["point_labels"] = torch.from_numpy(input_label).long().unsqueeze(0)
+            
+        elif i == 6:
+            input_box = np.array([[181, 196, 757, 495]])
+            input_dict["boxes"] = torch.from_numpy(input_box).float()
+            
+        elif i == 7:
+            # Multi box input
+            input_box = np.array([[45, 260, 515, 470], [310, 228, 424, 296]])
+            input_dict["boxes"] = torch.from_numpy(input_box).float()
+        
+        batched_input.append(input_dict)
+    
+    return batched_input
 
+
+if __name__ == "__main__":
+    sam_checkpoint = "./checkpoint_sam/sam_hq_vit_b_1.pth"  # Updated path
+    model_type = "vit_l"
     device = "cuda"
+    
+    # Load SAM model (use sam-hq for HQ checkpoint)
+    
+    
     sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
     sam.to(device=device)
     sam.eval()
-    predictor = SamPredictor(sam)
-
-
-    image = cv2.imread('demo/input_imgs/dog.jpg')
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    predictor.set_image(image)
-    # hq_token_only: False means use hq output to correct SAM output. 
-    #                True means use hq output only. 
-    #                Default: False
-    hq_token_only = False 
-    # To achieve best visualization effect, for images contain multiple objects (like typical coco images), we suggest to set hq_token_only=False
-    # For images contain single object, we suggest to set hq_token_only = True
-    # For quantiative evaluation on COCO/YTVOS/DAVIS/UVO/LVIS etc., we set hq_token_only = False
     
-    # box prompt
-    input_box = np.array([[784,500,1789,1000]])
-    input_point, input_label = None, None
-
-    masks, scores, logits = predictor.predict(
-        point_coords=input_point,
-        point_labels=input_label,
-        box = input_box,
-        multimask_output=False,
-        hq_token_only=hq_token_only, 
-    )
-    result_path = 'demo/hq_sam_tiny_result/'
-    os.makedirs(result_path, exist_ok=True)
-    show_res(masks,scores,input_point, input_label, input_box, result_path + 'dog', image)
-
-
-
-    image = cv2.imread('demo/input_imgs/example3.png')
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    predictor.set_image(image)
-    hq_token_only = True
-    # point prompt
-    input_point = np.array([[221,482],[498,633],[750,379]])
-    input_label = np.ones(input_point.shape[0])
-    input_box = None
-
-    masks, scores, logits = predictor.predict(
-        point_coords=input_point,
-        point_labels=input_label,
-        box = input_box,
-        multimask_output=False,
-        hq_token_only=hq_token_only, 
-    )
-    show_res(masks,scores,input_point, input_label, input_box, result_path + 'example3', image)
-
-
-    image = cv2.imread('demo/input_imgs/example7.png')
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    predictor.set_image(image)
-    hq_token_only = False
-    # multi box prompt
-    input_box = torch.tensor([[45,260,515,470], [310,228,424,296]],device=predictor.device)
-    transformed_box = predictor.transform.apply_boxes_torch(input_box, image.shape[:2])
-    input_point, input_label = None, None
-    masks, scores, logits = predictor.predict_torch(
-        point_coords=input_point,
-        point_labels=input_label,
-        boxes=transformed_box,
-        multimask_output=False,
-        hq_token_only=hq_token_only,
-    )
-    masks = masks.squeeze(1).cpu().numpy()
-    scores = scores.squeeze(1).cpu().numpy()
-    input_box = input_box.cpu().numpy()
-    show_res_multi(masks, scores, input_point, input_label, input_box, result_path + 'example7', image)
+    print("Preparing calibration data...")
+    batched_input = prepare_batched_input_for_calibration()
+    
+    print("Calculating activation scales...")
+    act_scales = get_act_scales_sam(sam, batched_input, num_samples=len(batched_input))
+    
+    smoothed_sam= smooth_sam(sam, act_scales, alpha=0.5)
+    # Save the smoothed SAM model
+    torch.save(smoothed_sam.state_dict(), 'smoothed_sam.pth')
+    
+    print(f"\nCollected activation scales for {len(act_scales)} layers:")
+    for name, scales in act_scales.items():
+        print(f"{name}: shape {scales.shape}, max {scales.max():.4f}, min {scales.min():.4f}")
+    
+    # Save activation scales for later use
+    torch.save(act_scales, "sam_activation_scales.pt")
+    print("Activation scales saved to 'sam_activation_scales.pt'")
 
 
     

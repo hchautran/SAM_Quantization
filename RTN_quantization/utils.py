@@ -135,7 +135,7 @@ def smooth_lm(model, scales, alpha=0.5):
             smooth_ln_fcs_llama_like(ffn_ln, fcs, fcs_input_scales, alpha)   
 
 @torch.no_grad()
-def smooth_sam(model, batched_input, alpha=0.5, num_samples=512):
+def smooth_sam(model, act_scales, alpha=0.5, num_samples=512):
     """
     Apply SmoothQuant to SAM model focusing on image encoder and prompt encoder.
     
@@ -146,8 +146,7 @@ def smooth_sam(model, batched_input, alpha=0.5, num_samples=512):
         num_samples: Number of samples for calibration
     """
     # Get activation scales from calibration
-    print("Collecting activation scales for SAM...")
-    act_scales = get_act_scales_sam(model, batched_input, num_samples)
+    
     
     print("Applying SmoothQuant smoothing to SAM...")
     
