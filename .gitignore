@@ -1,4 +1,5 @@
 *.pt
 __pycache__/
 data/
+hq_ckts/
 pretrained_checkpoint/
