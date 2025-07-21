@@ -1,3 +1,4 @@
+
 # Exclude checkpoint and model folders
 checkpoint_sam/
 sam-hq/
@@ -25,3 +26,9 @@ Thumbs.db
 
 # Exclude log files
 *.log
+*.pt
+__pycache__/
+data/
+hq_ckts/
+pretrained_checkpoint/
+
