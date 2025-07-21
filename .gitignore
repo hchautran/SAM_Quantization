@@ -1,5 +1,34 @@
+
+# Exclude checkpoint and model folders
+checkpoint_sam/
+sam-hq/
+sam2/
+segment-anything/
+
+# Exclude Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Exclude common temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Exclude IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Exclude log files
+*.log
 *.pt
 __pycache__/
 data/
 hq_ckts/
 pretrained_checkpoint/
+
