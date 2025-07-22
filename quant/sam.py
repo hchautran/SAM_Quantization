@@ -36,3 +36,8 @@ class SamInferenceStrategy(InferenceStrategy):
             hq_token_only=inputs['hq_token_only'], 
         )
         return masks, scores, logits
+
+        
+    def visualize(self, inputs:dict, masks:torch.Tensor, scores:torch.Tensor, logits:torch.Tensor):
+        pass
+        
