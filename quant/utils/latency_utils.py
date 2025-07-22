@@ -14,7 +14,7 @@ from sam2.modeling.memory_encoder import MemoryEncoder
 from sam2.modeling.sam.mask_decoder import MaskDecoder
 from sam2.modeling.sam.prompt_encoder import PromptEncoder
 from sam2.sam2_video_predictor import SAM2VideoPredictor
-from vis_utils import show_points, show_mask_video
+from quant.utils.sam2_vis_utils import show_points, show_mask_video
 from collections import defaultdict
 
 

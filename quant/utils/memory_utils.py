@@ -9,7 +9,7 @@ from sam2.modeling.sam.prompt_encoder import PromptEncoder
 from torch.profiler import profile,  ProfilerActivity, record_function
 from sam2.build_sam import build_sam2_video_predictor
 from observer import ObserverBase
-from vis_utils import show_points, show_mask_video
+from quant.utils.sam2_vis_utils import show_points, show_mask_video
 from const import *
 from typing import List
 import torch

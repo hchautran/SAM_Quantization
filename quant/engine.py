@@ -7,7 +7,6 @@ from typing import Union
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from PIL import Image
-from torch.data.utils import Dataloader
 
 
 
@@ -18,7 +17,6 @@ class InferenceStrategy(ABC):
     @abstractmethod
     def inference(self,  *args, **kwargs) -> torch.Tensor:
         pass
-
 
     @abstractmethod
     def build_predictor(self)-> Union[SAM2VideoPredictor, SAM2ImagePredictor, SamPredictor]:
@@ -32,9 +30,6 @@ class InferenceStrategy(ABC):
     def set_video(self, video_dir:str):
         pass
 
-    @abstractmethod
-    def set_prompt(self, inputs:dict):
-        pass
 
 
 
@@ -110,9 +105,6 @@ class SamEngine:
         pass
 
 
-    @abstractmethod
-    def hq_image_inference(self):
-        pass
 
     @abstractmethod
     def image_inference(self):

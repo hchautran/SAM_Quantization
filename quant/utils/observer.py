@@ -8,7 +8,7 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from functools import partial
 from PIL import Image
 from matplotlib import pyplot as plt
-from vis_utils import show_points, show_mask_video, show_masks_image
+from quant.utils.sam2_vis_utils import show_points, show_mask_video, show_masks_image
 
 
 
