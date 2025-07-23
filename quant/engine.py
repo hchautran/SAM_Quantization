@@ -83,7 +83,7 @@ class Sam2Engine:
 
 
 
-class SamEngine:
+class Engine:
     def __init__(self, strategy:InferenceStrategy):
         self._strategy = strategy
 
@@ -97,7 +97,7 @@ class SamEngine:
 
 
     @abstractmethod
-    def sample_image_inference(
+    def demo(
         self,
         image_dir: torch.Tensor,
         show_image:bool= False
@@ -107,7 +107,7 @@ class SamEngine:
 
 
     @abstractmethod
-    def image_inference(self):
+    def evaluate_seginw(self):
         pass
 
 
