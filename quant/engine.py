@@ -110,5 +110,11 @@ class Engine:
     def evaluate_seginw(self):
         pass
 
+    
+    @abstractmethod
+    def evaluate_coco(self):
+        pass
+
+
 
 

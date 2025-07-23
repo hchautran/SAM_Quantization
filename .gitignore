@@ -33,4 +33,6 @@ hq_ckts/
 pretrained_checkpoint/
 *.egg-info
 */sam-hq/
+*.pth
+work_dirs/
 
