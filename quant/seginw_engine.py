@@ -18,6 +18,11 @@ from groundingdino.datasets.cocogrounding_eval import CocoGroundingEvaluator
 from utils.coco import CocoDetection, PostProcessSeginw
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
+from train.utils.dataloader import get_im_gt_name_dict, create_dataloaders, Resize
+from train.utils.misc import   F, random
+import train.utils.misc as misc
+from train.train import compute_iou, compute_boundary_iou, show_anns, MaskDecoderHQ
+from train.segment_anything_training import sam_model_registry
 
 # segment anything
 from seginw.segment_anything import (
@@ -28,10 +33,11 @@ from seginw.segment_anything import (
 import cv2
 import json
 import time
+from omegaconf import OmegaConf
 
 
 
-class SamInferenceStrategy(InferenceStrategy):
+class SeginwInferenceStrategy(InferenceStrategy):
     def __init__(self, sam_config:dict):
         self.model_type = sam_config['model_type']
         self.use_sam_hq = sam_config['use_hq']
@@ -75,18 +81,11 @@ class SamInferenceStrategy(InferenceStrategy):
         
 
 
-class SamEngine(Engine):
+class SeginwSamEngine(Engine):
     def __init__(self, strategy:InferenceStrategy):
         super().__init__(strategy)
         self.strategy.build_predictor()
 
-    def demo(self, prompts:dict, image_dir: torch.Tensor, show_image:bool= False):
-        self.strategy.set_image(image_dir)
-        masks, scores, logits = self.strategy.inference(prompts)
-        if show_image:
-            result_path = './demo.jpg' 
-            self.strategy.visualize(prompts, masks, scores, result_path)
-        return masks, scores, logits
     
     def load_model(self, model_config_path: str, model_checkpoint_path: str): 
         args = SLConfig.fromfile(model_config_path)
@@ -97,11 +96,11 @@ class SamEngine(Engine):
         model.eval()
         return model
 
-    def evaluate_seginw(self, seginw_config:dict):
-        objects = os.listdir(seginw_config['data_path'])
-        cfg = SLConfig.fromfile(seginw_config['config_file'])
+    def evaluate(self, args):
+        objects = os.listdir(args.data_path)
+        cfg = SLConfig.fromfile(args.config_file)
         # build model
-        model = self.load_model(seginw_config['config_file'], seginw_config['checkpoint_path'])
+        model = self.load_model(args.config_file, args.checkpoint_path)
         model = model.to(self.strategy.device)
         model = model.eval()
 
@@ -114,8 +113,8 @@ class SamEngine(Engine):
             ]
         )
         for object in objects:
-            image_dir = os.path.join(seginw_config['data_path'], object, 'valid')
-            anno_path = os.path.join(seginw_config['data_path'], object, 'valid', '_annotations_min1cat.coco.json')
+            image_dir = os.path.join(args.data_path, object, 'valid')
+            anno_path = os.path.join(args.data_path, object, 'valid', '_annotations_min1cat.coco.json')
             dataset = CocoDetection(
                 image_dir,
                 anno_path, 
@@ -125,13 +124,13 @@ class SamEngine(Engine):
                 dataset, 
                 batch_size=1, 
                 shuffle=False, 
-                num_workers=seginw_config['num_workers'], 
+                num_workers=args.num_workers, 
                 collate_fn=collate_fn
             )
 
         # build post processor
             tokenlizer = get_tokenlizer.get_tokenlizer(cfg.text_encoder_type)
-            postprocessor = PostProcessSeginw(num_select=seginw_config['num_select'],coco_api=dataset.coco, tokenlizer=tokenlizer)
+            postprocessor = PostProcessSeginw(num_select=args.num_select, coco_api=dataset.coco, tokenlizer=tokenlizer)
 
             # build evaluator
             evaluator = CocoGroundingEvaluator(
@@ -142,8 +141,6 @@ class SamEngine(Engine):
             cat_list = [item['name'] for item in category_dict]
             caption = " . ".join(cat_list) + ' .'
             print("Input text prompt:", caption)
-
-
             predictor = self.strategy.build_predictor()
 
             
@@ -180,7 +177,7 @@ class SamEngine(Engine):
                 
                 save_items = evaluator.update(cocogrounding_res)
 
-                if seginw_config['save_json']:
+                if args.save_json:
                     new_items = list()
                     for item in save_items:
                         new_item = dict()
@@ -207,7 +204,7 @@ class SamEngine(Engine):
             evaluator.summarize()
             print("Final results:", evaluator.coco_eval["segm"].stats.tolist())
 
-            if seginw_config['save_json']:
+            if args.save_json:
                 if self.strategy.use_sam_hq:
                     os.makedirs('seginw_output/sam_hq/', exist_ok=True)
                     save_path = 'seginw_output/sam_hq/seginw-'+anno_path.split('/')[-3]+'_val.json'
@@ -217,18 +214,21 @@ class SamEngine(Engine):
                 with open(save_path,'w') as f:
                     json.dump(json_file,f)
                 print(save_path)
+
+
                 
 
 # %%
 
 if __name__ == "__main__":
-    import yaml
 
-    with open('config/base_h.yaml', 'r') as f:
-        config = yaml.safe_load(f)
+    # config = OmegaConf.load('config/coco/base_h.yaml')
+    config = OmegaConf.load('config/hq44k/base_h.yaml')
 
-    engine = SamEngine(SamInferenceStrategy(config['model']))
-    engine.evaluate_seginw(config['seginw'])
+    # engine = SeginwSamEngine(SamInferenceStrategy(config.model))
+    engine = Hq44kSamEngine(SeginwInferenceStrategy(config.model))
+    # breakpoint()
+    engine.evaluate(config.data)
     
     prompts = {
         'point_coords': None, 

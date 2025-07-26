@@ -30,6 +30,10 @@ class InferenceStrategy(ABC):
     def set_video(self, video_dir:str):
         pass
 
+    @abstractmethod
+    def visualize(self, prompts:dict, masks:torch.Tensor, scores:torch.Tensor, result_path:str):
+        pass
+
 
 
 
@@ -83,7 +87,7 @@ class Sam2Engine:
 
 
 
-class Engine:
+class Engine(ABC):
     def __init__(self, strategy:InferenceStrategy):
         self._strategy = strategy
 
@@ -96,24 +100,28 @@ class Engine:
         self._strategy = strategy
 
 
-    @abstractmethod
     def demo(
-        self,
-        image_dir: torch.Tensor,
+        self, 
+        prompts:dict, 
+        image_dir: torch.Tensor, 
         show_image:bool= False
-    ) -> torch.Tensor:
-        pass
+    ):
+        self.strategy.set_image(image_dir)
+        masks, scores, logits = self.strategy.inference(prompts)
+        if show_image:
+            result_path = './demo.jpg' 
+            self.strategy.visualize(prompts, masks, scores, result_path)
+        return masks, scores, logits
 
 
 
     @abstractmethod
-    def evaluate_seginw(self):
+    def evaluate(self, seginw_config:dict):
         pass
 
     
-    @abstractmethod
-    def evaluate_coco(self):
-        pass
+
+    
 
 
 
