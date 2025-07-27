@@ -73,19 +73,6 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             print("restore model from:", self.restore_model)
             self.hq_mask_decoder.load_state_dict(torch.load(self.restore_model))
 
-    def distribute(self, dist_args):
-        if torch.cuda.is_available():
-            self.predictor.to(device=dist_args.device)
-            self.hq_mask_decoder.to(device=dist_args.device)
-            self.predictor = torch.nn.parallel.DistributedDataParallel(self.predictor, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
-            self.hq_mask_decoder = torch.nn.parallel.DistributedDataParallel(self.hq_mask_decoder, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
-        else:
-            raise NotImplementedError("Distributed training supported on this machine")
-
-
-
-
-
 
     def set_image(self, image_dir:str):
         raise NotImplementedError("")
@@ -204,6 +191,16 @@ class Hq44kSamEngine(Engine):
     def train(self, args:dict):
         pass
 
+    def distribute(self, dist_args):
+        if torch.cuda.is_available():
+            self.strategy.predictor.to(device=dist_args.device)
+            self.strategy.hq_mask_decoder.to(device=dist_args.device)
+            self.strategy.predictor = torch.nn.parallel.DistributedDataParallel(self.strategy.predictor, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
+            self.strategy.hq_mask_decoder = torch.nn.parallel.DistributedDataParallel(self.strategy.hq_mask_decoder, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
+        else:
+            raise NotImplementedError("Distributed training supported on this machine")
+
+
     @torch.no_grad()
     def demo(self,):
         pass 
@@ -220,8 +217,7 @@ class Hq44kSamEngine(Engine):
         torch.manual_seed(seed)
         np.random.seed(seed)
         random.seed(seed)
-
-        self.strategy.distribute(args)
+        self.distribute(args)
 
         device = self.strategy.predictor.device
         valid_im_gt_list = get_im_gt_name_dict(self.valid_datasets, flag="valid")
