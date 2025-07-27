@@ -1,21 +1,11 @@
 model:
-  name: sam
-  checkpoint: ../pretrained_checkpoint/sam_vit_l.pth
-  hq_checkpoint: ../pretrained_checkpoint/sam_hq_vit_l.pth
-  retore_model: ../pretrained_checkpoint/epoch_11.pth
-  model_type: vit_l 
-  device: cuda
+  model_type: vit_l
+  checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
+  seed: 42
+  output: ./output/hq44k/base_l
+  restore_model:  work_dirs/hq_sam_vit_l/epoch_11.pth
 
-
-data:
-  config_file: ../sam-hq/seginw/GroundingDINO/groundingdino/config/GroundingDINO_SwinB_cfg.py
-  checkpoint_path: ../pretrained_checkpoint/groundingdino_swinb_cogcoor.pth
-  image_dir: ../data/seginw/Bottles/valid
-  anno_path: ../data/seginw/Bottles/valid/_annotations_min1cat.coco.json
-  num_select: 300
-  num_workers: 4
-  device: cuda
   
-inference:
-  strategy: point
-  threshold: 0.5
+
+
+

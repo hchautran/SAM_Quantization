@@ -2,10 +2,7 @@ from typing import List
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
-from segment_anything import  SamPredictor
 from typing import Union
-from sam2.sam2_video_predictor import SAM2VideoPredictor
-from sam2.sam2_image_predictor import SAM2ImagePredictor
 from PIL import Image
 
 
@@ -19,11 +16,11 @@ class InferenceStrategy(ABC):
         pass
 
     @abstractmethod
-    def build_predictor(self)-> Union[SAM2VideoPredictor, SAM2ImagePredictor, SamPredictor]:
+    def build_predictor(self):
         pass
 
     @abstractmethod
-    def set_image(self, image_dir:str):
+    def set_image(self, image_dir:str=None, image_torch:torch.Tensor=None):
         pass
 
     @abstractmethod
@@ -99,19 +96,17 @@ class Engine(ABC):
     def strategy(self, strategy:InferenceStrategy):
         self._strategy = strategy
 
+    
 
+    @abstractmethod
     def demo(
         self, 
         prompts:dict, 
         image_dir: torch.Tensor, 
         show_image:bool= False
     ):
-        self.strategy.set_image(image_dir)
-        masks, scores, logits = self.strategy.inference(prompts)
-        if show_image:
-            result_path = './demo.jpg' 
-            self.strategy.visualize(prompts, masks, scores, result_path)
-        return masks, scores, logits
+        pass
+
 
 
 

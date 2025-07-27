@@ -77,14 +77,15 @@ class Hq44kInferenceStrategy(InferenceStrategy):
 
     def build_predictor(self, dist_args):
         self.predictor = sam_model_registry[self.model_type](checkpoint=self.checkpoint)
+
         if torch.cuda.is_available():
             self.predictor.to(device=dist_args.device)
-            self.net.to(device=dist_args.device)
-
-            self.predictor = torch.nn.parallel.DistributedDataParallel(self.predictor, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
+            self.net.to(dist_args.device)
             self.net = torch.nn.parallel.DistributedDataParallel(self.net, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
-            net_without_ddp = self.net.module
+            self.predictor = torch.nn.parallel.DistributedDataParallel(self.predictor, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
 
+
+        net_without_ddp = self.net.module
         if self.restore_model:
             print("restore model from:", self.restore_model)
             if torch.cuda.is_available():
@@ -95,8 +96,9 @@ class Hq44kInferenceStrategy(InferenceStrategy):
 
 
 
-    def set_image(self, image_dir:str):
-        raise NotImplementedError("")
+    def set_image(self, image_dir:str, image_torch:torch.Tensor=None):
+        image_embeddings, interm_embeddings = self.image_encoder(input_images)
+
 
     def set_video(self, video_dir:str):
         raise NotImplementedError("Video inference is not supported for SAM")
@@ -109,6 +111,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
         batch_len = len(batched_output)
         encoder_embedding = torch.cat([batched_output[i_l]['encoder_embedding'] for i_l in range(batch_len)], dim=0)
         image_pe = [batched_output[i_l]['image_pe'] for i_l in range(batch_len)]
+
         sparse_embeddings = [batched_output[i_l]['sparse_embeddings'] for i_l in range(batch_len)]
         dense_embeddings = [batched_output[i_l]['dense_embeddings'] for i_l in range(batch_len)]
         
@@ -124,9 +127,15 @@ class Hq44kInferenceStrategy(InferenceStrategy):
 
         return masks_sam, masks_hq 
 
+    def demo(self, prompts:dict, image_dir:str, show_image:bool=False):
+        self.set_image(image_dir)
+        masks_sam, masks_hq = self.inference(prompts)
+        if show_image:
+            self.visualize(prompts, masks_hq, image_dir)
+        return masks_sam, masks_hq
         
     def visualize(self, prompts:dict, masks:torch.Tensor, scores:torch.Tensor, result_path:str):
-        raise NotImplementedError("")
+        show_res_multi(masks, scores, prompts['point_coords'], prompts['point_labels'], prompts['box'], result_path, self.image)
         
 
 
@@ -209,12 +218,10 @@ class Hq44kSamEngine(Engine):
     def train(self, args:dict):
         pass
 
-    @torch.no_grad()
-    def demo(self,):
-        pass 
+
+    
 
 
-    @torch.no_grad()
     def evaluate(self, args, visualize:bool=False):
         misc.init_distributed_mode(args)
         print('world size: {}'.format(args.world_size))
@@ -254,8 +261,9 @@ class Hq44kSamEngine(Engine):
                     labels_ori = labels_ori.cuda()
 
                 imgs = inputs_val.permute(0, 2, 3, 1).cpu().numpy()
+                
                 labels_box = misc.masks_to_boxes(labels_val[:,0,:,:])
-
+                input_keys = ['box']
                 batched_input = []
                 for b_i in range(len(imgs)):
                     dict_input = dict()
@@ -265,9 +273,11 @@ class Hq44kSamEngine(Engine):
                     dict_input['original_size'] = imgs[b_i].shape[:2]
                     batched_input.append(dict_input)
 
-                _, masks_hq = self.strategy.inference(batched_input)
-                iou = compute_iou(masks_hq,labels_ori)
-                boundary_iou = compute_boundary_iou(masks_hq,labels_ori)
+                with torch.no_grad():
+                    _, masks_hq = self.strategy.inference(batched_input)
+                    iou = compute_iou(masks_hq,labels_ori)
+                    boundary_iou = compute_boundary_iou(masks_hq,labels_ori)
+
                 loss_dict = {"val_iou_"+str(k): iou, "val_boundary_iou_"+str(k): boundary_iou}
                 loss_dict_reduced = misc.reduce_dict(loss_dict)
                 metric_logger.update(**loss_dict_reduced)

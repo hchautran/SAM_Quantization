@@ -1,19 +1,8 @@
-
-model_type: vit_b
-checkpoint: ./pretrained_checkpoint/sam_vit_b.pth
-device: cuda
-seed: 42
-output: ./output/hq44k/base_b
-input_size: [1024,1024]
-batch_size_train: 4
-batch_size_valid: 1
-model_save_freq: 1
-visualize: False
-restore_model:  work_dirs/hq_sam_vit_b/epoch_11.pth
-lr: 1e-3
-lr_drop_epoch: 10
-max_epoch_num: 12
-start_epoch: 0
+model:
+  model_type: vit_b
+  checkpoint: ./pretrained_checkpoint/sam_vit_b.pth
+  output: ./output/hq44k/base_b
+  restore_model:  work_dirs/hq_sam_vit_b/epoch_11.pth
 
   
 

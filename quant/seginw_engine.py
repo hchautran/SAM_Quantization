@@ -18,11 +18,6 @@ from groundingdino.datasets.cocogrounding_eval import CocoGroundingEvaluator
 from utils.coco import CocoDetection, PostProcessSeginw
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
-from train.utils.dataloader import get_im_gt_name_dict, create_dataloaders, Resize
-from train.utils.misc import   F, random
-import train.utils.misc as misc
-from train.train import compute_iou, compute_boundary_iou, show_anns, MaskDecoderHQ
-from train.segment_anything_training import sam_model_registry
 
 # segment anything
 from seginw.segment_anything import (
@@ -73,6 +68,13 @@ class SeginwInferenceStrategy(InferenceStrategy):
             masks, scores, logits = self.predictor.predict(**inputs)
         else:
             masks, scores, logits = self.predictor.predict_torch(**inputs)
+        return masks, scores, logits
+
+    def demo(self, prompts:dict, image_dir:str, show_image:bool=False):
+        self.set_image(image_dir)
+        masks, scores, logits = self.inference(prompts, use_torch=True)
+        if show_image:
+            self.visualize(prompts, masks, scores, image_dir)
         return masks, scores, logits
 
         
@@ -147,6 +149,7 @@ class SeginwSamEngine(Engine):
             json_file = []
             start = time.time()
             progress_bar = tqdm(data_loader, desc=f"Evaluating {object}", total=len(data_loader))
+            
             for i, (images, targets) in enumerate(data_loader):
                 # get images and captions
                 images = images.tensors.to(self.strategy.device)
@@ -222,11 +225,9 @@ class SeginwSamEngine(Engine):
 
 if __name__ == "__main__":
 
-    # config = OmegaConf.load('config/coco/base_h.yaml')
-    config = OmegaConf.load('config/hq44k/base_h.yaml')
+    config = OmegaConf.load('config/coco/base_h.yaml')
 
-    # engine = SeginwSamEngine(SamInferenceStrategy(config.model))
-    engine = Hq44kSamEngine(SeginwInferenceStrategy(config.model))
+    engine = SeginwSamEngine(SeginwInferenceStrategy(config.model))
     # breakpoint()
     engine.evaluate(config.data)
     
