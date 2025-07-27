@@ -88,14 +88,9 @@ def quantize_activation_per_group_absmax_token_dim(t, group_size, n_bits=8):
     # Reshape to group the last dimension: (..., features) -> (..., num_groups, group_size)
     new_shape = t_shape[:-1] + (last_dim // group_size, group_size)
     t_grouped = t.view(new_shape)
-    
-    # Reshape to (...*num_groups, group_size) so each group becomes a "token"
+
     t_reshaped = t_grouped.view(-1, group_size)
-    
-    # Apply per-token quantization (each group gets its own scale)
     t_quantized = quantize_activation_per_token_absmax(t_reshaped, n_bits=n_bits)
-    
-    # Reshape back to original shape
     t_quantized = t_quantized.view(t_shape)
     
     return t_quantized

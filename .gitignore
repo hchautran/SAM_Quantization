@@ -4,6 +4,10 @@ checkpoint_sam/
 sam-hq/
 sam2/
 segment-anything/
+data/
+hq_ckts/
+pretrained_checkpoint/
+
 
 # Exclude Python cache files
 __pycache__/
