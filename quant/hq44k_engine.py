@@ -6,21 +6,12 @@ import cv2
 import torch
 from engine import InferenceStrategy, Engine
 import numpy as np
-import matplotlib.pyplot as plt
-from utils.sam_vis_utils import show_res_multi
 from tqdm.auto import tqdm
 from train.utils.dataloader import get_im_gt_name_dict, create_dataloaders, Resize
 from train.utils.misc import   F, random
 import train.utils.misc as misc
 from train.train import compute_iou, compute_boundary_iou, show_anns, MaskDecoderHQ
 from train.segment_anything_training import sam_model_registry
-
-# segment anything
-from seginw.segment_anything import (
-    build_sam,
-    build_sam_hq,
-    SamPredictor
-)
 import cv2
 from tqdm.auto import tqdm
 import json
@@ -69,28 +60,29 @@ def get_args_parser():
 
 class Hq44kInferenceStrategy(InferenceStrategy):
     def __init__(self, args):
-        self.net = MaskDecoderHQ(args.model_type) 
+        # build sam encoder
         self.checkpoint = args.checkpoint
         self.model_type = args.model_type
         self.restore_model = args.restore_model
         self.predictor = None
 
-    def build_predictor(self, dist_args):
+    def build_predictor(self):
+        self.hq_mask_decoder = MaskDecoderHQ(self.model_type) 
         self.predictor = sam_model_registry[self.model_type](checkpoint=self.checkpoint)
-        if torch.cuda.is_available():
-            self.predictor.to(device=dist_args.device)
-            self.net.to(device=dist_args.device)
-
-            self.predictor = torch.nn.parallel.DistributedDataParallel(self.predictor, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
-            self.net = torch.nn.parallel.DistributedDataParallel(self.net, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
-            net_without_ddp = self.net.module
-
         if self.restore_model:
             print("restore model from:", self.restore_model)
-            if torch.cuda.is_available():
-                net_without_ddp.load_state_dict(torch.load(self.restore_model))
-            else:
-                net_without_ddp.load_state_dict(torch.load(self.restore_model, map_location="cpu"))
+            self.hq_mask_decoder.load_state_dict(torch.load(self.restore_model))
+
+    def distribute(self, dist_args):
+        if torch.cuda.is_available():
+            self.predictor.to(device=dist_args.device)
+            self.hq_mask_decoder.to(device=dist_args.device)
+            self.predictor = torch.nn.parallel.DistributedDataParallel(self.predictor, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
+            self.hq_mask_decoder = torch.nn.parallel.DistributedDataParallel(self.hq_mask_decoder, device_ids=[dist_args.gpu], find_unused_parameters=dist_args.find_unused_params)
+        else:
+            raise NotImplementedError("Distributed training supported on this machine")
+
+
 
 
 
@@ -104,15 +96,17 @@ class Hq44kInferenceStrategy(InferenceStrategy):
     @torch.inference_mode()
     @torch.no_grad()
     def inference(self, inputs:dict):
-        self.net.eval()
+        self.hq_mask_decoder.eval()
+        # encoder image and prompts
         batched_output, interm_embeddings = self.predictor(inputs, multimask_output=False) 
         batch_len = len(batched_output)
         encoder_embedding = torch.cat([batched_output[i_l]['encoder_embedding'] for i_l in range(batch_len)], dim=0)
         image_pe = [batched_output[i_l]['image_pe'] for i_l in range(batch_len)]
         sparse_embeddings = [batched_output[i_l]['sparse_embeddings'] for i_l in range(batch_len)]
         dense_embeddings = [batched_output[i_l]['dense_embeddings'] for i_l in range(batch_len)]
-        
-        masks_sam, masks_hq = self.net(
+
+        # decode high quality mask
+        masks_sam, masks_hq = self.hq_mask_decoder(
             image_embeddings=encoder_embedding,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_embeddings,
@@ -135,6 +129,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
 class Hq44kSamEngine(Engine):
     def __init__(self, strategy:InferenceStrategy):
         super().__init__(strategy)
+        self.strategy.build_predictor()
         dataset_dis = {"name": "DIS5K-TR",
                     "im_dir": "./data/DIS5K/DIS-TR/im",
                     "gt_dir": "./data/DIS5K/DIS-TR/gt",
@@ -226,7 +221,8 @@ class Hq44kSamEngine(Engine):
         np.random.seed(seed)
         random.seed(seed)
 
-        self.strategy.build_predictor(args)
+        self.strategy.distribute(args)
+
         device = self.strategy.predictor.device
         valid_im_gt_list = get_im_gt_name_dict(self.valid_datasets, flag="valid")
         valid_dataloaders, _ = create_dataloaders(
@@ -237,17 +233,17 @@ class Hq44kSamEngine(Engine):
             batch_size=args.batch_size_valid,
             training=False
         )
-        print("Validating...")
         test_stats = {}
         for k in range(len(valid_dataloaders)):
             metric_logger = misc.MetricLogger(delimiter="  ")
             valid_dataloader = valid_dataloaders[k]
             print('valid_dataloader len:', len(valid_dataloader))
             progress_bar = tqdm(total=len(valid_dataloader), desc=f"Validating {self.valid_datasets[k]['name']}")
-
-            for data_val in valid_dataloader:
+            start = time.time()
+            for data_val in metric_logger.log_every(valid_dataloader, 2):
                 _, inputs_val, labels_val, _, labels_ori = data_val['imidx'], data_val['image'], data_val['label'], data_val['shape'], data_val['ori_label']
 
+                # prepare image & prompts 
                 if torch.cuda.is_available():
                     inputs_val = inputs_val.cuda()
                     labels_val = labels_val.cuda()
@@ -266,12 +262,14 @@ class Hq44kSamEngine(Engine):
                     batched_input.append(dict_input)
 
                 _, masks_hq = self.strategy.inference(batched_input)
+                # compute metric & update
                 iou = compute_iou(masks_hq,labels_ori)
                 boundary_iou = compute_boundary_iou(masks_hq,labels_ori)
                 loss_dict = {"val_iou_"+str(k): iou, "val_boundary_iou_"+str(k): boundary_iou}
                 loss_dict_reduced = misc.reduce_dict(loss_dict)
                 metric_logger.update(**loss_dict_reduced)
                 progress_bar.update(1)
+            total_time = time.time() - start
 
             print('=' * 100) 
             # gather the stats from all processes
@@ -279,6 +277,8 @@ class Hq44kSamEngine(Engine):
             print("Averaged stats:", metric_logger)
             resstat = {k: meter.global_avg for k, meter in metric_logger.meters.items() if meter.count > 0}
             test_stats.update(resstat)
+            test_stats['total_time'] = f'{total_time/1e9:.2f}'
+            
             print(test_stats)
 
         return test_stats

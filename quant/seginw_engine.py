@@ -225,11 +225,11 @@ class SeginwSamEngine(Engine):
 
 if __name__ == "__main__":
 
-    config = OmegaConf.load('config/coco/base_h.yaml')
+    args = OmegaConf.load('config/coco/base_h.yaml')
 
-    engine = SeginwSamEngine(SeginwInferenceStrategy(config.model))
+    engine = SeginwSamEngine(SeginwInferenceStrategy(args.model))
     # breakpoint()
-    engine.evaluate(config.data)
+    engine.evaluate(args.data)
     
     prompts = {
         'point_coords': None, 
