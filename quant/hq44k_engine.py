@@ -273,7 +273,7 @@ class Hq44kSamEngine(Engine):
             print("Averaged stats:", metric_logger)
             resstat = {k: meter.global_avg for k, meter in metric_logger.meters.items() if meter.count > 0}
             test_stats.update(resstat)
-            test_stats['total_time'] = f'{total_time/1e9:.2f}'
+            test_stats['total_time'] = f'{total_time:2f}'
             
             print(test_stats)
 
