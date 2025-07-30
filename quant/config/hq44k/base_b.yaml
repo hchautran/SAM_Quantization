@@ -1,0 +1,10 @@
+model:
+  model_type: vit_b
+  checkpoint: ./pretrained_checkpoint/sam_vit_b.pth
+  output: ./output/hq44k/base_b
+  restore_model:  work_dirs/hq_sam_vit_b/epoch_11.pth
+
+  
+
+
+
