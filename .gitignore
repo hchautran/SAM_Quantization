@@ -7,7 +7,7 @@ segment-anything/
 data/
 hq_ckts/
 pretrained_checkpoint/
-
+quarot/fast-hadamard-transform/
 
 # Exclude Python cache files
 __pycache__/

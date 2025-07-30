@@ -1,3 +1,16 @@
+
+import torch
+
+
+
+def get_rope_function_name(model):
+    # SAM models don't use rotary position embeddings
+    # They use standard attention with positional encodings added to inputs
+    # Return None to indicate no RoPE function exists
+    return None
+
+def get_layers(model):
+    return model.mask_decoder.transformer.layers
 def replace_modules(
     root: torch.nn.Module,
     type_to_replace,
@@ -16,18 +29,37 @@ def replace_modules(
         new_module_factory: a function that given a module that should be replaced
             produces a module to replace it with.
     """
-    for name, module in root.named_children():
-        new_module = None
-        if isinstance(module, type_to_replace):
-            if replace_layers:  # layernorm_fusion.replace_layers case where transformer layers are replaced
-                new_module = new_module_factory(module, int(name))
-            else:  # layernorm_fusion.fuse_modules case where layernorms are fused
-                new_module = new_module_factory(module)
-        elif len(list(module.children())) > 0:
-            replace_modules(module, type_to_replace, new_module_factory, replace_layers)
+    # Collect modules to replace
+    modules_to_replace = []
 
+    for name, module in root.named_modules():
+        
+        # if ("mask_decoder" in name and "norm2" in name) or ("image_encoder" in name and "norm" in name):
+        if "image_encoder" in name and "norm" in name :
+
+            if isinstance(module, type_to_replace):
+                modules_to_replace.append((name, module))
+
+    # Perform replacements
+    for name, module in modules_to_replace:
+        new_module = None
+        if replace_layers:  # layernorm_fusion.replace_layers case where transformer layers are replaced
+            new_module = new_module_factory(module, int(name))
+        else:  # layernorm_fusion.fuse_modules case where layernorms are fused
+            new_module = new_module_factory(module)
         if new_module is not None:
-            setattr(root, name, new_module)
+            # Use `setattr` to replace the module
+            parent_module, attr_name = _get_parent_module_and_attr(root, name)
+            setattr(parent_module, attr_name, new_module)
+
+
+def _get_parent_module_and_attr(root: torch.nn.Module, full_name: str):
+    """Helper function to get the parent module and attribute name for a given module."""
+    parts = full_name.split(".")
+    parent = root
+    for part in parts[:-1]:
+        parent = getattr(parent, part)
+    return parent, parts[-1]
 
 
 class RMSN(torch.nn.Module):

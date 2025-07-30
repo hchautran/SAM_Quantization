@@ -1,5 +1,15 @@
 import math
 import torch
+import sys
+import os
+import transformers
+import argparse
+
+# Add the RTN_quantization directory to the path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+rtn_quantization_dir = os.path.join(parent_dir, 'RTN_quantization')
+sys.path.append(rtn_quantization_dir)
 from per_tensor_channel_group import (
     quantize_activation_per_token_absmax,
     quantize_activation_per_tensor_absmax,
@@ -9,6 +19,73 @@ from hadamard_utils import matmul_hadU_cuda, fast_hadamard_transform
 
 
 
+
+
+def parser_gen():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--device', type=str, default='cuda:0', choices=['cuda', 'cpu'])
+    parser.add_argument('--seed', type=int, default=0, help='Random Seed for HuggingFace and PyTorch')
+    parser.add_argument('--hf_token', type=str, default=None)
+    parser.add_argument('--bsz', type=int, default=32,
+                        help='Batch-size for PPL evaluation (default:32)')
+    
+    parser.add_argument('--hidden_size_image_en', type=int, default=1024)
+    parser.add_argument('--hidden_size_mask_de', type=int, default=256,
+                        help='Hidden Size for Mask Decoder (default: 256) [b,l,h]~[]')
+    parser.add_argument('--num_attention_head_image_en', type = int, default=64,
+                        help='Number of Attention Heads for Image Encoder (default: 8)')
+    parser.add_argument('--num_attention_head_mask_de', type = int, default=32,
+                        help='Number of Attention Heads for Mask Decoder (default: 8)')
+    
+
+
+    # Rotation Arguments
+    parser.add_argument('--rotate', action=argparse.BooleanOptionalAction, default=True, 
+                        help='''Rotate the moodel. This will include online rotation for down-projection and
+                        out-projection. Note that this does not apply rotation to the K/Q and they will be rotated
+                        if we want to quantize the Keys''')
+    parser.add_argument('--rotate_mode', type=str, default='hadamard', choices=['hadamard', 'random'])
+    parser.add_argument('--rotation_seed', type=int, default=-1,
+                        help='Random Seed for generating random matrix!!')
+    parser.add_argument('--fp32_had', action=argparse.BooleanOptionalAction, default=False,
+                        help='Apply Hadamard rotation in FP32 (default: False)')
+    parser.add_argument('--int8_down_proj', action=argparse.BooleanOptionalAction, default=False,
+                        help='Use INT8 for Down Projection! If this set, both weights and activations of this layer will be in INT8')
+    
+    
+    # KV-Cache Quantization Arguments
+    parser.add_argument('--v_bits', type=int, default=16,
+                        help='''Number of bits for V-cache quantization. 
+                        Note that quantizing the V-cache does not need any other rotation''')
+    parser.add_argument('--v_groupsize', type=int, default=-1)
+    parser.add_argument('--v_asym', action=argparse.BooleanOptionalAction, default=False,
+                        help='ASymmetric V-cache quantization')
+    parser.add_argument('--v_clip_ratio', type=float, default=1.0,
+        help='Clip ratio for v-cache quantization. new_max = max * clip_ratio')
+    
+    parser.add_argument('--k_bits', type=int, default=16,
+                        help='''Number of bits for K-cache quantization. 
+                        Note that quantizing the K-cache needs another rotation for the keys/queries''')
+    parser.add_argument('--k_groupsize', type=int, default=-1)
+    parser.add_argument('--k_asym', action=argparse.BooleanOptionalAction, default=False, 
+                        help='ASymmetric K-cache quantization')
+    parser.add_argument('--k_pre_rope', action=argparse.BooleanOptionalAction, default=False, 
+                        help='Pre-RoPE quantization for K-cache (not Supported yet!)')
+    parser.add_argument('--k_clip_ratio', type=float, default=1.0,
+        help='Clip ratio for k-cache quantization. new_max = max * clip_ratio')
+
+    # WandB Arguments
+    parser.add_argument('--wandb', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--wandb_id', type=str, default=None)
+    parser.add_argument('--wandb_project', type=str, default=None)
+
+    #Experiments Arguments
+    args = parser.parse_args()
+    
+    # quant_type = f'w{args.w_bits}a{args.a_bits}_{args.rotate_mode}'
+   
+    return args
 
 
 class ActQuantizer(torch.nn.Module):
@@ -148,7 +225,8 @@ class ActQuantWrapper(torch.nn.Module):
         self.online_partial_had = False
         self.had_dim = 0
         self.fp32_had = False
-        self.quatize_output = True  
+        self.quantize_output = False
+        self.quantize_input = False
         
 
     def extra_repr(self) -> str:
@@ -183,17 +261,57 @@ class ActQuantWrapper(torch.nn.Module):
                 x = x.to(x_dtype)
             x = x.reshape(init_shape)
 
-        # Quantize the input
-        x = self.act_quant(x)
+        if self.quantize_input :
+            x = self.act_quant(x)
 
         # Pass through the wrapped module
         x = self.module(x).to(x_dtype)
         
-        if self.quatize_output:
+        if self.quantize_output:
             x = self.act_quant(x)
             
         return x
-    
+
+
+def add_actquant(module, name='', layers=[torch.nn.Linear,
+                                        ActQuantWrapper,
+                                        transformers.models.falcon.modeling_falcon.FalconLinear]):
+    if isinstance(module, ActQuantWrapper):
+        return
+    for attr in dir(module):
+        tmp = getattr(module, attr)
+        if type(tmp) in layers:
+            setattr(module, attr, ActQuantWrapper(tmp))
+        if type(tmp) == torch.nn.Sequential:
+            replaced = []
+            for i, child in enumerate(tmp.children()):
+                if type(child) in layers:
+                    replaced.append(ActQuantWrapper(child))
+                else:
+                    replaced.append(child)
+            setattr(module, attr, torch.nn.Sequential(*replaced))
+        if type(tmp) == torch.nn.ModuleList:
+            replaced = []
+            for i, child in enumerate(tmp.children()):
+                if type(child) in layers:
+                    replaced.append(ActQuantWrapper(child))
+                else:
+                    replaced.append(child)
+            setattr(module, attr, torch.nn.ModuleList(replaced))
+    for name1, child in module.named_children():
+        add_actquant(child, name + '.' + name1 if name != '' else name1, layers)
+        
+def find_qlayers(module, layers=[torch.nn.Linear,
+                                ActQuantWrapper], name=''):
+    if type(module) in layers:
+        return {name: module}
+    res = {}
+    for name1, child in module.named_children():
+        res.update(find_qlayers(
+            child, layers=layers, name=name + '.' + name1 if name != '' else name1
+        ))
+    return res
+
 def cleanup_memory(verbos=True) -> None:
     """Run GC and clear GPU memory."""
     import gc
@@ -216,7 +334,11 @@ def cleanup_memory(verbos=True) -> None:
         torch.cuda.empty_cache()
         memory_after = total_reserved_mem()
         if verbos:
-            logging.info(
+            print(
                 f"GPU memory{caller_name}: {memory_before / (1024 ** 3):.2f} -> {memory_after / (1024 ** 3):.2f} GB"
                 f" ({(memory_after - memory_before) / (1024 ** 3):.2f} GB)"
             )
+            # logging.info(
+            #     f"GPU memory{caller_name}: {memory_before / (1024 ** 3):.2f} -> {memory_after / (1024 ** 3):.2f} GB"
+            #     f" ({(memory_after - memory_before) / (1024 ** 3):.2f} GB)"
+            # )
