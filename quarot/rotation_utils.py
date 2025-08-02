@@ -275,15 +275,36 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
     """
     
     
-    #Image encoder attention input (qkv)
-    for block in model.image_encoder.blocks:
+    # block_test = block_test
+    # W = block_test.attn.qkv
+    # dtype = W.weight.dtype
+    # W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
+    # W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
+    # for block_test in model.image_encoder.blocks[1:-1]:
+    #     W = block_test.attn.proj
+    #     dtype = W.weight.data.dtype
+    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
+    #     W.weight.data = torch.matmul(Q_image_encoder.T, W_).to(device="cpu", dtype=dtype)
+    #     if W.bias is not None:
+    #         b = W.bias.data.to(device=args.device, dtype=torch.float64)
+    #         W.bias.data = torch.matmul(Q_image_encoder.T, b).to(device="cpu", dtype=dtype)
+            
+    #     W = block_test.mlp.lin1
+    #     dtype = W.weight.dtype
+    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
+    #     W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
+    
+   
+    # Image encoder attention input (qkv)
+    for block in model.image_encoder.blocks[1:]:
         W = block.attn.qkv
         dtype = W.weight.dtype
         W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
+       
     
     # Image encoder attention output (proj)
-    for block in model.image_encoder.blocks:
+    for block in model.image_encoder.blocks[1:]:
         W = block.attn.proj
         dtype = W.weight.data.dtype
         W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
@@ -327,21 +348,22 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
 
    
     # Image encoder MLP input (lin1)
-    for block in model.image_encoder.blocks[:]:
-        W = block.mlp.lin1
-        dtype = W.weight.dtype
-        W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-        W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
-    # Image encoder MLP output (lin2)
-    for block in model.image_encoder.blocks[:-1]:
-        W = block.mlp.lin2
-        dtype = W.weight.data.dtype
-        W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-        W.weight.data = torch.matmul(Q_image_encoder.T, W_).to(device="cpu", dtype=dtype)
-        apply_exact_had_to_linear(W, had_dim=-1, output=False)  # Apply exact (inverse) hadamard
-        if W.bias is not None:
-            b = W.bias.data.to(device=args.device, dtype=torch.float64)
-            W.bias.data = torch.matmul(Q_image_encoder.T, b).to(device="cpu", dtype=dtype)
+    # for block in model.image_encoder.blocks[1:-1]:
+    #     W = block.mlp.lin1
+    #     dtype = W.weight.dtype
+    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
+    #     W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
+        
+    # # Image encoder MLP output (lin2)
+    # for block in model.image_encoder.blocks[1:-1]:
+    #     W = block.mlp.lin2
+    #     dtype = W.weight.data.dtype
+    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
+    #     W.weight.data = torch.matmul(Q_image_encoder.T, W_).to(device="cpu", dtype=dtype)
+    #     apply_exact_had_to_linear(W, had_dim=-1, output=False)  # Apply exact (inverse) hadamard
+    #     if W.bias is not None:
+    #         b = W.bias.data.to(device=args.device, dtype=torch.float64)
+    #         W.bias.data = torch.matmul(Q_image_encoder.T, b).to(device="cpu", dtype=dtype)
     
     
     # # Mask decoder MLP input (first layer in MLP)
@@ -453,7 +475,7 @@ def rotate_model(model, args):
     Q_mask_decoder = get_orthogonal_matrix(args.hidden_size_mask_de,args.rotate_mode,device = args.device)
     
     
-    rotate_embeddings(model, Q_image_encoder,Q_mask_decoder,args)
+    # rotate_embeddings(model, Q_image_encoder,Q_mask_decoder,args)
     # rotate_head_sam(model, Q_mask_decoder,args)
     utils.cleanup_memory()
     rotate_model_sam(model,Q_image_encoder,Q_mask_decoder,args)
