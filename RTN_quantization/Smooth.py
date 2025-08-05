@@ -1,19 +1,6 @@
 import torch
 import torch.nn as nn
 
-from transformers.models.opt.modeling_opt import OPTDecoderLayer
-from transformers.models.bloom.modeling_bloom import BloomBlock
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
-from transformers.models.mistral.modeling_mistral import (
-    MistralDecoderLayer,
-    MistralRMSNorm,
-)
-from transformers.models.mixtral.modeling_mixtral import (
-    MixtralDecoderLayer,
-    MixtralRMSNorm,
-)
-from transformers.models.falcon.modeling_falcon import FalconDecoderLayer
-
 
 @torch.no_grad()
 def smooth_ln_fcs(ln, fcs, act_scales, alpha=0.5): 
