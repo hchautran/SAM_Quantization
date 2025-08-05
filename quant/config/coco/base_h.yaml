@@ -16,6 +16,7 @@ data:
   device: cuda
   save_json: True
 
+
 quantization:
   quanrtn: False
   quansmooth: False
