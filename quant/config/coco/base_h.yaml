@@ -17,4 +17,15 @@ data:
   save_json: True
 
 
+quantization:
+  quanrtn: False
+  quansmooth: False
+  quanro: False
+  act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
+  act_quant: per_token
+  weight_quant: per_channel
+  n_bits: 4
+  quantize_output: True
+
+
   

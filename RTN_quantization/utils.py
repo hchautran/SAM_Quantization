@@ -1,10 +1,8 @@
 import torch
 import torch.nn as nn
-from per_tensor_channel_group import W8A8Linear
-from Smooth import smooth_ln_fcs
+from .Smooth import smooth_ln_fcs
 
 
-from calibration import get_act_scales_sam
 import os
 import sys
 import numpy as np
@@ -20,7 +18,7 @@ from segment_anything import sam_model_registry, SamPredictor
 # Import transformer decoder layers for smooth_lm function
 
 def replace_linear_with_target_and_quantize(module, 
-                               target_class, module_name_to_exclude, 
+                               target_class,n_bit, module_name_to_exclude, 
                                weight_quant="per_channel", act_quant="per_token", 
                                quantize_output=False, group_size=None):
     for name, child in module.named_children():
@@ -28,8 +26,10 @@ def replace_linear_with_target_and_quantize(module,
         any([x == name for x in module_name_to_exclude]):
             
             # Use from_float method instead of manual creation
+            target_class.n_bits = n_bit
             new_module = target_class.from_float(
                 child, 
+                n_bits=n_bit,
                 weight_quant=weight_quant, 
                 act_quant=act_quant, 
                 quantize_output=quantize_output,
@@ -40,7 +40,7 @@ def replace_linear_with_target_and_quantize(module,
         else:
             # Recursively call the function for nested modules
             replace_linear_with_target_and_quantize(child, 
-                     target_class, module_name_to_exclude, 
+                     target_class,n_bit, module_name_to_exclude, 
                      weight_quant, act_quant, quantize_output, group_size)
 
 
@@ -75,6 +75,7 @@ def smooth_sam(model, act_scales, do_smooth_decoder=True, alpha=0.5, num_samples
                     if qkv_name in act_scales:
                         qkv_input_scales = act_scales[qkv_name]
                         smooth_ln_fcs(block.norm1, [block.attn.qkv], qkv_input_scales, alpha)
+                        print(f"Applied attention smoothing to {block_name}")
                 
                 # MLP smoothing: norm2 -> mlp (first layer in MLPBlock)
                 if hasattr(block, 'norm2') and hasattr(block, 'mlp'):
@@ -88,14 +89,6 @@ def smooth_sam(model, act_scales, do_smooth_decoder=True, alpha=0.5, num_samples
                             mlp_first_layer = getattr(block.mlp, attr_name)
                             mlp_name = f"{block_name}.mlp.{attr_name}"
                             break
-                    
-                    # If no standard names found, get the first Linear layer
-                    if mlp_first_layer is None:
-                        for name, module in block.mlp.named_children():
-                            if isinstance(module, nn.Linear):
-                                mlp_first_layer = module
-                                mlp_name = f"{block_name}.mlp.{name}"
-                                break
                     
                     if mlp_first_layer is not None and mlp_name in act_scales:
                         mlp_input_scales = act_scales[mlp_name]

@@ -1,0 +1,16 @@
+model:
+  model_type: vit_l
+  checkpoint: ./pretrained_checkpoint/sam_vit_l_0b3195.pth
+  seed: 42
+  output: ./output/hq44k/base_l
+  restore_model:  ./pretrained_checkpoint/epoch_11.pth
+
+quantization:
+  quanrtn: True
+  quansmooth: False
+  quanro: False
+  act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
+  act_quant: per_token
+  weight_quant: per_channel
+  n_bits: 4
+  quantize_output: True

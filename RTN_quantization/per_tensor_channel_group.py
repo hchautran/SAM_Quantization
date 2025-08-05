@@ -88,14 +88,9 @@ def quantize_activation_per_group_absmax_token_dim(t, group_size, n_bits=8):
     # Reshape to group the last dimension: (..., features) -> (..., num_groups, group_size)
     new_shape = t_shape[:-1] + (last_dim // group_size, group_size)
     t_grouped = t.view(new_shape)
-    
-    # Reshape to (...*num_groups, group_size) so each group becomes a "token"
+
     t_reshaped = t_grouped.view(-1, group_size)
-    
-    # Apply per-token quantization (each group gets its own scale)
     t_quantized = quantize_activation_per_token_absmax(t_reshaped, n_bits=n_bits)
-    
-    # Reshape back to original shape
     t_quantized = t_quantized.view(t_shape)
     
     return t_quantized
@@ -109,11 +104,13 @@ class W8A8Linear(nn.Module):
         act_quant="per_token",
         quantize_output=False,
         group_size= None,
+        n_bit = 8,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.group_size = group_size
+        self.n_bits = n_bit
         self.register_buffer(
             "weight",
             torch.randn(
@@ -135,13 +132,13 @@ class W8A8Linear(nn.Module):
 
         if act_quant == "per_token":
             self.act_quant_name = "per_token"
-            self.act_quant = partial(quantize_activation_per_token_absmax, n_bits=8)
+            self.act_quant = partial(quantize_activation_per_token_absmax, n_bits=self.n_bits)
         elif act_quant == "per_tensor":
             self.act_quant_name = "per_tensor"
-            self.act_quant = partial(quantize_activation_per_tensor_absmax, n_bits=8)
+            self.act_quant = partial(quantize_activation_per_tensor_absmax, n_bits=self.n_bits)
         elif act_quant == "per_group_token":
             self.act_quant_name = "per_group_token"
-            self.act_quant = partial(quantize_activation_per_group_absmax_token_dim, group_size=self.group_size, n_bits=8)
+            self.act_quant = partial(quantize_activation_per_group_absmax_token_dim, group_size=self.group_size, n_bits=self.n_bits)
         else:
             raise ValueError(f"Invalid act_quant: {act_quant}")
 
@@ -168,7 +165,7 @@ class W8A8Linear(nn.Module):
 
     @staticmethod
     def from_float(
-        module, weight_quant="per_channel", act_quant="per_token", quantize_output=False  , group_size=None
+        module, n_bits,weight_quant="per_channel", act_quant="per_token", quantize_output=False  , group_size=None
     ):
         assert isinstance(module, torch.nn.Linear)
         new_module = W8A8Linear(
@@ -181,15 +178,15 @@ class W8A8Linear(nn.Module):
         )
         if weight_quant == "per_channel":
             new_module.weight = quantize_weight_per_channel_absmax(
-                module.weight, n_bits=8
+                module.weight, n_bits=n_bits
             )  # use 8-bit integer for weight
         elif weight_quant == "per_tensor":
             new_module.weight = quantize_weight_per_tensor_absmax(
-                module.weight, n_bits=8
+                module.weight, n_bits=n_bits
             )
         elif weight_quant == "per_group":
             new_module.weight = quantize_weight_per_group_absmax_input_features(
-                module.weight, group_size,n_bits=8
+                module.weight, group_size,n_bits=n_bits
             )
         else:
             raise ValueError(f"Invalid weight_quant: {weight_quant}")

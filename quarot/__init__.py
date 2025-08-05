@@ -1,0 +1,1 @@
+from .hadamard_utils import matmul_hadU_cuda
