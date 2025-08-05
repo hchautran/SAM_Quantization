@@ -8,7 +8,6 @@ from engine import InferenceStrategy, Engine
 import numpy as np
 import matplotlib.pyplot as plt
 from utils.sam_vis_utils import show_res_multi
-
 from groundingdino.models import build_model
 import groundingdino.datasets.transforms as T
 from groundingdino.util import box_ops, get_tokenlizer
