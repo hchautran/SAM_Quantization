@@ -8,7 +8,8 @@ data/
 hq_ckts/
 pretrained_checkpoint/
 quarot/fast-hadamard-transform/
-
+sam2_ckts/
+demo/
 # Exclude Python cache files
 __pycache__/
 *.pyc

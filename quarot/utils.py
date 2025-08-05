@@ -4,7 +4,7 @@ import sys
 import os
 import transformers
 import argparse
-
+import ipdb
 # Add the RTN_quantization directory to the path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
@@ -17,6 +17,8 @@ from per_tensor_channel_group import (
 )
 from hadamard_utils import matmul_hadU_cuda, fast_hadamard_transform
 
+import numpy as np
+
 
 
 
@@ -25,10 +27,11 @@ def parser_gen():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--device', type=str, default='cuda:0', choices=['cuda', 'cpu'])
-    parser.add_argument('--seed', type=int, default=0, help='Random Seed for HuggingFace and PyTorch')
+    parser.add_argument('--seed', type=int, default=123, help='Random Seed for HuggingFace and PyTorch')
     parser.add_argument('--hf_token', type=str, default=None)
     parser.add_argument('--bsz', type=int, default=32,
                         help='Batch-size for PPL evaluation (default:32)')
+    parser.add_argument('--model_type', type=str, default="vit_l",)
     
     parser.add_argument('--hidden_size_image_en', type=int, default=1024)
     parser.add_argument('--hidden_size_mask_de', type=int, default=256,
@@ -87,7 +90,46 @@ def parser_gen():
    
     return args
 
+def hadamard_matrix(nh, dh):
+    """
+    Generates a Hadamard matrix of size (nh * dh) where nh and dh are powers of 2.
 
+    Parameters:
+    nh (int): Size of the Hadamard matrix for the first dimension (must be a power of 2).
+    dh (int): Size of the Hadamard matrix for the second dimension (must be a power of 2).
+
+    Returns:
+    np.ndarray: Hadamard matrix of size (nh * dh, dh).
+    """
+    # Generate Hadamard matrix of size nh
+    H_nh = np.array([[1]])
+    while H_nh.shape[0] < nh:
+        H_nh = np.block([[H_nh, H_nh], [H_nh, -H_nh]])
+
+    I_dh = np.eye(dh)
+
+    return np.kron(H_nh, I_dh)
+def hadamard_matrix_transposed(nh, dh):
+    """
+    Generates the matrix I_{nh} X H_{dh} where nh and dh are powers of 2.
+
+    Parameters:
+    nh (int): Size of the identity matrix for the first dimension (must be a power of 2).
+    dh (int): Size of the Hadamard matrix for the second dimension (must be a power of 2).
+
+    Returns:
+    np.ndarray: The matrix I_{nh} X H_{dh}.
+    """
+    # Generate Hadamard matrix of size dh
+    H_dh = np.array([[1]])
+    while H_dh.shape[0] < dh:
+        H_dh = np.block([[H_dh, H_dh], [H_dh, -H_dh]])
+
+    # Create identity matrix of size nh
+    I_nh = np.eye(nh)
+
+    # Return the matrix I_nh X H_dh
+    return np.kron(I_nh, H_dh)
 class ActQuantizer(torch.nn.Module):
     '''
         A class for quantizing the activations. We support per-token, per-tensor, 
@@ -247,11 +289,16 @@ class ActQuantWrapper(torch.nn.Module):
                 x = x.float()
 
             init_shape = x.shape
+            x=x.reshape(init_shape[0],init_shape[1]*init_shape[2], init_shape[3])
+            
             if self.K == 1:
                 x = fast_hadamard_transform.hadamard_transform(
                     x.reshape(-1, init_shape[-1] // self.had_dim, self.had_dim).transpose(1, 2),
                     scale=1 / math.sqrt(init_shape[-1] // self.had_dim)
                 ).transpose(1, 2)
+                # Had_I = torch.tensor(hadamard_matrix(init_shape[-1] // self.had_dim, self.had_dim), device=x.device, dtype=x.dtype)
+                # torch.set_printoptions(threshold=torch.inf)
+                # x = x @ Had_I / math.sqrt(init_shape[-1] // self.had_dim)
             else:
                 x = (self.had_K.to(x.dtype) @ x.reshape(-1, init_shape[-1] // self.had_dim, self.had_dim)) / math.sqrt(
                     init_shape[-1] // self.had_dim

@@ -4,9 +4,12 @@ import typing
 import utils
 import transformers
 import tqdm, math
+import torch.nn as nn
 
+from functools import partial
 from hadamard_utils import random_hadamard_matrix, apply_exact_had_to_linear, is_pow2
 from fast_hadamard_transform import hadamard_transform
+
 
 def fuse_ln_linear(layernorm: torch.nn.Module, linear_layers: typing.Iterable[torch.nn.Linear]) -> None:
     """
@@ -25,9 +28,6 @@ def fuse_ln_linear(layernorm: torch.nn.Module, linear_layers: typing.Iterable[to
             linear.bias.data = linear.bias.data.double() + torch.matmul(W_, layernorm.bias.double())
             linear.bias.data = linear.bias.data.to(linear_dtype)
             
-
-
-################## move this function to model_utils.py ##################
 def get_embeddings_sam(model) -> list[torch.nn.Module]:
     
     """
@@ -40,18 +40,9 @@ def get_embeddings_sam(model) -> list[torch.nn.Module]:
     if hasattr(model.image_encoder, 'patch_embed') and hasattr(model.image_encoder.patch_embed, 'proj'):
         embeddings.append(model.image_encoder.patch_embed.proj)
     
-    
-    # Mask decoder embeddings
-    # if hasattr(model.mask_decoder, 'iou_token'):
-    #     embeddings.append(model.mask_decoder.iou_token)
-    # if hasattr(model.mask_decoder, 'mask_tokens'):
-    #     embeddings.append(model.mask_decoder.mask_tokens)
-    # if hasattr(model.mask_decoder, 'hf_token'):
-    #     embeddings.append(model.mask_decoder.hf_token)
-    
     return embeddings
 
-##################################################################################
+
 
 def bake_mean_into_linear(linear: torch.nn.Linear) -> None:
     """
@@ -175,7 +166,7 @@ def fuse_layer_norms_sam(model):
     )
 
 
-def random_orthogonal_matrix(size, device):
+def random_orthogonal_matrix(size, device,seed):
     """
     Generate a random orthogonal matrix of the specified size.
     First, we generate a random matrix with entries from a standard distribution.
@@ -188,82 +179,24 @@ def random_orthogonal_matrix(size, device):
     Returns:
     torch.Tensor: An orthogonal matrix of the specified size.
     """
+    if seed is not None:
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     torch.cuda.empty_cache()
     random_matrix = torch.randn(size, size, dtype=torch.float64).to(device)
     q, r = torch.linalg.qr(random_matrix)
     q *= torch.sign(torch.diag(r)).unsqueeze(0)
     return q
 
-def get_orthogonal_matrix(size, mode, device):
+def get_orthogonal_matrix(size, mode, device,seed):
     if mode == 'random':
-        return random_orthogonal_matrix(size, device)
+        return random_orthogonal_matrix(size, device,seed)
     elif mode == 'hadamard':
-        return random_hadamard_matrix(size, device)
+        return random_hadamard_matrix(size, device, seed)
     else:
         raise ValueError(f'Unknown mode {mode}')
 
     
-def rotate_embeddings(model, Q_image_encoder: torch.Tensor, Q_mask_decoder: torch.Tensor, args) -> None:
-    """
-    Rotate the embeddings using specific Q matrices for different SAM components.
-    
-    Args:
-        model: SAM model instance
-        Q_image_encoder: Rotation matrix for image encoder embeddings
-        Q_mask_decoder: Rotation matrix for mask decoder embeddings  
-        args: Arguments containing device information
-    """
-    
-    # Image encoder embeddings - use Q_image_encoder
-    if hasattr(model.image_encoder, 'patch_embed') and hasattr(model.image_encoder.patch_embed, 'proj'):
-        W = model.image_encoder.patch_embed.proj
-        dtype = W.weight.data.dtype
-        W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-        W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
-    
-    # Prompt encoder embeddings - use Q_mask_decoder (since they interact with mask decoder)
-    # Point embeddings (ModuleList of Embedding layers)
-    # if hasattr(model.prompt_encoder, 'point_embeddings'):
-    #     for point_embed in model.prompt_encoder.point_embeddings:
-    #         dtype = point_embed.weight.data.dtype
-    #         W_ = point_embed.weight.data.to(device=args.device, dtype=torch.float64)
-    #         point_embed.weight.data = torch.matmul(W_, Q_mask_decoder).to(device="cpu", dtype=dtype)
-    
-    # # Not-a-point embedding
-    # if hasattr(model.prompt_encoder, 'not_a_point_embed'):
-    #     W = model.prompt_encoder.not_a_point_embed
-    #     dtype = W.weight.data.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(W_, Q_mask_decoder).to(device="cpu", dtype=dtype)
-    
-    # # No mask embedding
-    # if hasattr(model.prompt_encoder, 'no_mask_embed'):
-    #     W = model.prompt_encoder.no_mask_embed
-    #     dtype = W.weight.data.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(W_, Q_mask_decoder).to(device="cpu", dtype=dtype)
-    
-    # # Mask decoder embeddings - use Q_mask_decoder
-    # # IoU token
-    # if hasattr(model.mask_decoder, 'iou_token'):
-    #     W = model.mask_decoder.iou_token
-    #     dtype = W.weight.data.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(W_, Q_mask_decoder).to(device="cpu", dtype=dtype)
-    
-    # # Mask tokens
-    # if hasattr(model.mask_decoder, 'mask_tokens'):
-    #     W = model.mask_decoder.mask_tokens
-    #     dtype = W.weight.data.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(W_, Q_mask_decoder).to(device="cpu", dtype=dtype)
-    
-    # # HQ token (HQ-SAM specific)
-    # if hasattr(model.mask_decoder, 'hf_token'):
-    #     W = model.mask_decoder.hf_token
-    #     dtype = W.weight.data.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(W_, Q_mask_decoder).to(device="cpu", dtype=dtype)
 @torch.inference_mode()
 def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
     """
@@ -275,44 +208,42 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
     """
     
     
-    # block_test = block_test
-    # W = block_test.attn.qkv
-    # dtype = W.weight.dtype
-    # W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    # W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
-    # for block_test in model.image_encoder.blocks[1:-1]:
-    #     W = block_test.attn.proj
-    #     dtype = W.weight.data.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(Q_image_encoder.T, W_).to(device="cpu", dtype=dtype)
-    #     if W.bias is not None:
-    #         b = W.bias.data.to(device=args.device, dtype=torch.float64)
-    #         W.bias.data = torch.matmul(Q_image_encoder.T, b).to(device="cpu", dtype=dtype)
-            
-    #     W = block_test.mlp.lin1
-    #     dtype = W.weight.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
-    
-   
-    # Image encoder attention input (qkv)
-    for block in model.image_encoder.blocks[1:]:
+    for block in model.image_encoder.blocks[:]:
+        # Image encoder attention input (qkv)
         W = block.attn.qkv
         dtype = W.weight.dtype
         W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
-       
-    
-    # Image encoder attention output (proj)
-    for block in model.image_encoder.blocks[1:]:
+    for block in model.image_encoder.blocks[:]:   
+        #Image encoder attention output (proj)
         W = block.attn.proj
         dtype = W.weight.data.dtype
         W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
         W.weight.data = torch.matmul(Q_image_encoder.T, W_).to(device="cpu", dtype=dtype)
         if W.bias is not None:
             b = W.bias.data.to(device=args.device, dtype=torch.float64)
-            W.bias.data = torch.matmul(Q_image_encoder.T, b).to(device="cpu", dtype=dtype)
+            W.bias.data = torch.matmul(b,Q_image_encoder).to(device="cpu", dtype=dtype)
             
+        #Image encoder MLP input (lin1)
+        W = block.mlp.lin1
+        dtype = W.weight.dtype
+        W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
+        W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
+        
+    # Image encoder MLP output (lin2)
+    for block in model.image_encoder.blocks[:-1]:
+        W = block.mlp.lin2
+        dtype = W.weight.data.dtype
+        W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
+        W.weight.data = torch.matmul(Q_image_encoder.T, W_).to(device="cpu", dtype=dtype)
+        if W.bias is not None:
+            b = W.bias.data.to(device=args.device, dtype=torch.float64)
+            W.bias.data = torch.matmul(b, Q_image_encoder).to(device="cpu", dtype=dtype)
+    # on-online with mlp output
+    for block in model.image_encoder.blocks[:]:
+        W = block.mlp.lin2
+        apply_exact_had_to_linear(W, had_dim=-1, output=False)  # Apply exact (inverse) hadamard
+        
     # Mask decoder attention input (q_proj, k_proj, v_proj)
     # for layer in model.mask_decoder.transformer.layers:
     #     for W in [
@@ -346,25 +277,6 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
     #             b = W.bias.data.to(device=args.device, dtype=torch.float64)
     #             W.bias.data = torch.matmul(Q_mask_decoder.T, b).to(device="cpu", dtype=dtype)
 
-   
-    # Image encoder MLP input (lin1)
-    # for block in model.image_encoder.blocks[1:-1]:
-    #     W = block.mlp.lin1
-    #     dtype = W.weight.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
-        
-    # # Image encoder MLP output (lin2)
-    # for block in model.image_encoder.blocks[1:-1]:
-    #     W = block.mlp.lin2
-    #     dtype = W.weight.data.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(Q_image_encoder.T, W_).to(device="cpu", dtype=dtype)
-    #     apply_exact_had_to_linear(W, had_dim=-1, output=False)  # Apply exact (inverse) hadamard
-    #     if W.bias is not None:
-    #         b = W.bias.data.to(device=args.device, dtype=torch.float64)
-    #         W.bias.data = torch.matmul(Q_image_encoder.T, b).to(device="cpu", dtype=dtype)
-    
     
     # # Mask decoder MLP input (first layer in MLP)
     # for layer in model.mask_decoder.transformer.layers:
@@ -386,23 +298,44 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
 
     # rotate qv projections
     # this is  possible to apply had to v and output projections as they are applied consecutively 
-    # head_dim = (args.hidden_size_image_en // args.num_attention_head_image_en)
-    # for block in model.image_encoder.blocks:
-    #     if hasattr(block.attn, 'qkv'):
-    #         embed_dim = args.hidden_size_image_en
-    #         qkv_weight = block.attn.qkv.weight
-    #         v_start = 2 * embed_dim  # V starts at 2/3
-    #         v_end = 3 * embed_dim    # V ends at full dimension
+    head_dim = (args.hidden_size_image_en // args.num_attention_head_image_en)
+    for block in model.image_encoder.blocks[:]:
+        if hasattr(block.attn, 'qkv'):
+            embed_dim = args.hidden_size_image_en
+            qkv_weight = block.attn.qkv.weight
+            bias = block.attn.qkv.bias
             
-    #         v_proj_temp = torch.nn.Linear(embed_dim, embed_dim, bias=False)
-    #         v_proj_temp.weight.data = qkv_weight[v_start:v_end, :].clone()
-    #         apply_exact_had_to_linear(v_proj_temp, had_dim=head_dim, output=True)
             
-    #         qkv_weight[v_start:v_end, :] = v_proj_temp.weight.data
+            v_start = 2 * embed_dim  # V starts at 2/3
+            v_end = 3 * embed_dim    # V ends at full dimension
             
-    #         # Apply Hadamard to output projection
-    #         if hasattr(block.attn, 'proj'):
-    #             apply_exact_had_to_linear(block.attn.proj, had_dim=-1, output=False)
+            v_proj_temp = torch.nn.Linear(embed_dim, embed_dim, bias=True)
+            v_proj_temp.weight.data = qkv_weight[v_start:v_end, :].clone()
+            v_proj_temp.bias.data = bias[v_start:v_end].clone()
+            apply_exact_had_to_linear(v_proj_temp, had_dim=head_dim, output=True)
+            # apply_exact_had_to_linear(block.attn.proj, had_dim=-1, output=False)
+            
+            qkv_weight[v_start:v_end, :] = v_proj_temp.weight.data
+            bias.data[v_start:v_end] = v_proj_temp.bias.data
+            # Apply Hadamard to output projection
+            if hasattr(block.attn, 'proj'):
+                apply_exact_had_to_linear(block.attn.proj, had_dim=-1, output=False)
+            
+            # To implement the QK we need to wrap the attention to be able modify the attention
+            # q_start = 0
+            # q_end = embed_dim  
+            
+            # q_proj_temp = torch.nn.Linear(embed_dim, embed_dim, bias=True)
+            # q_proj_temp.weight.data = qkv_weight[q_start:q_end, :].clone()
+            # q_proj_temp.bias.data = bias[q_start:q_end].clone()
+            # apply_exact_had_to_linear(q_proj_temp, had_dim=head_dim, output=True)
+            # qkv_weight[q_start:q_end, :] = q_proj_temp.weight.data
+            # bias.data[q_start:q_end] = q_proj_temp.bias.data
+            # # Apply Hadamard to K projection
+            # k_proj_temp = torch.nn.Linear(embed_dim, embed_dim, bias=False)
+            # k_proj_temp.weight.data = qkv_weight[q_end:2 * embed_dim, :].clone()
+            # apply_exact_had_to_linear(k_proj_temp, had_dim=-1, output=False)
+            
     # this is  possible to apply had to v and output projections as they are applied consecutively
     # head_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
     # for layer in model.mask_decoder.transformer.layers:
@@ -431,8 +364,6 @@ def matmul_hadU_cuda_had(X, hadK, transpose=False):
     input = hadK.to(input.device).to(input.dtype) @ input 
     return input.to(X.device).to(X.dtype).reshape(
         X.shape) 
-
-
 
 
 def rotate_head_sam(model, Q: torch.Tensor,args):
@@ -467,17 +398,155 @@ def rotate_head_sam(model, Q: torch.Tensor,args):
 
 
 
+# @torch.inference_mode()
+def rotate_model(model, Q_image_encoder,Q_mask_decoder, args):
+    
+    
+    target_device = torch.device(args.device)
+    model = model.to(target_device)
+    Q_image_encoder = Q_image_encoder.to(target_device)
+    Q_mask_decoder = Q_mask_decoder.to(target_device)
+    
+    # change the block type 
+    if args.model_type == "vit_l":
+        encoder_embed_dim=1024
+        encoder_depth=24
+        encoder_num_heads=16
+        encoder_global_attn_indexes=[5, 11, 17, 23]
+    elif args.model_type == "vit_b":
+        encoder_embed_dim=768
+        encoder_depth=12
+        encoder_num_heads=12
+        encoder_global_attn_indexes=[2, 5, 8, 11]
+    elif args.model_type == "vit_h":
+        encoder_embed_dim=1280
+        encoder_depth=32
+        encoder_num_heads=16
+        encoder_global_attn_indexes=[7, 15, 23, 31]
+    nu_block = model.image_encoder.blocks[:]
+    for i, block in enumerate(nu_block):
+        if i==0:
+            embed_dim = encoder_embed_dim  # Dimension of input features
+            num_heads = encoder_num_heads  # Number of attention heads
+            mlp_ratio = 4 # MLP expansion ratio
+            qkv_bias = True  # Whether QKV has bias
+            norm_layer = partial(torch.nn.LayerNorm, eps=1e-6) # Normalization layer type
+            act_layer = nn.GELU
+            use_rel_pos = True  # Whether relative position embeddings are used
+            rel_pos_zero_init = True
+            window_size = block.window_size 
+            global_attn_indexes = encoder_global_attn_indexes  
+            patch_size = 16 # Default patch size
+            img_size =  1024
+        # Create a CustomBlock with the same parameters as the original block
+        
+            custom_block = model_utils.CustomBlock(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                norm_layer=norm_layer,
+                act_layer=act_layer,
+                use_rel_pos=use_rel_pos,
+                rel_pos_zero_init=rel_pos_zero_init,
+                window_size=window_size if i not in global_attn_indexes else 0,
+                input_size=(img_size // patch_size, img_size // patch_size),
+            )
+        elif i ==len(nu_block)-1:
+            
+            custom_block = model_utils.CustomBlock_3(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                norm_layer=norm_layer,
+                act_layer=act_layer,
+                use_rel_pos=use_rel_pos,
+                rel_pos_zero_init=rel_pos_zero_init,
+                window_size=window_size if i not in global_attn_indexes else 0,
+                input_size=(img_size // patch_size, img_size // patch_size),
+            )
+        else:
+            custom_block = model_utils.CustomBlock_2(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                norm_layer=norm_layer,
+                act_layer=act_layer,
+                use_rel_pos=use_rel_pos,
+                rel_pos_zero_init=rel_pos_zero_init,
+                window_size=window_size if i not in global_attn_indexes else 0,
+                input_size=(img_size // patch_size, img_size // patch_size),
+            )
+            
+        custom_block.norm1= block.norm1.__class__(block.norm1.mean_dim, eps=block.norm1.eps)
+        
+        custom_block.norm2 = block.norm2.__class__(block.norm2.mean_dim, eps=block.norm2.eps)
+        
 
-@torch.inference_mode()
-def rotate_model(model, args):
-   
-    Q_image_encoder = get_orthogonal_matrix(args.hidden_size_image_en,args.rotate_mode,device = args.device)
-    Q_mask_decoder = get_orthogonal_matrix(args.hidden_size_mask_de,args.rotate_mode,device = args.device)
+        # Copy attention weights
+        custom_block.attn.qkv.weight.data.copy_(block.attn.qkv.weight.data)
+        custom_block.attn.qkv.bias.data.copy_(block.attn.qkv.bias.data)
+        custom_block.attn.proj.weight.data.copy_(block.attn.proj.weight.data)
+        custom_block.attn.proj.bias.data.copy_(block.attn.proj.bias.data)
+        # custom_blocl.attn.scale.data.copy_(block.attn.scale.data)
+        custom_block.attn.rel_pos_w.data.copy_(block.attn.rel_pos_w.data)
+        custom_block.attn.rel_pos_h.data.copy_(block.attn.rel_pos_h.data)  
+        # Copy MLP weights
+        custom_block.mlp.lin1.weight.data.copy_(block.mlp.lin1.weight.data)
+        custom_block.mlp.lin1.bias.data.copy_(block.mlp.lin1.bias.data)
+        custom_block.mlp.lin2.weight.data.copy_(block.mlp.lin2.weight.data)
+        custom_block.mlp.lin2.bias.data.copy_(block.mlp.lin2.bias.data)
+
+        custom_block._take_Q(Q_image_encoder)
+        model.image_encoder.blocks[i] = custom_block
+        
+        
+    for i, block in enumerate(model.image_encoder.blocks[:1]):
+        # Store original attention parameters
+        original_attn = block.attn
+        
+        # Get dim from qkv input features (not stored directly as attribute)
+        dim = original_attn.qkv.in_features
+        num_heads = original_attn.num_heads
+        qkv_bias = hasattr(original_attn.qkv, 'bias') and original_attn.qkv.bias is not None
+        use_rel_pos = original_attn.use_rel_pos
+        input_size = None
+        
+        # Get input_size if available
+        if hasattr(original_attn, 'rel_pos_h') and original_attn.rel_pos_h is not None:
+            h_size = (original_attn.rel_pos_h.shape[0] + 1) // 2
+            w_size = (original_attn.rel_pos_w.shape[0] + 1) // 2
+            input_size = (h_size, w_size)
+        
+        # Create CustomAttention with the same parameters
+        custom_attn = model_utils.CustomAttention(
+            dim=dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            use_rel_pos=use_rel_pos,
+            input_size=input_size
+        )
+        custom_attn.to(target_device)
+        # Copy weights from original attention
+        custom_attn.qkv.weight.data = original_attn.qkv.weight.data.to(target_device)
+        custom_attn.qkv.bias.data = original_attn.qkv.bias.data.to(target_device)
+        custom_attn.proj.weight.data = original_attn.proj.weight.data.to(target_device)
+        custom_attn.proj.bias.data = original_attn.proj.bias.data.to(target_device)
+        
+        
+        # Set relative position embeddings if used
+        if use_rel_pos:
+            custom_attn.rel_pos_h = original_attn.rel_pos_h
+            custom_attn.rel_pos_w = original_attn.rel_pos_w
+        
+        # Set Q matrix
+        custom_attn._take_Q(Q_image_encoder)
+        block.attn = custom_attn
     
-    
-    # rotate_embeddings(model, Q_image_encoder,Q_mask_decoder,args)
     # rotate_head_sam(model, Q_mask_decoder,args)
-    utils.cleanup_memory()
+    
     rotate_model_sam(model,Q_image_encoder,Q_mask_decoder,args)
     utils.cleanup_memory()
 
