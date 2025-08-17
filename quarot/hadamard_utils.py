@@ -1,7 +1,6 @@
 import torch, math
 import fast_hadamard_transform
-import utils
-import ipdb
+
 # Adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
 
 def get_hadK(n, transpose=False):

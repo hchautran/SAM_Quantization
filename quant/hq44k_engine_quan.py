@@ -1,5 +1,5 @@
 # %%
-
+    
 import os
 import yaml
 import cv2
@@ -12,18 +12,29 @@ from train.utils.misc import   F, random
 import train.utils.misc as misc
 from train.train import compute_iou, compute_boundary_iou, show_anns, MaskDecoderHQ
 from train.segment_anything_training import sam_model_registry
+# from segment_anything import sam_model_registry
 import cv2
 from tqdm.auto import tqdm
 import json
 import time
 from omegaconf import OmegaConf
 import argparse
-import sys
+import logging
+import ipdb
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from RTN_quantization import utils, per_tensor_channel_group
+import sys
+import importlib
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+quarot_path = os.path.join(project_root, 'quarot')
+sys.path.insert(0, project_root)  
+sys.path.insert(0, quarot_path)   
+from quarot import parser_gen
 
-
+from Distribution_sam import get_channel_distribution_modify
+import RTN_quantization.utils as rtn_utils
+from RTN_quantization import per_tensor_channel_group
+import rotate_sam
+from torch import nn
 def get_args_parser():
     parser = argparse.ArgumentParser('HQ-SAM', add_help=False)
 
@@ -58,17 +69,49 @@ def get_args_parser():
     parser.add_argument('--visualize', action='store_true')
     parser.add_argument("--restore-model", type=str,
                         help="The path to the hq_decoder training checkpoint for evaluation")
-    
+    parser.add_argument('--logging_path', type=str, default='./logs')
     # quantization args
     
     
     return parser.parse_args()
 
+def setup_logger(path_log,state):
+    if not os.path.exists(path_log):
+        os.makedirs(path_log)
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    fh = logging.FileHandler(os.path.join(path_log, f'{state}.log'))
+    fh.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(message)s')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    return logger
+def print_model_structure(model, title="Model Structure"):
+    print(f"\n{title}")
+    print("=" * len(title))
+    for name, module in model.named_modules():
+        print(f"{name}: {module.__class__.__name__}")
+    print("=" * len(title))
+def print_first_qkv_weights(sam_model):
+    """
+    Print the weights of the qkv layer of the first W8A8Linear module in the image_encoder.
 
-
+    Args:
+        sam_model: The SAM model instance (e.g., self.predictor).
+    """
+    if hasattr(sam_model, 'image_encoder') and hasattr(sam_model.image_encoder, 'blocks'):
+        for block in sam_model.image_encoder.blocks:
+            if hasattr(block, 'attn') and hasattr(block.attn, 'qkv'):
+                qkv_layer = block.attn.qkv
+                if isinstance(qkv_layer, per_tensor_channel_group.W8A8Linear) or isinstance(qkv_layer, nn.Linear):
+                    print("Weights of the first qkv W8A8Linear layer:")
+                    print(qkv_layer.weight[:5, :5])  # Print first 5x5 weights for brevity
+                    return
+    print("No W8A8Linear qkv layer found in the image_encoder.")
 class Hq44kInferenceStrategy(InferenceStrategy):
     def __init__(self, args):
         # build sam encoder
+        
         self.checkpoint = args.model.checkpoint
         self.model_type = args.model.model_type
         self.restore_model = args.model.restore_model
@@ -81,40 +124,64 @@ class Hq44kInferenceStrategy(InferenceStrategy):
         self.weight_quant = args.quantization.weight_quant
         self.n_bits = args.quantization.n_bits
         self.quantize_output = args.quantization.quantize_output
+        if self.quant_rtn and 'rtn_ro_config'  in args:
+            self.rtn_ro = args.rtn_ro_config
+        else:
+            self.rtn_ro = None
+        self.plot_distribution =False
+        self.quantize_decoder = args.quantization.quandecoder
         
-
     def build_predictor(self):
         self.hq_mask_decoder = MaskDecoderHQ(self.model_type) 
         self.predictor = sam_model_registry[self.model_type](checkpoint=self.checkpoint)
-        if self.quant_smooth:
-            print("Running Smooth_sam.py to generate act_scales_file")
-            assert self.act_scales_file is not None, "Run Smooth_sam.py to generate act_scales_file"
-            act_scales = torch.load(self.act_scales_file)
-            self.predictor = utils.smooth_sam(self.predictor, act_scales, alpha=0.5)
-            modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
-            utils.replace_linear_with_target_and_quantize(module=self.predictor,
-                                                        target_class=per_tensor_channel_group.W8A8Linear,
-                                                        n_bit=self.n_bits,
-                                                        module_name_to_exclude=modules_to_exclude,
-                                                        weight_quant=self.weight_quant,    
-                                                        act_quant=self.act_quant,           
-                                                        quantize_output=self.quantize_output)
-        elif self.quant_rtn:
-            modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
-            utils.replace_linear_with_target_and_quantize(module=self.predictor,
-                                                        target_class=per_tensor_channel_group.W8A8Linear,
-                                                        n_bit=self.n_bits,
-                                                        module_name_to_exclude=modules_to_exclude,
-                                                        weight_quant=self.weight_quant,    
-                                                        act_quant=self.act_quant,           
-                                                        quantize_output=self.quantize_output)
-        elif self.quant_ro:
-            raise NotImplementedError("QuaRot quantization is not implemented for SAM yet")
         if self.restore_model:
             print("restore model from:", self.restore_model)
             self.hq_mask_decoder.load_state_dict(torch.load(self.restore_model))
-
-
+        rot_args = None
+        if self.quant_smooth:
+            assert self.act_scales_file is not None, "Run Smooth_sam.py to generate act_scales_file"
+            act_scales = torch.load(self.act_scales_file)
+            self.predictor = rtn_utils.smooth_sam(self.predictor, act_scales, alpha=0.5)
+            if self.quantize_decoder:
+                self.hq_mask_decoder = rtn_utils.smooth_sam(self.hq_mask_decoder, act_scales, alpha=0.5)
+        elif self.quant_ro:
+            rot_args= parser_gen()
+            rotate_sam.rotate_sam(self.predictor,rot_args,self.rtn_ro)
+            self.quant_rtn = False
+            if self.quantize_decoder:
+                rotate_sam.rotate_sam(self.hq_mask_decoder,rot_args,self.rtn_ro,decoder= True)
+                self.quantize_decoder = False
+        if self.quant_rtn:
+            modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
+            rtn_utils.replace_linear_with_target_and_quantize(module=self.predictor,
+                                                        target_class=per_tensor_channel_group.W8A8Linear,
+                                                        n_bit=self.n_bits,
+                                                        module_name_to_exclude=modules_to_exclude,
+                                                        weight_quant=self.weight_quant,    
+                                                        act_quant=self.act_quant,           
+                                                        quantize_output=self.quantize_output)
+            if self.quantize_decoder:
+                rtn_utils.replace_linear_with_target_and_quantize(module=self.hq_mask_decoder,
+                                                        target_class=per_tensor_channel_group.W8A8Linear,
+                                                        n_bit=self.n_bits,
+                                                        module_name_to_exclude=modules_to_exclude,
+                                                        weight_quant=self.weight_quant,    
+                                                        act_quant=self.act_quant,           
+                                                        quantize_output=self.quantize_output)
+        
+       
+        if self.plot_distribution:
+            act = ''
+            if self.quant_rtn:
+                act += "rtn"
+            if self.quant_smooth:
+                act += "smooth"
+            if self.quant_ro:
+                act += "ro_"
+            get_channel_distribution_modify(self.predictor,model_type="vit_l",act = act, rot_args = rot_args)
+        # print_model_structure(self.predictor, title="Final Structure")
+        # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
+      
     def set_image(self, image_dir:str):
         raise NotImplementedError("")
 
@@ -248,12 +315,29 @@ class Hq44kSamEngine(Engine):
 
 
     @torch.no_grad()
-    def evaluate(self, args, visualize:bool=False):
+    def evaluate(self, args, model_args ,visualize:bool=False):
+        state="hq44k_"
+        if model_args.quantization.quanrtn:
+            state +="rtn"
+        if model_args.quantization.quansmooth:
+            state += "smooth"
+        if model_args.quantization.quanro:
+            state += "ro"
+        
+        logger =setup_logger(args.logging_path,state)
+        
         misc.init_distributed_mode(args)
         print('world size: {}'.format(args.world_size))
         print('rank: {}'.format(args.rank))
         print('local_rank: {}'.format(args.local_rank))
         print("args: " + str(args) + '\n')
+        logger.info('world size: {}'.format(args.world_size))
+        logger.info('rank: {}'.format(args.rank))
+        logger.info('local_rank: {}'.format(args.local_rank))
+        logger.info("args: " + str(args) + '\n')
+        logger.info('model_args: ' + str(model_args) + '\n')
+        logger.info("=" * 100)
+        
         seed = args.seed + misc.get_rank()
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -272,12 +356,14 @@ class Hq44kSamEngine(Engine):
         )
         test_stats = {}
         for k in range(len(valid_dataloaders)):
+            
             metric_logger = misc.MetricLogger(delimiter="  ")
             valid_dataloader = valid_dataloaders[k]
             print('valid_dataloader len:', len(valid_dataloader))
+            logger.info(f"\nValidating {self.valid_datasets[k]['name']}:")
             progress_bar = tqdm(total=len(valid_dataloader), desc=f"Validating {self.valid_datasets[k]['name']}")
             start = time.time()
-            for data_val in metric_logger.log_every(valid_dataloader, 2):
+            for i,data_val in enumerate(metric_logger.log_every(valid_dataloader, 2)):
                 _, inputs_val, labels_val, _, labels_ori = data_val['imidx'], data_val['image'], data_val['label'], data_val['shape'], data_val['ori_label']
 
                 # prepare image & prompts 
@@ -309,26 +395,36 @@ class Hq44kSamEngine(Engine):
             total_time = time.time() - start
 
             print('=' * 100) 
+            logger.info('=' * 100)
+            logger.info(f"Total time: {time.strftime('%H:%M:%S', time.gmtime(total_time))} ({total_time / len(valid_dataloader):.4f} s / it)")      
             # gather the stats from all processes
             metric_logger.synchronize_between_processes()
             print("Averaged stats:", metric_logger)
+            logger.info(f"Averaged stats: {metric_logger}")
             resstat = {k: meter.global_avg for k, meter in metric_logger.meters.items() if meter.count > 0}
             test_stats.update(resstat)
             test_stats['total_time'] = f'{total_time:2f}'
+            logger.info(f"{resstat}")
             
             print(test_stats)
-
+            logger.info(f"test stats: {test_stats}")
+            logger.info(f"Finished validating {self.valid_datasets[k]['name']}")
+            logger.info("=" * 100)
+        logger.info("\n" + "=" * 100)
+        logger.info("FINAL EVALUATION SUMMARY:")
+        logger.info(f"Final test stats: {test_stats}")
+        logger.info("=" * 100)
         return test_stats
                 
 
 # %%
 
 if __name__ == "__main__":
-    model_args = OmegaConf.load('quant/config/hq44k/base_l.yaml')
+    model_args = OmegaConf.load('quant/config/hq44k/quarot.yaml')
     args = get_args_parser()
     
     engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
-    engine.evaluate(args)
+    engine.evaluate(args,model_args)
 
 # %%
 

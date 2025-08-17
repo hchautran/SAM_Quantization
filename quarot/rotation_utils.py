@@ -2,7 +2,6 @@ import model_utils
 import torch
 import typing
 import utils
-import transformers
 import tqdm, math
 import torch.nn as nn
 
@@ -65,80 +64,18 @@ def fuse_layer_norms_sam(model):
     SAM uses LayerNorm in various components of image_encoder, prompt_encoder, and mask_decoder.
     """
     
-    # Get embedding layers for fusion
-    embeddings = get_embeddings_sam(model)
-    for W in embeddings:
-        if hasattr(W, 'weight'):
-            W_ = W.weight.data.double()
-            W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
-    
     # Process image encoder blocks
-    if hasattr(model.image_encoder, 'blocks'):
-        for block in model.image_encoder.blocks[:-1]:
-            
+    if hasattr(model,"image_encoder") and  hasattr(model.image_encoder, 'blocks'):    
+        for i,block in enumerate(model.image_encoder.blocks[:]):
             fuse_ln_linear(block.norm1, [block.attn.qkv])
             fuse_ln_linear(block.norm2, [block.mlp.lin1])
-            bake_mean_into_linear(block.attn.proj)
-            bake_mean_into_linear(block.mlp.lin2)
-        
-        ## TODO: Find the final layer or block to fuse ( this to ensure the same output)
-        
-        #fuse the final block
-        final_block = model.image_encoder.blocks[-1]
-        fuse_ln_linear(final_block.norm1, [final_block.attn.qkv])
-        bake_mean_into_linear(final_block.attn.proj)
-        fuse_ln_linear(final_block.norm2, [final_block.mlp.lin1])
-    
-    # Process mask decoder transformer layers with CORRECTED ORDER
-    if hasattr(model.mask_decoder, 'transformer') and hasattr(model.mask_decoder.transformer, 'layers'):
-        for layer in model.mask_decoder.transformer.layers[:-1]:
-            
-            pass
-            # Order 1: norm1 -> cross_attn_token_to_image
-            
-            ## TODO: Reimplement this as this work not the same as the self attention 
-            # if hasattr(layer, 'norm1') and hasattr(layer, 'cross_attn_token_to_image'):
-            #     linear_layers = []
-            #     if hasattr(layer.cross_attn_token_to_image, 'q_proj'):
-            #         linear_layers.append(layer.cross_attn_token_to_image.q_proj)
-            #     if hasattr(layer.cross_attn_token_to_image, 'k_proj'):
-            #         linear_layers.append(layer.cross_attn_token_to_image.k_proj)
-            #     if hasattr(layer.cross_attn_token_to_image, 'v_proj'):
-            #         linear_layers.append(layer.cross_attn_token_to_image.v_proj)
-            #     if linear_layers:
-            #         fuse_ln_linear(layer.norm1, linear_layers)
-                
-            #     # Bake mean into output projection
-            #     if hasattr(layer.cross_attn_token_to_image, 'out_proj'):
-            #         bake_mean_into_linear(layer.cross_attn_token_to_image.out_proj)
-            
-            # Order 2: norm2 -> mlp.lin1 
-            # This may be not good as we center the embedding is far from here
-            # if hasattr(layer, 'norm2') and hasattr(layer, 'mlp'):
-            #     fuse_ln_linear(layer.norm2, [layer.mlp.lin1])
-            #     bake_mean_into_linear(layer.mlp.lin2)
-
-            
-            # Order 3: norm3 -> cross_attn_image_to_token
-            ## TODO: Reimplement this part as this work not the same as the self attention 
-            # if hasattr(layer, 'norm3') and hasattr(layer, 'cross_attn_image_to_token'):
-            #     linear_layers = []
-            #     if hasattr(layer.cross_attn_image_to_token, 'q_proj'):
-            #         linear_layers.append(layer.cross_attn_image_to_token.q_proj)
-            #     if hasattr(layer.cross_attn_image_to_token, 'k_proj'):
-            #         linear_layers.append(layer.cross_attn_image_to_token.k_proj)
-            #     if hasattr(layer.cross_attn_image_to_token, 'v_proj'):
-            #         linear_layers.append(layer.cross_attn_image_to_token.v_proj)
-            #     if linear_layers:
-            #         fuse_ln_linear(layer.norm3, linear_layers)
-                
-            #     if hasattr(layer.cross_attn_image_to_token, 'out_proj'):
-            #         bake_mean_into_linear(layer.cross_attn_image_to_token.out_proj)
-            
-        # final_layer = model.mask_decoder.transformer.layers[-1]
-        # fuse_ln_linear(final_layer.norm2, [final_layer.mlp.lin1])
-    
-   
+            # bake_mean_into_linear(block.attn.proj)
+            # bake_mean_into_linear(block.mlp.lin2)
+        ##fuse the final block
+        # final_block = model.image_encoder.blocks[-1]
+        # fuse_ln_linear(final_block.norm1, [final_block.attn.qkv])
+        # bake_mean_into_linear(final_block.attn.proj)
+        # fuse_ln_linear(final_block.norm2, [final_block.mlp.lin1])
     
     # Replace all remaining LayerNorm modules with RMSN (following the original pattern)
     def create_rmsn_factory():
@@ -214,15 +151,6 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
         dtype = W.weight.dtype
         W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
-    for block in model.image_encoder.blocks[:]:   
-        #Image encoder attention output (proj)
-        W = block.attn.proj
-        dtype = W.weight.data.dtype
-        W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-        W.weight.data = torch.matmul(Q_image_encoder.T, W_).to(device="cpu", dtype=dtype)
-        if W.bias is not None:
-            b = W.bias.data.to(device=args.device, dtype=torch.float64)
-            W.bias.data = torch.matmul(b,Q_image_encoder).to(device="cpu", dtype=dtype)
             
         #Image encoder MLP input (lin1)
         W = block.mlp.lin1
@@ -230,71 +158,15 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
         W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
         
-    # Image encoder MLP output (lin2)
-    for block in model.image_encoder.blocks[:-1]:
-        W = block.mlp.lin2
-        dtype = W.weight.data.dtype
-        W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-        W.weight.data = torch.matmul(Q_image_encoder.T, W_).to(device="cpu", dtype=dtype)
-        if W.bias is not None:
-            b = W.bias.data.to(device=args.device, dtype=torch.float64)
-            W.bias.data = torch.matmul(b, Q_image_encoder).to(device="cpu", dtype=dtype)
-    # on-online with mlp output
+  
     for block in model.image_encoder.blocks[:]:
         W = block.mlp.lin2
         apply_exact_had_to_linear(W, had_dim=-1, output=False)  # Apply exact (inverse) hadamard
-        
-    # Mask decoder attention input (q_proj, k_proj, v_proj)
-    # for layer in model.mask_decoder.transformer.layers:
-    #     for W in [
-    #         layer.cross_attn_token_to_image.q_proj,
-    #         layer.cross_attn_token_to_image.k_proj,
-    #         layer.cross_attn_token_to_image.v_proj,
-    #         layer.cross_attn_image_to_token.q_proj,
-    #         layer.cross_attn_image_to_token.k_proj,
-    #         layer.cross_attn_image_to_token.v_proj,
-    #         layer.self_attn.q_proj,
-    #         layer.self_attn.k_proj,
-    #         layer.self_attn.v_proj,
-    #     ]:
-    #         dtype = W.weight.dtype
-    #         W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #         W.weight.data = torch.matmul(W_, Q_mask_decoder).to(device="cpu", dtype=dtype)
-
     
-    
-    # Mask decoder attention output (out_proj)
-    # for layer in model.mask_decoder.transformer.layers:
-    #     for W in [
-    #         layer.cross_attn_token_to_image.out_proj,
-    #         layer.cross_attn_image_to_token.out_proj,
-    #         layer.self_attn.out_proj,
-    #     ]:
-    #         dtype = W.weight.data.dtype
-    #         W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #         W.weight.data = torch.matmul(Q_mask_decoder.T, W_).to(device="cpu", dtype=dtype)
-    #         if W.bias is not None:
-    #             b = W.bias.data.to(device=args.device, dtype=torch.float64)
-    #             W.bias.data = torch.matmul(Q_mask_decoder.T, b).to(device="cpu", dtype=dtype)
-
-    
-    # # Mask decoder MLP input (first layer in MLP)
-    # for layer in model.mask_decoder.transformer.layers:
-    #     W = layer.mlp.lin1  # First layer in MLP
-    #     dtype = W.weight.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(W_, Q_mask_decoder).to(device="cpu", dtype=dtype)    
-    
-    # # Mask decoder MLP output (last layer in MLP)
-    # for layer in model.mask_decoder.transformer.layers:
-    #     W = layer.mlp.lin2  # Last layer in MLP
-    #     dtype = W.weight.data.dtype
-    #     W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    #     W.weight.data = torch.matmul(Q_mask_decoder.T, W_).to(device="cpu", dtype=dtype)
-    #     apply_exact_had_to_linear(W, had_dim=-1, output=False)  # Apply exact (inverse) hadamard
-    #     if W.bias is not None:
-    #         b = W.bias.data.to(device=args.device, dtype=torch.float64)
-    #         W.bias.data = torch.matmul(Q_mask_decoder.T, b).to(device="cpu", dtype=dtype)
+    for layer in model.mask_decoder.transformer.layers:
+        W= layer.mlp.lin2
+        apply_exact_had_to_linear(W, had_dim=-1, output=False)
+   
 
     # rotate qv projections
     # this is  possible to apply had to v and output projections as they are applied consecutively 
@@ -337,15 +209,27 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
             # apply_exact_had_to_linear(k_proj_temp, had_dim=-1, output=False)
             
     # this is  possible to apply had to v and output projections as they are applied consecutively
-    # head_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
-    # for layer in model.mask_decoder.transformer.layers:
-    #     apply_exact_had_to_linear(layer.self_attn.v_proj, had_dim=head_dim, output=True)
-    #     apply_exact_had_to_linear(layer.self_attn.out_proj, had_dim=-1, output=False)
-    #     apply_exact_had_to_linear(layer.cross_attn_token_to_image.v_proj, had_dim=head_dim, output=True)
-    #     apply_exact_had_to_linear(layer.cross_attn_token_to_image.out_proj, had_dim=-1, output=False)
-    #     apply_exact_had_to_linear(layer.cross_attn_image_to_token.v_proj, had_dim=head_dim, output=True)
-    #     apply_exact_had_to_linear(layer.cross_attn_image_to_token.out_proj, had_dim=-1, output=False)
-
+    head_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
+    for layer in model.mask_decoder.transformer.layers:
+        apply_exact_had_to_linear(layer.self_attn.v_proj, had_dim=head_dim, output=True)
+        apply_exact_had_to_linear(layer.self_attn.out_proj, had_dim=-1, output=False)
+        apply_exact_had_to_linear(layer.cross_attn_token_to_image.v_proj, had_dim=head_dim, output=True)
+        apply_exact_had_to_linear(layer.cross_attn_token_to_image.out_proj, had_dim=-1, output=False)
+        apply_exact_had_to_linear(layer.cross_attn_image_to_token.v_proj, had_dim=head_dim, output=True)
+        apply_exact_had_to_linear(layer.cross_attn_image_to_token.out_proj, had_dim=-1, output=False)
+def rotate_decoder(decoder,Q_mask_decoder,args):
+    for layer in decoder.transformer.layers:
+        W= layer.mlp.lin2
+        apply_exact_had_to_linear(W, had_dim=-1, output=False)
+    head_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
+    for layer in decoder.transformer.layers:
+        apply_exact_had_to_linear(layer.self_attn.v_proj, had_dim=head_dim, output=True)
+        apply_exact_had_to_linear(layer.self_attn.out_proj, had_dim=-1, output=False)
+        apply_exact_had_to_linear(layer.cross_attn_token_to_image.v_proj, had_dim=head_dim, output=True)
+        apply_exact_had_to_linear(layer.cross_attn_token_to_image.out_proj, had_dim=-1, output=False)
+        apply_exact_had_to_linear(layer.cross_attn_image_to_token.v_proj, had_dim=head_dim, output=True)
+        apply_exact_had_to_linear(layer.cross_attn_image_to_token.out_proj, had_dim=-1, output=False)
+    
 def matmul_hadU_cuda_had(X, hadK, transpose=False):
     '''
     Apply hadamard transformation. 
@@ -408,105 +292,111 @@ def rotate_model(model, Q_image_encoder,Q_mask_decoder, args):
     Q_mask_decoder = Q_mask_decoder.to(target_device)
     
     # change the block type 
-    if args.model_type == "vit_l":
-        encoder_embed_dim=1024
-        encoder_depth=24
-        encoder_num_heads=16
-        encoder_global_attn_indexes=[5, 11, 17, 23]
-    elif args.model_type == "vit_b":
-        encoder_embed_dim=768
-        encoder_depth=12
-        encoder_num_heads=12
-        encoder_global_attn_indexes=[2, 5, 8, 11]
-    elif args.model_type == "vit_h":
-        encoder_embed_dim=1280
-        encoder_depth=32
-        encoder_num_heads=16
-        encoder_global_attn_indexes=[7, 15, 23, 31]
+    # if args.model_type == "vit_l":
+    #     encoder_embed_dim=1024
+    #     encoder_depth=24
+    #     encoder_num_heads=16
+    #     encoder_global_attn_indexes=[5, 11, 17, 23]
+    # elif args.model_type == "vit_b":
+    #     encoder_embed_dim=768
+    #     encoder_depth=12
+    #     encoder_num_heads=12
+    #     encoder_global_attn_indexes=[2, 5, 8, 11]
+    # elif args.model_type == "vit_h":
+    #     encoder_embed_dim=1280
+    #     encoder_depth=32
+    #     encoder_num_heads=16
+    #     encoder_global_attn_indexes=[7, 15, 23, 31]
     nu_block = model.image_encoder.blocks[:]
-    for i, block in enumerate(nu_block):
-        if i==0:
-            embed_dim = encoder_embed_dim  # Dimension of input features
-            num_heads = encoder_num_heads  # Number of attention heads
-            mlp_ratio = 4 # MLP expansion ratio
-            qkv_bias = True  # Whether QKV has bias
-            norm_layer = partial(torch.nn.LayerNorm, eps=1e-6) # Normalization layer type
-            act_layer = nn.GELU
-            use_rel_pos = True  # Whether relative position embeddings are used
-            rel_pos_zero_init = True
-            window_size = block.window_size 
-            global_attn_indexes = encoder_global_attn_indexes  
-            patch_size = 16 # Default patch size
-            img_size =  1024
-        # Create a CustomBlock with the same parameters as the original block
+    # for i, block in enumerate(nu_block):
+    #     if i==0:
+    #         embed_dim = encoder_embed_dim  # Dimension of input features
+    #         num_heads = encoder_num_heads  # Number of attention heads
+    #         mlp_ratio = 4 # MLP expansion ratio
+    #         qkv_bias = True  # Whether QKV has bias
+    #         norm_layer = partial(torch.nn.LayerNorm, eps=1e-6) # Normalization layer type
+    #         act_layer = nn.GELU
+    #         use_rel_pos = True  # Whether relative position embeddings are used
+    #         rel_pos_zero_init = True
+    #         window_size = block.window_size 
+    #         global_attn_indexes = encoder_global_attn_indexes  
+    #         patch_size = 16 # Default patch size
+    #         img_size =  1024
+    #     # Create a CustomBlock with the same parameters as the original block
         
-            custom_block = model_utils.CustomBlock(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                norm_layer=norm_layer,
-                act_layer=act_layer,
-                use_rel_pos=use_rel_pos,
-                rel_pos_zero_init=rel_pos_zero_init,
-                window_size=window_size if i not in global_attn_indexes else 0,
-                input_size=(img_size // patch_size, img_size // patch_size),
-            )
-        elif i ==len(nu_block)-1:
+    #         # custom_block = model_utils.CustomBlock(
+    #         custom_block = model_utils.CustomBlock_fuse(
+    #             dim=embed_dim,
+    #             num_heads=num_heads,
+    #             mlp_ratio=mlp_ratio,
+    #             qkv_bias=qkv_bias,
+    #             norm_layer=norm_layer,
+    #             act_layer=act_layer,
+    #             use_rel_pos=use_rel_pos,
+    #             rel_pos_zero_init=rel_pos_zero_init,
+    #             window_size=window_size if i not in global_attn_indexes else 0,
+    #             input_size=(img_size // patch_size, img_size // patch_size),
+    #         )
+    #     # elif i ==len(nu_block)-1:
             
-            custom_block = model_utils.CustomBlock_3(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                norm_layer=norm_layer,
-                act_layer=act_layer,
-                use_rel_pos=use_rel_pos,
-                rel_pos_zero_init=rel_pos_zero_init,
-                window_size=window_size if i not in global_attn_indexes else 0,
-                input_size=(img_size // patch_size, img_size // patch_size),
-            )
-        else:
-            custom_block = model_utils.CustomBlock_2(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                norm_layer=norm_layer,
-                act_layer=act_layer,
-                use_rel_pos=use_rel_pos,
-                rel_pos_zero_init=rel_pos_zero_init,
-                window_size=window_size if i not in global_attn_indexes else 0,
-                input_size=(img_size // patch_size, img_size // patch_size),
-            )
+    #     #     custom_block = model_utils.CustomBlock_3(
+    #     #         dim=embed_dim,
+    #     #         num_heads=num_heads,
+    #     #         mlp_ratio=mlp_ratio,
+    #     #         qkv_bias=qkv_bias,
+    #     #         norm_layer=norm_layer,
+    #     #         act_layer=act_layer,
+    #     #         use_rel_pos=use_rel_pos,
+    #     #         rel_pos_zero_init=rel_pos_zero_init,
+    #     #         window_size=window_size if i not in global_attn_indexes else 0,
+    #     #         input_size=(img_size // patch_size, img_size // patch_size),
+    #     #     )
+    #     else:
+    #         custom_block = model_utils.CustomBlock_fuse(
+    #             dim=embed_dim,
+    #             num_heads=num_heads,
+    #             mlp_ratio=mlp_ratio,
+    #             qkv_bias=qkv_bias,
+    #             norm_layer=norm_layer,
+    #             act_layer=act_layer,
+    #             use_rel_pos=use_rel_pos,
+    #             rel_pos_zero_init=rel_pos_zero_init,
+    #             window_size=window_size if i not in global_attn_indexes else 0,
+    #             input_size=(img_size // patch_size, img_size // patch_size),
+    #         )
             
-        custom_block.norm1= block.norm1.__class__(block.norm1.mean_dim, eps=block.norm1.eps)
+    #     # custom_block.norm1= block.norm1.__class__(block.norm1.mean_dim, eps=block.norm1.eps)
+    #     # custom_block.norm2 = block.norm2.__class__(block.norm2.mean_dim, eps=block.norm2.eps)
         
-        custom_block.norm2 = block.norm2.__class__(block.norm2.mean_dim, eps=block.norm2.eps)
+    #     custom_block.norm1.weight.data.copy_(block.norm1.weight.data)
+    #     custom_block.norm1.bias.data.copy_(block.norm1.bias.data)
+        
+    #     custom_block.norm2.weight.data.copy_(block.norm1.weight.data)
+    #     custom_block.norm2.bias.data.copy_(block.norm1.bias.data)
         
 
-        # Copy attention weights
-        custom_block.attn.qkv.weight.data.copy_(block.attn.qkv.weight.data)
-        custom_block.attn.qkv.bias.data.copy_(block.attn.qkv.bias.data)
-        custom_block.attn.proj.weight.data.copy_(block.attn.proj.weight.data)
-        custom_block.attn.proj.bias.data.copy_(block.attn.proj.bias.data)
-        # custom_blocl.attn.scale.data.copy_(block.attn.scale.data)
-        custom_block.attn.rel_pos_w.data.copy_(block.attn.rel_pos_w.data)
-        custom_block.attn.rel_pos_h.data.copy_(block.attn.rel_pos_h.data)  
-        # Copy MLP weights
-        custom_block.mlp.lin1.weight.data.copy_(block.mlp.lin1.weight.data)
-        custom_block.mlp.lin1.bias.data.copy_(block.mlp.lin1.bias.data)
-        custom_block.mlp.lin2.weight.data.copy_(block.mlp.lin2.weight.data)
-        custom_block.mlp.lin2.bias.data.copy_(block.mlp.lin2.bias.data)
+    #     # Copy attention weights
+    #     custom_block.attn.qkv.weight.data.copy_(block.attn.qkv.weight.data)
+    #     custom_block.attn.qkv.bias.data.copy_(block.attn.qkv.bias.data)
+    #     custom_block.attn.proj.weight.data.copy_(block.attn.proj.weight.data)
+    #     custom_block.attn.proj.bias.data.copy_(block.attn.proj.bias.data)
+    #     # custom_blocl.attn.scale.data.copy_(block.attn.scale.data)
+    #     custom_block.attn.rel_pos_w.data.copy_(block.attn.rel_pos_w.data)
+    #     custom_block.attn.rel_pos_h.data.copy_(block.attn.rel_pos_h.data)  
+    #     # Copy MLP weights
+    #     custom_block.mlp.lin1.weight.data.copy_(block.mlp.lin1.weight.data)
+    #     custom_block.mlp.lin1.bias.data.copy_(block.mlp.lin1.bias.data)
+    #     custom_block.mlp.lin2.weight.data.copy_(block.mlp.lin2.weight.data)
+    #     custom_block.mlp.lin2.bias.data.copy_(block.mlp.lin2.bias.data)
 
-        custom_block._take_Q(Q_image_encoder)
-        model.image_encoder.blocks[i] = custom_block
+    #     custom_block._take_Q(Q_image_encoder)
+    #     model.image_encoder.blocks[i] = custom_block
         
         
-    for i, block in enumerate(model.image_encoder.blocks[:1]):
+    for i, block in enumerate(model.image_encoder.blocks[:]):
         # Store original attention parameters
         original_attn = block.attn
-        
+        original_mlp = block.mlp
         # Get dim from qkv input features (not stored directly as attribute)
         dim = original_attn.qkv.in_features
         num_heads = original_attn.num_heads
@@ -528,12 +418,24 @@ def rotate_model(model, Q_image_encoder,Q_mask_decoder, args):
             use_rel_pos=use_rel_pos,
             input_size=input_size
         )
+        custom_mlp = model_utils.custom_MLPBlock(
+            embedding_dim=dim,
+            mlp_dim=original_mlp.lin1.out_features,
+            
+        )
         custom_attn.to(target_device)
         # Copy weights from original attention
         custom_attn.qkv.weight.data = original_attn.qkv.weight.data.to(target_device)
         custom_attn.qkv.bias.data = original_attn.qkv.bias.data.to(target_device)
         custom_attn.proj.weight.data = original_attn.proj.weight.data.to(target_device)
         custom_attn.proj.bias.data = original_attn.proj.bias.data.to(target_device)
+        
+        custom_mlp.to(target_device)
+        # Copy weights from original MLP
+        custom_mlp.lin1.weight.data = original_mlp.lin1.weight.data.to(target_device)
+        custom_mlp.lin1.bias.data = original_mlp.lin1.bias.data.to(target_device)
+        custom_mlp.lin2.weight.data = original_mlp.lin2.weight.data.to(target_device)
+        custom_mlp.lin2.bias.data = original_mlp.lin2.bias.data.to(target_device)
         
         
         # Set relative position embeddings if used
@@ -543,9 +445,9 @@ def rotate_model(model, Q_image_encoder,Q_mask_decoder, args):
         
         # Set Q matrix
         custom_attn._take_Q(Q_image_encoder)
+        custom_mlp._take_Q(Q_image_encoder)
         block.attn = custom_attn
-    
-    # rotate_head_sam(model, Q_mask_decoder,args)
+        block.mlp = custom_mlp
     
     rotate_model_sam(model,Q_image_encoder,Q_mask_decoder,args)
     utils.cleanup_memory()

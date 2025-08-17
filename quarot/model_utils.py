@@ -2,6 +2,7 @@
 import torch
 from segment_anything.modeling.image_encoder import Attention as OriginalAttention
 from segment_anything.modeling.image_encoder import Block as OriginalBlock
+from segment_anything.modeling.common import MLPBlock as OriginalMLPBlock
 from typing import Optional, Tuple, Type
 import torch.nn.functional as F
 import ipdb
@@ -83,7 +84,6 @@ def replace_modules(
         
         # if ("mask_decoder" in name and "norm2" in name) or ("image_encoder" in name and "norm" in name):
         if "image_encoder" in name and "norm" in name :
-
             if isinstance(module, type_to_replace):
                 modules_to_replace.append((name, module))
 
@@ -196,17 +196,17 @@ class CustomBlock(OriginalBlock):
         # x = (( x.double() @ self.Q.T)@self.Q).to(torch.float32) + self.mlp(self.norm2(x)) --> this line is equivalent to the next line
         x = x + self.mlp(self.norm2(x))
         return x
-class CustomBlock_3(OriginalBlock):
+
+class CustomBlock_fuse(OriginalBlock):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.Q= None
-    def _take_Q(self, Q: Optional[torch.Tensor] = None):
+        self.Q= None        
+    def _take_Q(self, Q: Optional[torch.Tensor] = None):    
         if Q is not None:
             self.Q = Q
     def forward(self, x: torch.Tensor):
-        
-        shortcut = (x.double()@self.Q.T).to(torch.float32)
-        shortcut_ = x
+        shortcut = x
+        x= center_features(x) 
         x = self.norm1(x)
         # Window partition
         if self.window_size > 0:
@@ -217,39 +217,45 @@ class CustomBlock_3(OriginalBlock):
         # Reverse window partition
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, (H, W))
-            
-        # x= shortcut + x
-        # x = x+self.mlp(self.norm2(x))
 
-        # x = (shortcut.double() @ self.Q).to(torch.float32) + x # equivalent to the next line
-        x = shortcut_ + x
-        x =( x.double() @ self.Q.T ).to(torch.float32)+ self.mlp(self.norm2(x))
-        
-        return x  
-class CustomBlock_2(OriginalBlock):
+        x = shortcut + x
+        # x = (shortcut.double() @ self.Q).to(torch.float32) + x 
+        center_x= center_features(x)
+        x = x + self.mlp(self.norm2(center_x))
+
+        return x
+class custom_MLPBlock(OriginalMLPBlock):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.Q= None
+        self.Q = None
     def _take_Q(self, Q: Optional[torch.Tensor] = None):
         if Q is not None:
             self.Q = Q
     def forward(self, x: torch.Tensor):
+        B, H, W, C = x.shape
+        self.Q = self.Q.to( dtype=x.dtype)
         
-        shortcut = (x.double()@self.Q.T).to(torch.float32)
-        # shortcut_ = x
-        x = self.norm1(x)
-        # Window partition
-        if self.window_size > 0:
-            H, W = x.shape[1], x.shape[2]
-            x, pad_hw = window_partition(x, self.window_size)
-
-        x = self.attn(x)
-        # Reverse window partition
-        if self.window_size > 0:
-            x = window_unpartition(x, self.window_size, pad_hw, (H, W))
+        x_flat = x.reshape(B, H*W, C)
+        x_rotated = torch.matmul(x_flat, self.Q)
+        x = x_rotated.reshape(B, H, W, C)
+        return self.lin2(self.act(self.lin1(x)))
+def center_features(dataset: torch.Tensor) -> torch.Tensor:
+    """
+    Centers a dataset along the feature dimension by subtracting the mean of each feature.
+    
+    Args:
+        dataset: Input tensor with shape [batch_size, ..., feature_dim]
         
-        x = (shortcut.double() @ self.Q).to(torch.float32) + x   
-        # x = shortcut_ +x     
-        # x = (( x.double() @ self.Q.T)@self.Q).to(torch.float32) + self.mlp(self.norm2(x)) # this line is equivalent to the next line
-        x = x + self.mlp(self.norm2(x))
-        return x  
+    Returns:
+        Tensor of same shape as input with features centered to zero mean
+    """
+    # Identify the feature dimension (last dimension)
+    feature_dim = -1
+    
+    # Calculate mean along the feature dimension, keeping other dimensions
+    feature_means = torch.mean(dataset, dim=feature_dim, keepdim=True)
+    
+    # Subtract the mean from each feature
+    centered_dataset = dataset - feature_means
+    
+    return centered_dataset

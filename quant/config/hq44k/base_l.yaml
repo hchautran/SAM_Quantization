@@ -6,6 +6,7 @@ model:
   restore_model:  ./pretrained_checkpoint/epoch_11.pth
 
 quantization:
+  quandecoder: False
   quanrtn: False
   quansmooth: False
   quanro: False

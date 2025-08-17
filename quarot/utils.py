@@ -14,9 +14,12 @@ from per_tensor_channel_group import (
     quantize_activation_per_token_absmax,
     quantize_activation_per_tensor_absmax,
     quantize_activation_per_group_absmax_token_dim,
+    quantize_weight_per_channel_absmax,
+    quantize_weight_per_tensor_absmax,
+    quantize_weight_per_group_absmax_input_features,
 )
 from hadamard_utils import matmul_hadU_cuda, fast_hadamard_transform
-
+from functools import partial 
 import numpy as np
 
 
@@ -78,6 +81,7 @@ def parser_gen():
     parser.add_argument('--k_clip_ratio', type=float, default=1.0,
         help='Clip ratio for k-cache quantization. new_max = max * clip_ratio')
 
+    
     # WandB Arguments
     parser.add_argument('--wandb', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--wandb_id', type=str, default=None)
@@ -192,40 +196,6 @@ class ActQuantizer(torch.nn.Module):
             )
         else:
             raise ValueError(f"Invalid act_quant: {act_quant}")
-def find_params_per_token_groupwise(self, x):
-    """
-    Find quantization parameters for token-wise group quantization.
-    
-    This method is deprecated as quantization is now performed directly in the forward pass.
-    
-    Parameters:
-        x (torch.Tensor): The input tensor to find quantization parameters for.
-        
-    Returns:
-        None: This method is a placeholder and does not return any value.
-    """
-    # No longer needed - quantization is done directly in forward pass
-    pass
-
-def find_params(self, x):
-    """
-    Find quantization parameters for the input tensor.
-    
-    This method is deprecated as quantization is now performed directly in the forward pass.
-    
-    Parameters:
-        x (torch.Tensor): The input tensor to find quantization parameters for.
-        
-    Returns:
-        None: This method is a placeholder and does not return any value.
-    """
-    # No longer needed - quantization is done directly in forward pass
-    pass
-
-    def __repr__(self):
-        return f"ActQuantizer(bits={self.bits}, method={self.act_quant_name}, group_size={self.group_size})"
-
-
 
 
 class ActQuantWrapper(torch.nn.Module):
@@ -237,26 +207,25 @@ class ActQuantWrapper(torch.nn.Module):
         a pre-forward hook will be registered to rotate the activation before quantization.
     '''
 
-    def __init__(self, module: torch.nn.Linear, act_quant="per_token", group_size=None):
+    def __init__(self, module: torch.nn.Linear, act_quant="per_token",weight_quant ="per_channel", n_bit =8, group_size=None):
         super(ActQuantWrapper, self).__init__()
         assert isinstance(module, torch.nn.Linear)
         self.module = module
         self.weight = module.weight
         self.bias = module.bias
         self.group_size = group_size
-
+        self.n_bits = n_bit
         # Set the activation quantization method
+        
         if act_quant == "per_token":
             self.act_quant_name = "per_token"
-            self.act_quant = quantize_activation_per_token_absmax
+            self.act_quant = partial(quantize_activation_per_token_absmax, n_bits=self.n_bits)
         elif act_quant == "per_tensor":
             self.act_quant_name = "per_tensor"
-            self.act_quant = quantize_activation_per_tensor_absmax
+            self.act_quant = partial(quantize_activation_per_tensor_absmax, n_bits=self.n_bits)
         elif act_quant == "per_group_token":
             self.act_quant_name = "per_group_token"
-            self.act_quant = lambda x: quantize_activation_per_group_absmax_token_dim(
-                x, group_size=self.group_size
-            )
+            self.act_quant = partial(quantize_activation_per_group_absmax_token_dim, group_size=self.group_size, n_bits=self.n_bits)
         else:
             raise ValueError(f"Invalid act_quant: {act_quant}")
 
@@ -270,13 +239,19 @@ class ActQuantWrapper(torch.nn.Module):
         self.quantize_output = False
         self.quantize_input = False
         
+        if weight_quant == "per_channel":
+            self.weight = quantize_weight_per_channel_absmax(self.weight, n_bits=self.n_bits)
+        elif weight_quant == "per_tensor":  
+            self.weight = quantize_weight_per_tensor_absmax(self.weight, n_bits=self.n_bits)
+        elif weight_quant == "per_group":
+            self.weight = quantize_weight_per_group_absmax_input_features(self.weight, n_bits=self.n_bits, group_size=group_size)
 
     def extra_repr(self) -> str:
         return f"Activation Quantization: {self.act_quant_name}"
 
     def forward(self, x):
         x_dtype = x.dtype
-
+        
         # Rotate, if needed
         if self.online_full_had:
             if self.fp32_had:  # Full Hadamard in FP32
@@ -289,7 +264,11 @@ class ActQuantWrapper(torch.nn.Module):
                 x = x.float()
 
             init_shape = x.shape
-            x=x.reshape(init_shape[0],init_shape[1]*init_shape[2], init_shape[3])
+            
+            dims = len(init_shape)
+        
+            if dims == 4:  # 4D tensor [B, H, W, C] - image encoder
+                x = x.reshape(init_shape[0], init_shape[1]*init_shape[2], init_shape[3])
             
             if self.K == 1:
                 x = fast_hadamard_transform.hadamard_transform(
@@ -307,7 +286,6 @@ class ActQuantWrapper(torch.nn.Module):
             if self.fp32_had:
                 x = x.to(x_dtype)
             x = x.reshape(init_shape)
-
         if self.quantize_input :
             x = self.act_quant(x)
 
@@ -316,37 +294,104 @@ class ActQuantWrapper(torch.nn.Module):
         
         if self.quantize_output:
             x = self.act_quant(x)
-            
         return x
 
 
 def add_actquant(module, name='', layers=[torch.nn.Linear,
                                         ActQuantWrapper,
-                                        transformers.models.falcon.modeling_falcon.FalconLinear]):
-    if isinstance(module, ActQuantWrapper):
-        return
-    for attr in dir(module):
-        tmp = getattr(module, attr)
-        if type(tmp) in layers:
-            setattr(module, attr, ActQuantWrapper(tmp))
-        if type(tmp) == torch.nn.Sequential:
-            replaced = []
-            for i, child in enumerate(tmp.children()):
-                if type(child) in layers:
-                    replaced.append(ActQuantWrapper(child))
-                else:
-                    replaced.append(child)
-            setattr(module, attr, torch.nn.Sequential(*replaced))
-        if type(tmp) == torch.nn.ModuleList:
-            replaced = []
-            for i, child in enumerate(tmp.children()):
-                if type(child) in layers:
-                    replaced.append(ActQuantWrapper(child))
-                else:
-                    replaced.append(child)
-            setattr(module, attr, torch.nn.ModuleList(replaced))
-    for name1, child in module.named_children():
-        add_actquant(child, name + '.' + name1 if name != '' else name1, layers)
+                                        transformers.models.falcon.modeling_falcon.FalconLinear],rtn_ro_config=None):
+    if rtn_ro_config is None:
+        if isinstance(module, ActQuantWrapper):
+            return
+        for attr in dir(module):
+            tmp = getattr(module, attr)
+            if type(tmp) in layers:
+                setattr(module, attr, ActQuantWrapper(tmp))
+            if type(tmp) == torch.nn.Sequential:
+                replaced = []
+                for i, child in enumerate(tmp.children()):
+                    if type(child) in layers:
+                        replaced.append(ActQuantWrapper(child))
+                    else:
+                        replaced.append(child)
+                setattr(module, attr, torch.nn.Sequential(*replaced))
+            if type(tmp) == torch.nn.ModuleList:
+                replaced = []
+                for i, child in enumerate(tmp.children()):
+                    if type(child) in layers:
+                        replaced.append(ActQuantWrapper(child))
+                    else:
+                        replaced.append(child)
+                setattr(module, attr, torch.nn.ModuleList(replaced))
+        for name1, child in module.named_children():
+            add_actquant(child, name + '.' + name1 if name != '' else name1, layers,rtn_ro_config)
+    else:
+        if isinstance(module, ActQuantWrapper):
+            return
+        n_bits = rtn_ro_config.n_bits
+        weight_quant = rtn_ro_config.weight_quant
+        act_quant = rtn_ro_config.act_quant
+        group_size = rtn_ro_config.group_size
+        quantize_output = rtn_ro_config.quantize_output
+        quantize_input  = rtn_ro_config.quantize_input
+        for attr in dir(module):
+            tmp = getattr(module, attr)
+            if type(tmp) in layers:
+                setattr(module, attr, ActQuantWrapper(
+                    tmp, 
+                    act_quant=act_quant,
+                    weight_quant=weight_quant, 
+                    n_bit=n_bits, 
+                    group_size=group_size
+                ))
+                # Set quantize_output flag if specified
+                if quantize_output:
+                    getattr(module, attr).quantize_output = True
+                if quantize_input:
+                    getattr(module, attr).quantize_input = True
+                    
+            if type(tmp) == torch.nn.Sequential:
+                replaced = []
+                for i, child in enumerate(tmp.children()):
+                    if type(child) in layers:
+                        wrapper = ActQuantWrapper(
+                            child,
+                            act_quant=act_quant,
+                            weight_quant=weight_quant,
+                            n_bit=n_bits,
+                            group_size=group_size
+                        )
+                        if quantize_output:
+                            wrapper.quantize_output = True
+                        if quantize_input:
+                            wrapper.quantize_input = True
+                        replaced.append(wrapper)
+                    else:
+                        replaced.append(child)
+                setattr(module, attr, torch.nn.Sequential(*replaced))
+                
+            if type(tmp) == torch.nn.ModuleList:
+                replaced = []
+                for i, child in enumerate(tmp.children()):
+                    if type(child) in layers:
+                        wrapper = ActQuantWrapper(
+                            child,
+                            act_quant=act_quant,
+                            weight_quant=weight_quant,
+                            n_bit=n_bits,
+                            group_size=group_size
+                        )
+                        if quantize_output:
+                            wrapper.quantize_output = True
+                        if quantize_input:
+                            wrapper.quantize_input = True
+                        replaced.append(wrapper)
+                    else:
+                        replaced.append(child)
+                setattr(module, attr, torch.nn.ModuleList(replaced))
+                
+        for name1, child in module.named_children():
+            add_actquant(child, name + '.' + name1 if name != '' else name1, layers, rtn_ro_config)
         
 def find_qlayers(module, layers=[torch.nn.Linear,
                                 ActQuantWrapper], name=''):

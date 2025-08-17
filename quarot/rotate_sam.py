@@ -1,23 +1,19 @@
 import utils
 import torch
 import model_utils
-import transformers
 import rotation_utils
 import hadamard_utils
-import checkpoint_utils
 from segment_anything import sam_model_registry, SamPredictor
 import copy
 import os
 import cv2
-import ipdb
 import numpy as np
 import matplotlib.pyplot as plt
-def print_model_structure(model, title="Model Structure"):
-    print(f"\n{title}")
-    print("=" * len(title))
-    for name, module in model.named_modules():
-        print(f"{name}: {module.__class__.__name__}")
-    print("=" * len(title))
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from RTN_quantization.utils import replace_linear_with_target_and_quantize
+from RTN_quantization.per_tensor_channel_group import W8A8Linear
 def show_mask(mask, ax, random_color=False):
     if random_color:
         color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
@@ -67,6 +63,64 @@ def show_res_multi(masks, scores, input_point, input_label, input_box, filename,
     plt.axis('off')
     plt.savefig(filename +'.png',bbox_inches='tight',pad_inches=-0.1)
     plt.close()
+def rotate_sam(sam_model, args, rtn_ro_config,decoder= False):
+    sam_model.eval()
+    Q_image_encoder = rotation_utils.get_orthogonal_matrix(args.hidden_size_image_en,args.rotate_mode,device = args.device,seed=args.seed)
+    Q_mask_decoder = rotation_utils.get_orthogonal_matrix(args.hidden_size_mask_de,args.rotate_mode,device = args.device,seed=args.seed+1)
+    if not decoder:
+        # rotation_utils.fuse_layer_norms_sam(sam_model)  
+        rotation_utils.rotate_model(sam_model,Q_image_encoder, Q_mask_decoder , args)  
+        utils.cleanup_memory(verbos=True)
+        utils.add_actquant(sam_model,rtn_ro_config=rtn_ro_config) 
+        qlayers = utils.find_qlayers(sam_model)
+        for name in qlayers:
+            if ("lin2" in name) and  not ("final_attn" in name): 
+                if "mask_decoder" in name:  
+                    intermidiate_size = sam_model.mask_decoder.transformer.layers[0].mlp.lin2.weight.shape[1]
+                elif "image_encoder" in name:
+                    intermidiate_size = sam_model.image_encoder.blocks[0].mlp.lin2.weight.shape[1]
+                had_K, K = hadamard_utils.get_hadK(intermidiate_size)
+                qlayers[name].online_full_had = True
+                qlayers[name].had_K = had_K
+                qlayers[name].K = K
+                qlayers[name].fp32_had = args.fp32_had
+            if 'image_encoder' in name and "proj"  in name:  
+                had_K, K = hadamard_utils.get_hadK(args.num_attention_head_image_en)
+                qlayers[name].online_partial_had = True
+                qlayers[name].had_K = had_K
+                qlayers[name].K = K
+                qlayers[name].had_dim = args.hidden_size_image_en // args.num_attention_head_image_en
+                qlayers[name].fp32_had = args.fp32_had
+            if ('cross_attn' in name or "self_attn" in name) and "out_proj"  in name :  
+                had_K, K = hadamard_utils.get_hadK(args.num_attention_head_mask_de)
+                qlayers[name].online_partial_had = True
+                qlayers[name].had_K = had_K
+                qlayers[name].K = K
+                qlayers[name].had_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
+                qlayers[name].fp32_had = args.fp32_had
+    else:
+        rotation_utils.rotate_decoder(sam_model, Q_mask_decoder, args)  
+        utils.cleanup_memory(verbos=True)
+        utils.add_actquant(sam_model,rtn_ro_config=rtn_ro_config) 
+        qlayers = utils.find_qlayers(sam_model)
+        for name in qlayers:
+            if ("lin2" in name)  and not ("final_attn" in name): 
+                intermidiate_size = sam_model.transformer.layers[0].mlp.lin2.weight.shape[1]
+                had_K, K = hadamard_utils.get_hadK(intermidiate_size)
+                qlayers[name].online_full_had = True
+                qlayers[name].had_K = had_K
+                qlayers[name].K = K
+                qlayers[name].fp32_had = args.fp32_had
+            if ('cross_attn' in name or "self_attn" in name) and "out_proj"  in name:  
+                had_K, K = hadamard_utils.get_hadK(args.num_attention_head_mask_de)
+                qlayers[name].online_partial_had = True
+                qlayers[name].had_K = had_K
+                qlayers[name].K = K
+                qlayers[name].had_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
+                qlayers[name].fp32_had = args.fp32_had
+    # print_model_structure(sam_model, title="Model Structure After Rotation")  
+    # exit()
+    
 def main():
     args = utils.parser_gen()
     if args.wandb:
@@ -82,41 +136,24 @@ def main():
 
     print(f"Loading SAM model: {sam_model_type}")
     sam_model = sam_model_registry[sam_model_type](checkpoint=sam_model_checkpoint)
-    origin_model = copy.deepcopy(sam_model) 
     sam_model.to(device)
     sam_model.eval()
-    
-    
-    
-
-    # block0 = sam_model.image_encoder.blocks[0]
-    # image_encoder_hidden_size = block0.attn.qkv.weight.shape[1]  # Input dimension
-    # image_encoder_num_heads = block0.attn.num_heads
-    # image_encoder_head_dim = image_encoder_hidden_size // image_encoder_num_heads
-    # print(f"Image Encoder - Hidden Size: {image_encoder_hidden_size}, Num Heads: {image_encoder_num_heads}, Head Dim: {image_encoder_head_dim}")
-    # layer0 = sam_model.mask_decoder.transformer.layers[0]
-    # mask_decoder_hidden_size = layer0.self_attn.q_proj.weight.shape[1]
-    # mask_decoder_num_heads = layer0.self_attn.num_heads
-    # mask_decoder_head_dim = mask_decoder_hidden_size // mask_decoder_num_heads
-    # print(f"Mask Decoder - Hidden Size: {mask_decoder_hidden_size}, Num Heads: {mask_decoder_num_heads}, Head Dim: {mask_decoder_head_dim}")
-
-    
-   
+ 
     if args.rotate:
         print("Starting model rotation...")
         Q_image_encoder = rotation_utils.get_orthogonal_matrix(args.hidden_size_image_en,args.rotate_mode,device = args.device,seed=args.seed)
         Q_mask_decoder = rotation_utils.get_orthogonal_matrix(args.hidden_size_mask_de,args.rotate_mode,device = args.device,seed=args.seed+1)
         # Use SAM-specific functions
-        rotation_utils.fuse_layer_norms_sam(sam_model)
+        # rotation_utils.fuse_layer_norms_sam(sam_model)
         
         rotation_utils.rotate_model(sam_model,Q_image_encoder, Q_mask_decoder , args)  # Use SAM-specific rotation
         utils.cleanup_memory(verbos=True)
         
-        utils.add_actquant(sam_model) #Add Activation Wrapper to the model
+        utils.add_actquant(sam_model,rtn_ro_config=None) #Add Activation Wrapper to the model
         qlayers = utils.find_qlayers(sam_model)
         for name in qlayers:
             
-            if ("lin2" in name) and ("image_encoder" in name): #ffn layers
+            if ("lin2" in name) and not ("final_attn" in name): #ffn layers
                 if "mask_decoder" in name:  
                     intermidiate_size = sam_model.mask_decoder.transformer.layers[0].mlp.lin2.weight.shape[1]
                 elif "image_encoder" in name:
@@ -127,13 +164,19 @@ def main():
                 qlayers[name].K = K
                 qlayers[name].fp32_had = args.fp32_had
             if 'image_encoder' in name and "proj"  in name:  # attention layer just decoder only as it include position embeddings
-                had_K, K = hadamard_utils.get_hadK(args.num_attention_head_mask_de)
+                had_K, K = hadamard_utils.get_hadK(args.num_attention_head_image_en)
                 qlayers[name].online_partial_had = True
                 qlayers[name].had_K = had_K
                 qlayers[name].K = K
                 qlayers[name].had_dim = args.hidden_size_image_en // args.num_attention_head_image_en
                 qlayers[name].fp32_had = args.fp32_had
-                
+            if ('cross_attn' in name or "self_attn" in name) and "out_proj"  in name:  # attention layer just decoder only as it include position embeddings
+                had_K, K = hadamard_utils.get_hadK(args.num_attention_head_mask_de)
+                qlayers[name].online_partial_had = True
+                qlayers[name].had_K = had_K
+                qlayers[name].K = K
+                qlayers[name].had_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
+                qlayers[name].fp32_had = args.fp32_had
                 
         
         # if args.k_bits < 16:
@@ -236,15 +279,6 @@ def main():
             input_box = input_box.cpu().numpy()
             show_res_multi(masks, scores, input_point, input_label, input_box, result_path + 'example'+str(i), image)
    
-        #compare logits
-        
-        # Save checkpoint in original format
-        # save_path = "/media/caduser/MyBook/chau/chi/SAM_Quantization/pretrained_checkpoint/sam_hq_vit_l_rotation.pth"
-        
-        # origin_model.to(device)
-        # checkpoint_utils.save_checkpoint_original_format(sam_model, save_path, original_model=origin_model)
-        
-    # print_model_structure(sam_model, title="Model Structure After Rotation")  
 
 if __name__ == '__main__':
     main()

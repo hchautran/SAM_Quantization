@@ -31,6 +31,17 @@ import time
 from omegaconf import OmegaConf
 
 
+def setup_logger(path_log,state):
+    if not os.path.exists(path_log):
+        os.makedirs(path_log)
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    fh = logging.FileHandler(os.path.join(path_log, f'{state}.log'))
+    fh.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(message)s')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    return logger
 
 class SeginwInferenceStrategy(InferenceStrategy):
     def __init__(self, sam_config:dict):
@@ -44,15 +55,6 @@ class SeginwInferenceStrategy(InferenceStrategy):
         self.predictor = None
         self.image = None
         
-        # quantization:
-        #     quanrtn: False
-        #     quansmooth: False
-        #     quanro: False
-        #     act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
-        #     act_quant: per_token
-        #     weight_quant: per_channel
-        #     n_bits: 4
-        #     quantize_output: True
         self.quant_rtn = sam_config.quantization.quanrtn
         self.quant_smooth = sam_config.quantization.quansmooth
         self.quant_ro  = sam_config.quantization.quanro
@@ -67,30 +69,23 @@ class SeginwInferenceStrategy(InferenceStrategy):
             self.predictor = SamPredictor(build_sam_hq(checkpoint=self.sam_ckt).to(self.device))
         else:
             self.predictor = SamPredictor(build_sam(checkpoint=self.sam_ckt).to(self.device))
+            
         if self.quant_smooth:
-            print("Running Smooth_sam.py to generate act_scales_file")
             assert self.act_scales_file is not None, "Run Smooth_sam.py to generate act_scales_file"
             act_scales = torch.load(self.act_scales_file)
-            self.predictor = utils.smooth_sam(self.predictor, act_scales, alpha=0.5)
-            modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
-            utils.replace_linear_with_target_and_quantize(module=self.predictor,
-                                                        target_class=per_tensor_channel_group.W8A8Linear,
-                                                        n_bit=self.n_bits,
-                                                        module_name_to_exclude=modules_to_exclude,
-                                                        weight_quant=self.weight_quant,    
-                                                        act_quant=self.act_quant,           
-                                                        quantize_output=self.quantize_output)
-        elif self.quant_rtn:
-            modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
-            utils.replace_linear_with_target_and_quantize(module=self.predictor,
-                                                        target_class=per_tensor_channel_group.W8A8Linear,
-                                                        n_bit=self.n_bits,
-                                                        module_name_to_exclude=modules_to_exclude,
-                                                        weight_quant=self.weight_quant,    
-                                                        act_quant=self.act_quant,           
-                                                        quantize_output=self.quantize_output)
+            self.predictor = rtn_utils.smooth_sam(self.predictor, act_scales, alpha=0.5)
         elif self.quant_ro:
-            raise NotImplementedError("QuaRot quantization is not implemented for SAM yet")
+            rot_args= parser_gen()
+            rotate_sam.rotate_sam(self.predictor,rot_args)
+        if self.quant_rtn:
+            modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
+            rtn_utils.replace_linear_with_target_and_quantize(module=self.predictor,
+                                                        target_class=per_tensor_channel_group.W8A8Linear,
+                                                        n_bit=self.n_bits,
+                                                        module_name_to_exclude=modules_to_exclude,
+                                                        weight_quant=self.weight_quant,    
+                                                        act_quant=self.act_quant,           
+                                                        quantize_output=self.quantize_output)
         return self.predictor
 
 
@@ -140,7 +135,16 @@ class SeginwSamEngine(Engine):
         model.eval()
         return model
 
-    def evaluate(self, args):
+    def evaluate(self, args,args_quant):
+        state="hq44k_"
+        if args_quant.quantization.quanrtn:
+            state +="rtn"
+        if args_quant.quantization.quansmooth:
+            state += "smooth"
+        if args_quant.quantization.quanro:
+            state += "ro"
+        logger =setup_logger(args.logging_path,state)
+        
         objects = os.listdir(args.data_path)
         cfg = SLConfig.fromfile(args.config_file)
         # build model
@@ -271,7 +275,7 @@ if __name__ == "__main__":
 
     engine = SeginwSamEngine(SeginwInferenceStrategy(args))
     # breakpoint()
-    engine.evaluate(args.data)
+    engine.evaluate(args.data,args.quantization)
     
     prompts = {
         'point_coords': None, 
