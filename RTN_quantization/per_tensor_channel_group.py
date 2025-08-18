@@ -2,7 +2,6 @@ import torch
 from torch import nn
 from functools import partial
 
-
 @torch.no_grad()
 def quantize_weight_per_channel_absmax(w, n_bits=8):
     # w: (out_features, in_features)
@@ -12,7 +11,6 @@ def quantize_weight_per_channel_absmax(w, n_bits=8):
     w.div_(scales).round_().mul_(scales)
     return w
 
-
 @torch.no_grad()
 def quantize_weight_per_tensor_absmax(w, n_bits=8):
     # w: (out_features, in_features)
@@ -21,7 +19,6 @@ def quantize_weight_per_tensor_absmax(w, n_bits=8):
     scales.clamp_(min=1e-5).div_(q_max)
     w.div_(scales).round_().mul_(scales)
     return w
-
 
 @torch.no_grad()
 def quantize_weight_per_group_absmax_input_features(w, group_size, n_bits=8):
@@ -161,6 +158,7 @@ class W8A8Linear(nn.Module):
         q_x = self.act_quant(x)
         y = torch.functional.F.linear(q_x, self.weight, self.bias)
         q_y = self.output_quant(y)
+
         return q_y
 
     @staticmethod
@@ -174,12 +172,14 @@ class W8A8Linear(nn.Module):
             module.bias is not None,
             act_quant=act_quant,
             quantize_output=quantize_output,
-            group_size=group_size
+            group_size=group_size,
+            n_bit=n_bits 
         )
         if weight_quant == "per_channel":
             new_module.weight = quantize_weight_per_channel_absmax(
                 module.weight, n_bits=n_bits
             )  # use 8-bit integer for weight
+            
         elif weight_quant == "per_tensor":
             new_module.weight = quantize_weight_per_tensor_absmax(
                 module.weight, n_bits=n_bits

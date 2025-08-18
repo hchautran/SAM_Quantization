@@ -13,7 +13,7 @@ sam_hq_path = os.path.join(project_root, "sam-hq")
 sys.path.insert(0, sam_hq_path)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from segment_anything import sam_model_registry, SamPredictor
-from calibration import get_act_scales_sam
+# from calibration import get_act_scales_sam
 from utils import smooth_sam
 
 
@@ -90,9 +90,26 @@ def prepare_batched_input_for_calibration():
     
     return batched_input
 
+def print_model_structure(model, title="Model Structure"):
+    print(f"\n{title}")
+    print("=" * len(title))
+    for name, module in model.named_modules():
+        print(f"{name}: {module.__class__.__name__}")
+        
+        # Get parameters for this module and print their data types
+        params = list(module.parameters(recurse=False))
+        print(params)
+        exit()
+        if params:
 
+            for i, param in enumerate(params):
+                dtype_str = str(param.dtype).split('.')[-1]  # Get readable dtype name
+                shape_str = str(tuple(param.shape))
+                print(f"    Param {i}: {shape_str}, {dtype_str}")
+    
+    print("=" * len(title))
 if __name__ == "__main__":
-    sam_checkpoint = "./checkpoint_sam/sam_hq_vit_l_1.pth"  # Updated path
+    sam_checkpoint = "./pretrained_checkpoint/sam_hq_vit_l.pth"  # Updated path
     model_type = "vit_l"
     device = "cuda"
     act_scales_file = None
@@ -105,7 +122,7 @@ if __name__ == "__main__":
   
     # Load or calculate activation scales
     act_scales_file = f"./pretrained_checkpoint/sam_{model_type}activation_scales.pt"
-
+    # act_scales_file ="/media/caduser/MyBook/chau/chi/SAM_Quantization/pretrained_checkpoint/sam_vit_lactivation_scales.pt"
     if os.path.exists(act_scales_file):
         print("Loading activation scales...")
         act_scales = torch.load(act_scales_file)
@@ -116,9 +133,12 @@ if __name__ == "__main__":
         print("Activation scales saved!")
    
     # Apply smoothing
+    print("Structure before smoothing:")
+    print_model_structure(sam, "SAM Model Structure")
     smoothed_sam = smooth_sam(sam, act_scales, alpha=0.5)
-
-    # Save smoothed model
+    print("Structure after smoothing:")
+    print_model_structure(smoothed_sam, "Smoothed SAM Model Structure")
+    
     torch.save(smoothed_sam.state_dict(), f'./checkpoint_sam/smoothed_{model_type}_sam.pth')
     print("Smoothed SAM model saved!")
     

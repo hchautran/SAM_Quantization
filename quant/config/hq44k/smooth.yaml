@@ -6,7 +6,8 @@ model:
   restore_model:  ./pretrained_checkpoint/epoch_11.pth
 
 quantization:
-  quanrtn: False
+  quandecoder: True
+  quanrtn: True
   quansmooth: True
   quanro: False
   act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt

@@ -111,7 +111,6 @@ def get_act_scales_sam(model, batched_input, num_samples=512, hq_token_only = Fa
                     )
                 else:
                     points = None
-                    print("points none")
                 
                 boxes = image_record.get("boxes", None)
                 if boxes is not None:
@@ -122,8 +121,6 @@ def get_act_scales_sam(model, batched_input, num_samples=512, hq_token_only = Fa
                 if masks is not None:
                     masks = masks.to(device)
                     print("masks none")
-                
-                # Run prompt encoder (this will trigger hooks for prompt encoder)
                 
                 sparse_embeddings, dense_embeddings = model.prompt_encoder(
                     points=points,

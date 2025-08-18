@@ -1,5 +1,6 @@
 import torch, math
 import fast_hadamard_transform
+
 # Adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
 
 def get_hadK(n, transpose=False):
@@ -82,8 +83,11 @@ def matmul_hadU(X, transpose=False):
 def matmul_hadUt(X):
     return matmul_hadU(X, transpose=True)
 
-def random_hadamard_matrix(size, device):
+def random_hadamard_matrix(size, device, seed):
     # See https://cornell-relaxml.github.io/quip-sharp/ , Section "Randomized Hadamard Transformation"
+    if seed is not None:
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     Q = torch.randint(low=0, high=2, size=(size,)).to(torch.float64)
     Q = Q * 2 - 1
     Q = torch.diag(Q)
@@ -122,7 +126,10 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
         if output:
             had_K, K = get_hadK(out_features)
             W_ = matmul_hadU_cuda(W_.t(), had_K, K).t()
+            if module.bias is not None:
+                raise ValueError("Bias has not been implemented")
         if not output:
+            
             had_K, K = get_hadK(in_features)
             W_ = matmul_hadU_cuda(W_, had_K, K)
     else:
@@ -134,11 +141,31 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
                 W_.reshape(-1, transposed_shape[-1]//had_dim, had_dim), 
                 scale=1/math.sqrt(had_dim)
                 ).reshape(transposed_shape).t()
+            if module.bias is not None:
+                bias_original_shape = module.bias.data.shape
+                
+                bias_reshaped = module.bias.data.float().cuda().reshape(-1, had_dim)
+                bias_transformed = fast_hadamard_transform.hadamard_transform(
+                    bias_reshaped.unsqueeze(0), 
+                    scale=1/math.sqrt(had_dim)
+                ).squeeze(0)
+                module.bias.data = bias_transformed.reshape(bias_original_shape).to(device=dev, dtype=dtype)
+                
+            
+            # I_had = torch.tensor(utils.hadamard_matrix_transposed(1024//had_dim, had_dim) ,device=W_.device, dtype=W_.dtype)
+                        
+            # W_ = I_had.T @ W_ / math.sqrt(had_dim)
+            # if module.bias is not None:
+            #     print("chii")
+            #     module.bias.data = I_had.T @ module.bias.data / math.sqrt(had_dim)
+            
         else:
             raise NotImplementedError("Not implemented (or tested) yet!")
             n = W_.shape[1]
             W_ = hadamard_transform(W_.reshape(-1, n//had_dim, had_dim), scale=1/math.sqrt(had_dim)).reshape(init_shape)
     module.weight.data = W_.to(device=dev, dtype=dtype)
+    # if module.bias is not None:
+        # module.bias.data = module.bias.data.to(device=dev, dtype=dtype)
 
 
 
