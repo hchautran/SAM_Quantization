@@ -1,0 +1,42 @@
+# W4A4 Quantization Configuration Example
+# This configuration enables W4A4 quantization using Triton kernels
+
+model:
+  model_type: "vit_l"
+  use_hq: false
+  checkpoint: "./pretrained_checkpoint/sam_vit_l_0b3193.pth"
+  device: "cuda"
+
+quantization:
+  # Enable W4A4 quantization
+  use_w4a4: true
+  
+  # Quantization parameters
+  n_bits: 4
+  weight_quant: "per_channel"  # Options: "per_channel", "per_tensor"
+  act_quant: "per_token"        # Options: "per_token", "per_tensor"
+  quantize_output: false        # Whether to quantize the final output
+  
+  # Group size for grouped quantization (optional)
+  w4a4_group_size: null
+  
+  # Legacy quantization options (disabled when use_w4a4 is true)
+  quanrtn: false
+  quansmooth: false
+  quanro: false
+  act_scales_file: null
+
+# Data configuration
+data:
+  data_path: "./data/coco"
+  config_file: "./config/coco/base_h.yaml"
+  checkpoint_path: "./pretrained_checkpoint/groundingdino_swint_ogc.py"
+  num_select: 300
+  num_workers: 4
+  save_json: true
+
+# Performance settings
+performance:
+  batch_size: 1
+  use_torch: true  # Use torch operations for inference
+

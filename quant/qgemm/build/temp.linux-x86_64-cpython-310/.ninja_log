@@ -1,0 +1,4 @@
+# ninja log v7
+1	6003	1756068759040561562	/home/chau.th/SAM_Quantization/quant/qgemm/build/temp.linux-x86_64-cpython-310/home/chau.th/SAM_Quantization/quant/qgemm/kernels/quant.o	dc11c784518a428b
+0	13417	1756068759040561562	/home/chau.th/SAM_Quantization/quant/qgemm/build/temp.linux-x86_64-cpython-310/home/chau.th/SAM_Quantization/quant/qgemm/kernels/gemm.o	15828e530ed396b
+2	19110	1756069667440558915	/home/chau.th/SAM_Quantization/quant/qgemm/build/temp.linux-x86_64-cpython-310/home/chau.th/SAM_Quantization/quant/qgemm/kernels/bindings.o	6de005ac31cbb05d

@@ -41,4 +41,11 @@ pretrained_checkpoint/
 */sam-hq/
 *.pth
 work_dirs/
+*.cmake
+*/build
+CMakeCache.txt
+CMakeLists.txt
+Makefile
+*.so
+*/CmakeFiles
 

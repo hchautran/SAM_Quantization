@@ -1,18 +1,14 @@
 import os
 import sys
-import math
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from collections import defaultdict
-import ipdb
-from torch.nn.modules import linear
 from typing import Optional, Tuple, Callable, List
 from functools import partial
-import numpy as np
 from matplotlib import pyplot as plt
-from PIL import Image
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)  # Go up to SAM_Quantization
@@ -27,7 +23,7 @@ from segment_anything.modeling.mask_decoder_hq import MaskDecoderHQ
 from segment_anything.modeling.mask_decoder import MaskDecoder
 from train.segment_anything_training.modeling.image_encoder import ImageEncoderViT as ImageEncoderViTtrain
 from RTN_quantization import per_tensor_channel_group
-from quarot import utils,rotation_utils
+from quarot import utils, rotation_utils
 def show_points(coords, labels, ax, marker_size=200):
     pos_points = coords[labels==1]
     neg_points = coords[labels==0]
@@ -258,6 +254,7 @@ class ObserverBase:
             logits = np.zeros((1, 256, 256))
             
         return masks, scores, logits
+
 class Distribution():
     def __init__(self, n_channels:int, dist_name:str ,mean:np.ndarray, max:np.ndarray, min:np.ndarray, p75:np.ndarray, p25:np.ndarray, p99:np.ndarray, p1:np.ndarray):
         self.n_channels = n_channels
@@ -762,11 +759,11 @@ if __name__ == '__main__':
     checkpoint_path = "/media/caduser/MyBook/chau/chi/SAM_Quantization/pretrained_checkpoint/sam_hq_vit_l.pth"
     model_type = "vit_l"
     
-    get_tensor_density_distribution(
-        checkpoint_path=checkpoint_path,
-        model_type=model_type,
-        min_val=-2.0,
-        max_val=2.0,
-        layer_idxes=[6, 12]
-    )
+    # get_tensor_density_distribution(
+    #     checkpoint_path=checkpoint_path,
+    #     model_type=model_type,
+    #     min_val=-2.0,
+    #     max_val=2.0,
+    #     layer_idxes=[6, 12]
+    # )
     get_channel_distribution(checkpoint_path=checkpoint_path, model_type= model_type)

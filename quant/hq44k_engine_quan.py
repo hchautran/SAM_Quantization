@@ -420,7 +420,7 @@ class Hq44kSamEngine(Engine):
 # %%
 
 if __name__ == "__main__":
-    model_args = OmegaConf.load('quant/config/hq44k/quarot.yaml')
+    model_args = OmegaConf.load('quant/config/hq44k/rtn.yaml')
     args = get_args_parser()
     
     engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
