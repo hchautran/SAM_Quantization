@@ -29,7 +29,6 @@ __global__ void matmul_tensor_cores(half *A, half *B, float *C, int N) {
     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> aFrag;
     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> bFrag;
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> cFrag;
-
     wmma::fill_fragment(cFrag, 0.0f);
 
     for (int k = 0; k < N; k += 16) {

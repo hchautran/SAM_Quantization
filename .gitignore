@@ -44,7 +44,7 @@ work_dirs/
 *.cmake
 */build
 CMakeCache.txt
-CMakeLists.txt
+# CMakeLists.txt
 Makefile
 *.so
 */CmakeFiles
