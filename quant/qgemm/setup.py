@@ -23,9 +23,9 @@ def third_party_cmake():
         sys.exit(1)
 
     # install fast hadamard transform
-    hadamard_dir = os.path.join(HERE, 'third-party/fast-hadamard-transform')
-    pip = shutil.which('pip')
-    retcode = subprocess.call([pip, 'install', '-e', hadamard_dir])
+    # hadamard_dir = os.path.join(HERE, 'third-party/fast-hadamard-transform')
+    # pip = shutil.which('pip')
+    # retcode = subprocess.call([pip, 'install', '-e', hadamard_dir])
 
 
 
