@@ -29,6 +29,7 @@ import numpy as np
 def parser_gen():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument('--algo', type=str, required=True)
     parser.add_argument('--device', type=str, default='cuda:0', choices=['cuda', 'cpu'])
     parser.add_argument('--seed', type=int, default=123, help='Random Seed for HuggingFace and PyTorch')
     parser.add_argument('--hf_token', type=str, default=None)

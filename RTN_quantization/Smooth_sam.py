@@ -121,7 +121,7 @@ if __name__ == "__main__":
     sam.eval()
   
     # Load or calculate activation scales
-    act_scales_file = f"./pretrained_checkpoint/sam_{model_type}activation_scales.pt"
+    act_scales_file = f"./pretrained_checkpoint/sam_{model_type}_activation_scales.pt"
     # act_scales_file ="/media/caduser/MyBook/chau/chi/SAM_Quantization/pretrained_checkpoint/sam_vit_lactivation_scales.pt"
     if os.path.exists(act_scales_file):
         print("Loading activation scales...")

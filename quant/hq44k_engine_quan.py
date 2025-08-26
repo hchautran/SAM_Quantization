@@ -30,16 +30,16 @@ sys.path.insert(0, project_root)
 sys.path.insert(0, quarot_path)   
 from quarot import parser_gen
 
-from Distribution_sam import get_channel_distribution_modify
+from distribution_sam import get_channel_distribution_modify
 import RTN_quantization.utils as rtn_utils
 from RTN_quantization import per_tensor_channel_group
 import rotate_sam
 from torch import nn
 def get_args_parser():
-    parser = argparse.ArgumentParser('HQ-SAM', add_help=False)
+    parser = argparse.ArgumentParser('HQ44K-engine')
 
-    # parser.add_argument("--output", type=str, required=True, 
-                        # help="Path to the directory where masks and checkpoints will be output")
+    parser.add_argument("--algo", type=str, required=True, 
+                        help="algo")
     parser.add_argument("--model-type", type=str, default="vit_l", 
                         help="The type of model to load, in ['vit_h', 'vit_l', 'vit_b']")
     # parser.add_argument("--checkpoint", type=str, required=True, 
@@ -70,8 +70,6 @@ def get_args_parser():
     parser.add_argument("--restore-model", type=str,
                         help="The path to the hq_decoder training checkpoint for evaluation")
     parser.add_argument('--logging_path', type=str, default='./logs')
-    # quantization args
-    
     
     return parser.parse_args()
 
@@ -128,7 +126,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             self.rtn_ro = args.rtn_ro_config
         else:
             self.rtn_ro = None
-        self.plot_distribution =False
+        self.plot_distribution = args.plot_distribution
         self.quantize_decoder = args.quantization.quandecoder
         
     def build_predictor(self):
@@ -178,7 +176,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                 act += "smooth"
             if self.quant_ro:
                 act += "ro_"
-            get_channel_distribution_modify(self.predictor,model_type="vit_l",act = act, rot_args = rot_args)
+            get_channel_distribution_modify(self.predictor, model_type="vit_l",act = act, rot_args = rot_args)
         # print_model_structure(self.predictor, title="Final Structure")
         # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
       
@@ -323,8 +321,10 @@ class Hq44kSamEngine(Engine):
             state += "smooth"
         if model_args.quantization.quanro:
             state += "ro"
+
         
         logger =setup_logger(args.logging_path,state)
+        logger.info(f'______Using: {state}_______')
         
         misc.init_distributed_mode(args)
         print('world size: {}'.format(args.world_size))
@@ -420,11 +420,12 @@ class Hq44kSamEngine(Engine):
 # %%
 
 if __name__ == "__main__":
-    model_args = OmegaConf.load('quant/config/hq44k/rtn.yaml')
     args = get_args_parser()
+
+    model_args = OmegaConf.load(f'quant/config/hq44k/{args.algo}.yaml')
     
     engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
-    engine.evaluate(args,model_args)
+    engine.evaluate(args, model_args)
 
 # %%
 

@@ -10,7 +10,7 @@ quantization:
   quanrtn: True
   quansmooth: True
   quanro: False
-  act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
+  act_scales_file: ./pretrained_checkpoint/sam_vit_l_activation_scales.pt
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 4
