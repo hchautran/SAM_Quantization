@@ -5,6 +5,8 @@ model:
   output: ./output/hq44k/base_l
   restore_model:  ./work_dirs/hq_sam_vit_l/epoch_11.pth
 
+plot_distribution: True
+
 quantization:
   quandecoder: False
   quanrtn: True
@@ -15,6 +17,7 @@ quantization:
   weight_quant: per_channel
   n_bits: 8
   quantize_output: True
+    
 
 
 rtn_ro_config:

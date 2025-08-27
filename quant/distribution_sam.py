@@ -79,7 +79,7 @@ class ObserverBase:
     def inference_image(
         self,
         predictor,
-        image_dir: str = '/media/caduser/MyBook/chau/chi/SAM_Quantization/sam-hq/demo/input_imgs/example1.png',
+        image_dir: str = './input_imgs/example1.png',
         show_image: bool = False,
         example_idx: int = 1,  # Which example configuration to use
     ):
@@ -718,7 +718,7 @@ def get_tensor_density_distribution(checkpoint_path, model_type='vit_l', min_val
     observer.clear_hook()
     observer.clear_dict()
 
-def get_channel_distribution_modify(sam,model_type, act,rot_args):
+def get_channel_distribution_modify(sam,model_type, act,rot_args=None):
     if rot_args is not None:
         Q_image_encoder = rotation_utils.get_orthogonal_matrix(rot_args.hidden_size_image_en,rot_args.rotate_mode,device = rot_args.device,seed=rot_args.seed)
     else:
@@ -754,6 +754,8 @@ def get_channel_distribution_modify(sam,model_type, act,rot_args):
     
     observer.clear_hook()
     observer.clear_dict()
+
+# %%
 if __name__ == '__main__':
 
     checkpoint_path = "/media/caduser/MyBook/chau/chi/SAM_Quantization/pretrained_checkpoint/sam_hq_vit_l.pth"

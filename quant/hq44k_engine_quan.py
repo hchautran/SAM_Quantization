@@ -12,7 +12,6 @@ from train.utils.misc import   F, random
 import train.utils.misc as misc
 from train.train import compute_iou, compute_boundary_iou, show_anns, MaskDecoderHQ
 from train.segment_anything_training import sam_model_registry
-# from segment_anything import sam_model_registry
 import cv2
 from tqdm.auto import tqdm
 import json
@@ -20,10 +19,8 @@ import time
 from omegaconf import OmegaConf
 import argparse
 import logging
-import ipdb
 import os
 import sys
-import importlib
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 quarot_path = os.path.join(project_root, 'quarot')
 sys.path.insert(0, project_root)  
@@ -106,6 +103,7 @@ def print_first_qkv_weights(sam_model):
                     print(qkv_layer.weight[:5, :5])  # Print first 5x5 weights for brevity
                     return
     print("No W8A8Linear qkv layer found in the image_encoder.")
+
 class Hq44kInferenceStrategy(InferenceStrategy):
     def __init__(self, args):
         # build sam encoder
@@ -126,7 +124,6 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             self.rtn_ro = args.rtn_ro_config
         else:
             self.rtn_ro = None
-        self.plot_distribution = args.plot_distribution
         self.quantize_decoder = args.quantization.quandecoder
         
     def build_predictor(self):
@@ -143,8 +140,8 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             if self.quantize_decoder:
                 self.hq_mask_decoder = rtn_utils.smooth_sam(self.hq_mask_decoder, act_scales, alpha=0.5)
         elif self.quant_ro:
-            rot_args= parser_gen()
-            rotate_sam.rotate_sam(self.predictor,rot_args,self.rtn_ro)
+            self.rot_args= parser_gen()
+            rotate_sam.rotate_sam(self.predictor,self.rot_args,self.rtn_ro)
             self.quant_rtn = False
             if self.quantize_decoder:
                 rotate_sam.rotate_sam(self.hq_mask_decoder,rot_args,self.rtn_ro,decoder= True)
@@ -168,15 +165,17 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                                                         quantize_output=self.quantize_output)
         
        
-        if self.plot_distribution:
-            act = ''
-            if self.quant_rtn:
-                act += "rtn"
-            if self.quant_smooth:
-                act += "smooth"
-            if self.quant_ro:
-                act += "ro_"
-            get_channel_distribution_modify(self.predictor, model_type="vit_l",act = act, rot_args = rot_args)
+    def plot_channel_distribution(self):
+        act = ''
+        if self.quant_rtn:
+            act += "rtn"
+        if self.quant_smooth:
+            act += "smooth"
+        if self.quant_ro:
+            act += "ro_"
+
+        # breakpoint()
+        get_channel_distribution_modify(self.predictor, model_type="vit_l",act = act, rot_args=None)
         # print_model_structure(self.predictor, title="Final Structure")
         # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
       
@@ -290,8 +289,21 @@ class Hq44kSamEngine(Engine):
                     "im_ext": ".jpg",
                     "gt_ext": ".png"}
 
-        self.train_datasets = [dataset_dis, dataset_thin, dataset_fss, dataset_duts, dataset_duts_te, dataset_ecssd, dataset_msra]
-        self.valid_datasets = [dataset_dis_val, dataset_coift_val, dataset_hrsod_val, dataset_thin_val] 
+        self.train_datasets = [
+            dataset_dis, 
+            # dataset_thin, 
+            # dataset_fss, 
+            # dataset_duts, 
+            # dataset_duts_te, 
+            # dataset_ecssd, 
+            # dataset_msra
+        ]
+        self.valid_datasets = [
+            dataset_dis_val, 
+            # dataset_coift_val, 
+            # dataset_hrsod_val, 
+            # dataset_thin_val
+        ] 
 
         
     def train(self, args:dict):
@@ -422,10 +434,14 @@ class Hq44kSamEngine(Engine):
 if __name__ == "__main__":
     args = get_args_parser()
 
-    model_args = OmegaConf.load(f'quant/config/hq44k/{args.algo}.yaml')
+    model_args = OmegaConf.load(f'quant/config/hq44k/base_l.yaml')
+    strategy = Hq44kInferenceStrategy(model_args)
+    strategy.build_predictor()
+    strategy.plot_channel_distribution()
     
-    engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
-    engine.evaluate(args, model_args)
+    # engine = Hq44kSamEngine(strategy)
+    # engine.plot
+    # engine.evaluate(args, model_args)
 
 # %%
 

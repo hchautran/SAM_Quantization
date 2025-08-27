@@ -63,6 +63,7 @@ def show_res_multi(masks, scores, input_point, input_label, input_box, filename,
     plt.axis('off')
     plt.savefig(filename +'.png',bbox_inches='tight',pad_inches=-0.1)
     plt.close()
+
 def rotate_sam(sam_model, args, rtn_ro_config,decoder= False):
     sam_model.eval()
     Q_image_encoder = rotation_utils.get_orthogonal_matrix(args.hidden_size_image_en,args.rotate_mode,device = args.device,seed=args.seed)
