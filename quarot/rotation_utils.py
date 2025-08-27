@@ -94,7 +94,6 @@ def fuse_layer_norms_sam(model):
         return create_rmsn
     
     # Replace all LayerNorm instances with RMSN (following original code pattern)
-    # TODO: replace only fused LayerNorms
     model_utils.replace_modules(
         model,
         torch.nn.LayerNorm,
@@ -143,8 +142,6 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
         model: The SAM model instance.
         Q: The rotation matrix.
     """
-    
-    
     for block in model.image_encoder.blocks[:]:
         # Image encoder attention input (qkv)
         W = block.attn.qkv
@@ -158,8 +155,6 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
         W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q_image_encoder).to(device="cpu", dtype=dtype)
         
-  
-    for block in model.image_encoder.blocks[:]:
         W = block.mlp.lin2
         apply_exact_had_to_linear(W, had_dim=-1, output=False)  # Apply exact (inverse) hadamard
     
@@ -169,15 +164,12 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
    
 
     # rotate qv projections
-    # this is  possible to apply had to v and output projections as they are applied consecutively 
     head_dim = (args.hidden_size_image_en // args.num_attention_head_image_en)
     for block in model.image_encoder.blocks[:]:
         if hasattr(block.attn, 'qkv'):
             embed_dim = args.hidden_size_image_en
             qkv_weight = block.attn.qkv.weight
             bias = block.attn.qkv.bias
-            
-            
             v_start = 2 * embed_dim  # V starts at 2/3
             v_end = 3 * embed_dim    # V ends at full dimension
             
@@ -207,8 +199,7 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
             # k_proj_temp = torch.nn.Linear(embed_dim, embed_dim, bias=False)
             # k_proj_temp.weight.data = qkv_weight[q_end:2 * embed_dim, :].clone()
             # apply_exact_had_to_linear(k_proj_temp, had_dim=-1, output=False)
-            
-    # this is  possible to apply had to v and output projections as they are applied consecutively
+
     head_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
     for layer in model.mask_decoder.transformer.layers:
         apply_exact_had_to_linear(layer.self_attn.v_proj, had_dim=head_dim, output=True)
@@ -248,39 +239,6 @@ def matmul_hadU_cuda_had(X, hadK, transpose=False):
     input = hadK.to(input.device).to(input.dtype) @ input 
     return input.to(X.device).to(X.dtype).reshape(
         X.shape) 
-
-
-def rotate_head_sam(model, Q: torch.Tensor,args):
-    """
-    Rotate the output heads for SAM model.
-    SAM has multiple output heads: IoU prediction head, mask output heads, and HQ-specific heads.
-    """
-    
-    # Rotate IoU prediction head (final layer)
-    # From mask_decoder_hq.py: self.iou_prediction_head = MLP(...)
-    iou_head = model.mask_decoder.iou_prediction_head
-    W = iou_head.layers[-1]  # Final layer of IoU prediction MLP
-    dtype = W.weight.data.dtype
-    W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
-    
-    # Rotate mask output heads (output_hypernetworks_mlps final layers)
-    # From mask_decoder_hq.py: self.output_hypernetworks_mlps = nn.ModuleList([MLP(...) for i in range(self.num_mask_tokens)])
-    for mlp in model.mask_decoder.output_hypernetworks_mlps:
-        W = mlp.layers[-1]  # Final layer of each output hypernetwork MLP
-        dtype = W.weight.data.dtype
-        W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-        W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
-    
-    # Rotate HQ-specific head (HQ-SAM specific)
-    # From mask_decoder_hq.py: self.hf_mlp = MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3)
-    hf_mlp = model.mask_decoder.hf_mlp
-    W = hf_mlp.layers[-1]  # Final layer of HQ MLP
-    dtype = W.weight.data.dtype
-    W_ = W.weight.data.to(device=args.device, dtype=torch.float64)
-    W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
-
-
 
 # @torch.inference_mode()
 def rotate_model(model, Q_image_encoder,Q_mask_decoder, args):

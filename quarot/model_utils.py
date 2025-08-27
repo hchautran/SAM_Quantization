@@ -190,8 +190,6 @@ class CustomBlock(OriginalBlock):
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, (H, W))
 
-        
-        
         x = (shortcut.double() @ self.Q).to(torch.float32) + x        
         # x = (( x.double() @ self.Q.T)@self.Q).to(torch.float32) + self.mlp(self.norm2(x)) --> this line is equivalent to the next line
         x = x + self.mlp(self.norm2(x))
