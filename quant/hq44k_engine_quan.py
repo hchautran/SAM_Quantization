@@ -129,7 +129,8 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             self.rtn_ro = None
         self.plot_distribution =False
         self.quantize_decoder = args.quantization.quandecoder
-        self.rot_args = args.quarot_inf
+        if self.quant_ro:
+            self.rot_args = args.quarot_inf
     def build_predictor(self):
         self.hq_mask_decoder = MaskDecoderHQ(self.model_type) 
         self.predictor = sam_model_registry[self.model_type](checkpoint=self.checkpoint)
@@ -418,7 +419,7 @@ class Hq44kSamEngine(Engine):
 # %%
 
 if __name__ == "__main__":
-    model_args = OmegaConf.load('quant/config/hq44k/quarot.yaml')
+    model_args = OmegaConf.load('quant/config/hq44k/smooth.yaml')
     args = get_args_parser()
     
     engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
