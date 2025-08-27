@@ -59,33 +59,6 @@ def parser_gen():
     parser.add_argument('--int8_down_proj', action=argparse.BooleanOptionalAction, default=False,
                         help='Use INT8 for Down Projection! If this set, both weights and activations of this layer will be in INT8')
     
-    
-    # KV-Cache Quantization Arguments
-    parser.add_argument('--v_bits', type=int, default=16,
-                        help='''Number of bits for V-cache quantization. 
-                        Note that quantizing the V-cache does not need any other rotation''')
-    parser.add_argument('--v_groupsize', type=int, default=-1)
-    parser.add_argument('--v_asym', action=argparse.BooleanOptionalAction, default=False,
-                        help='ASymmetric V-cache quantization')
-    parser.add_argument('--v_clip_ratio', type=float, default=1.0,
-        help='Clip ratio for v-cache quantization. new_max = max * clip_ratio')
-    
-    parser.add_argument('--k_bits', type=int, default=16,
-                        help='''Number of bits for K-cache quantization. 
-                        Note that quantizing the K-cache needs another rotation for the keys/queries''')
-    parser.add_argument('--k_groupsize', type=int, default=-1)
-    parser.add_argument('--k_asym', action=argparse.BooleanOptionalAction, default=False, 
-                        help='ASymmetric K-cache quantization')
-    parser.add_argument('--k_pre_rope', action=argparse.BooleanOptionalAction, default=False, 
-                        help='Pre-RoPE quantization for K-cache (not Supported yet!)')
-    parser.add_argument('--k_clip_ratio', type=float, default=1.0,
-        help='Clip ratio for k-cache quantization. new_max = max * clip_ratio')
-
-    
-    # WandB Arguments
-    parser.add_argument('--wandb', action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument('--wandb_id', type=str, default=None)
-    parser.add_argument('--wandb_project', type=str, default=None)
 
     #Experiments Arguments
     args = parser.parse_args()
@@ -298,8 +271,7 @@ class ActQuantWrapper(torch.nn.Module):
 
 
 def add_actquant(module, name='', layers=[torch.nn.Linear,
-                                        ActQuantWrapper,
-                                        transformers.models.falcon.modeling_falcon.FalconLinear],rtn_ro_config=None):
+                                        ActQuantWrapper],rtn_ro_config=None):
     if rtn_ro_config is None:
         if isinstance(module, ActQuantWrapper):
             return

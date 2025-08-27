@@ -30,7 +30,7 @@ sys.path.insert(0, project_root)
 sys.path.insert(0, quarot_path)   
 from quarot import parser_gen
 
-from Distribution_sam import get_channel_distribution_modify
+from distribution_sam import get_channel_distribution_modify
 import RTN_quantization.utils as rtn_utils
 from RTN_quantization import per_tensor_channel_group
 import rotate_sam
@@ -70,8 +70,7 @@ def get_args_parser():
     parser.add_argument("--restore-model", type=str,
                         help="The path to the hq_decoder training checkpoint for evaluation")
     parser.add_argument('--logging_path', type=str, default='./logs')
-    # quantization args
-    
+ 
     
     return parser.parse_args()
 
@@ -130,14 +129,14 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             self.rtn_ro = None
         self.plot_distribution =False
         self.quantize_decoder = args.quantization.quandecoder
-        
+        self.rot_args = args.quarot_inf
     def build_predictor(self):
         self.hq_mask_decoder = MaskDecoderHQ(self.model_type) 
         self.predictor = sam_model_registry[self.model_type](checkpoint=self.checkpoint)
         if self.restore_model:
             print("restore model from:", self.restore_model)
             self.hq_mask_decoder.load_state_dict(torch.load(self.restore_model))
-        rot_args = None
+        
         if self.quant_smooth:
             assert self.act_scales_file is not None, "Run Smooth_sam.py to generate act_scales_file"
             act_scales = torch.load(self.act_scales_file)
@@ -145,11 +144,11 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             if self.quantize_decoder:
                 self.hq_mask_decoder = rtn_utils.smooth_sam(self.hq_mask_decoder, act_scales, alpha=0.5)
         elif self.quant_ro:
-            rot_args= parser_gen()
-            rotate_sam.rotate_sam(self.predictor,rot_args,self.rtn_ro)
+            
+            rotate_sam.rotate_sam(self.predictor,self.rot_args,self.rtn_ro)
             self.quant_rtn = False
             if self.quantize_decoder:
-                rotate_sam.rotate_sam(self.hq_mask_decoder,rot_args,self.rtn_ro,decoder= True)
+                rotate_sam.rotate_sam(self.hq_mask_decoder,self.rot_args,self.rtn_ro,decoder= True)
                 self.quantize_decoder = False
         if self.quant_rtn:
             modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
@@ -178,10 +177,10 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                 act += "smooth"
             if self.quant_ro:
                 act += "ro_"
-            get_channel_distribution_modify(self.predictor,model_type="vit_l",act = act, rot_args = rot_args)
+            get_channel_distribution_modify(self.predictor,model_type="vit_l",act = act, rot_args = self.rot_args)
         # print_model_structure(self.predictor, title="Final Structure")
         # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
-      
+        exit()
     def set_image(self, image_dir:str):
         raise NotImplementedError("")
 
@@ -212,7 +211,6 @@ class Hq44kInferenceStrategy(InferenceStrategy):
         )
 
         return masks_sam, masks_hq 
-
         
     def visualize(self, prompts:dict, masks:torch.Tensor, scores:torch.Tensor, result_path:str):
         raise NotImplementedError("")
@@ -420,7 +418,7 @@ class Hq44kSamEngine(Engine):
 # %%
 
 if __name__ == "__main__":
-    model_args = OmegaConf.load('quant/config/hq44k/rtn.yaml')
+    model_args = OmegaConf.load('quant/config/hq44k/quarot.yaml')
     args = get_args_parser()
     
     engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))

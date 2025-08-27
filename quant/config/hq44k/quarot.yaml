@@ -3,7 +3,7 @@ model:
   checkpoint: ./pretrained_checkpoint/sam_vit_l_0b3195.pth
   seed: 42
   output: ./output/hq44k/base_l
-  restore_model:  ./work_dirs/hq_sam_vit_l/epoch_11.pth
+  restore_model:  ./pretrained_checkpoint/epoch_11.pth 
 
 quantization:
   quandecoder: False
@@ -16,7 +16,15 @@ quantization:
   n_bits: 8
   quantize_output: True
 
-
+quarot_inf:
+  hidden_size_image_en: 1024
+  num_attention_head_image_en: 64
+  hidden_size_mask_de: 256
+  num_attention_head_mask_de: 32
+  fp32_had: False #Apply Hadamard rotation in FP32 (default: False)
+  device: cuda:0
+  seed: 42
+  rotate_mode: hadamard
 rtn_ro_config:
   n_bits: 4
   act_quant: per_token
