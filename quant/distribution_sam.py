@@ -22,8 +22,8 @@ from segment_anything.modeling.image_encoder import ImageEncoderViT
 from segment_anything.modeling.mask_decoder_hq import MaskDecoderHQ
 from segment_anything.modeling.mask_decoder import MaskDecoder
 from train.segment_anything_training.modeling.image_encoder import ImageEncoderViT as ImageEncoderViTtrain
-from RTN_quantization import per_tensor_channel_group
-from quarot import utils, rotation_utils
+# from RTN_quantization import per_tensor_channel_group
+# from quarot import utils, rotation_utils
 def show_points(coords, labels, ax, marker_size=200):
     pos_points = coords[labels==1]
     neg_points = coords[labels==0]
@@ -45,6 +45,7 @@ def show_mask_image(mask, ax, random_color=False, borders = True):
         contours = [cv2.approxPolyDP(contour, epsilon=0.01, closed=True) for contour in contours]
         mask_image = cv2.drawContours(mask_image, contours, -1, (1, 1, 1, 0.5), thickness=2)
     ax.imshow(mask_image)
+
 class ObserverBase:
     dictionary = {}
     def __init__(self, module_list: Tuple):

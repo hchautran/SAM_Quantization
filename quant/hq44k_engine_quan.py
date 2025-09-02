@@ -35,7 +35,7 @@ from torch import nn
 def get_args_parser():
     parser = argparse.ArgumentParser('HQ44K-engine')
 
-    parser.add_argument("--algo", type=str, required=True, 
+    parser.add_argument("--algo", type=str, default='base_l', 
                         help="algo")
     parser.add_argument("--model-type", type=str, default="vit_l", 
                         help="The type of model to load, in ['vit_h', 'vit_l', 'vit_b']")

@@ -5,7 +5,6 @@ from segment_anything.modeling.image_encoder import Block as OriginalBlock
 from segment_anything.modeling.common import MLPBlock as OriginalMLPBlock
 from typing import Optional, Tuple, Type
 import torch.nn.functional as F
-import ipdb
 
 def get_rope_function_name(model):
     # SAM models don't use rotary position embeddings

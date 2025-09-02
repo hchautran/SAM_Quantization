@@ -1,30 +1,27 @@
 # %%
 import os
 import math
-from IPython.core.pylabtools import figsize
-from cv2.detail import AffineBasedEstimator
-from matplotlib.typing import MarkerType
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import pandas as pd
 from collections import defaultdict
-from sam2.build_sam import build_sam2
-from sam2.modeling.sam2_base import SAM2Base
-from sam2.sam2_image_predictor import SAM2ImagePredictor
-from observer import ObserverBase
-from sam2.modeling.backbones.utils import (
-    PatchEmbed,
-    window_unpartition,
-    window_partition
-)
-from sam2.sam2_video_predictor_legacy import SAM2VideoPredictor
+from distribution_sam import ObserverBase
 from typing import Union, Tuple
-from sam2.modeling.backbones.hieradet import MultiScaleAttention, MultiScaleBlock
 from tkinter.constants import E
 import numpy as np
+from train.segment_anything_training.modeling.image_encoder import ImageEncoderViT as ImageEncoderViTtrain
+from train.segment_anything_training.modeling.image_encoder import (
+    Block, 
+    Attention,
+    window_unpartition, 
+    window_partition
+) 
+from segment_anything import build_sam, sam_model_registry, SamPredictor
+from segment_anything.modeling.image_encoder import ImageEncoderViT  
+from segment_anything.modeling.mask_decoder_hq import MaskDecoderHQ
+from segment_anything.modeling.mask_decoder import MaskDecoder
 
 def do_pool(x:torch.Tensor, pool:nn.Module, norm:nn.Module = None) :
     if pool is None:
@@ -140,9 +137,12 @@ class EnergyObserver(ObserverBase):
         plt.show()
 
 
+    
+
+
 # %%
 
-class AttnObserver(MultiScaleAttention):
+class AttnObserver():
     observer_state = defaultdict(list)
 
     @staticmethod
@@ -205,7 +205,7 @@ class AttnObserver(MultiScaleAttention):
 
 
 
-class BlockObserver(MultiScaleBlock):
+class BlockObserver(Block):
     observer_state = defaultdict(list)
 
     def __init__(self, *args, **kwargs):
@@ -288,20 +288,6 @@ class BlockObserver(MultiScaleBlock):
 
             AttnObserver.observer_state['k_E'].append(to_numpy(k_scores))
             AttnObserver.observer_state['v_E'].append(to_numpy(v_scores))
-
-
-        if self.q_stride:
-
-            # Shapes have changed due to Q pooling
-            window_size = self.window_size // self.q_stride[0]
-            H, W = shortcut.shape[1:3]
-
-            pad_h = (window_size - H % window_size) % window_size
-            pad_w = (window_size - W % window_size) % window_size
-            pad_hw = (H + pad_h, W + pad_w)
-
-        # Reverse window partition
-        if self.window_size > 0:
             x = window_unpartition(x, window_size, pad_hw, (H, W))
 
         BlockObserver.observer_state['attn_output'].append(self._to_numpy(x))
@@ -315,9 +301,9 @@ class BlockObserver(MultiScaleBlock):
 
 def apply_energy_observer(model:nn.Module):
     for _, module in model.named_modules():
-        if isinstance(module, MultiScaleBlock):
+        if isinstance(module, Block):
             module.__class__ = BlockObserver
-        if isinstance(module, MultiScaleAttention):
+        if isinstance(module, Attention):
             module.__class__ = AttnObserver
 
 
@@ -326,13 +312,18 @@ def apply_energy_observer(model:nn.Module):
 #
 
 #build model
-checkpoint = './checkpoints/sam2.1_hiera_small.pt'
-model_cfg = 'configs/sam2.1/sam2.1_hiera_s.yaml'
-# video_predictor = build_sam2_video_predictor(model_cfg, checkpoint)
-sam2 = build_sam2(model_cfg, checkpoint)
-predictor = SAM2ImagePredictor(sam2)
+
+model_type = 'vit_l'
+checkpoint_path= ''
+observer = EnergyObserver(module_list=(Block,))
+sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
+predictor = SamPredictor(sam)
+
+observer.init_activation_cache(sam.image_encoder, layer_idxes=[1, 6, 12, 18, 23])
+observer.register_channel_distribution_hook(sam)
+observer.inference_image(predictor=predictor, show_image=False)
 # inference video
-observer = EnergyObserver(module_list=(MultiScaleBlock,))
+
 
 apply_energy_observer(predictor.model)
 

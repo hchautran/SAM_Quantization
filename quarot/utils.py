@@ -4,7 +4,6 @@ import sys
 import os
 import transformers
 import argparse
-import ipdb
 # Add the RTN_quantization directory to the path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
