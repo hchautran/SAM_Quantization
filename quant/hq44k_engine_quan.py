@@ -434,14 +434,14 @@ class Hq44kSamEngine(Engine):
 if __name__ == "__main__":
     args = get_args_parser()
 
-    model_args = OmegaConf.load(f'quant/config/hq44k/base_l.yaml')
+    model_args = OmegaConf.load(f'quant/config/hq44k/smooth.yaml')
     strategy = Hq44kInferenceStrategy(model_args)
-    strategy.build_predictor()
-    strategy.plot_channel_distribution()
+    # strategy.build_predictor()
+    # strategy.plot_channel_distribution()
     
-    # engine = Hq44kSamEngine(strategy)
+    engine = Hq44kSamEngine(strategy)
     # engine.plot
-    # engine.evaluate(args, model_args)
+    engine.evaluate(args, model_args)
 
 # %%
 

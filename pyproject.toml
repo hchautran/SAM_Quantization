@@ -5,9 +5,11 @@ description = "SAM Quantization"
 readme = "README.md"
 dependencies = [
     "black==24.2.0",
+    "datasets>=4.0.0",
     "eva-decord>=0.6.1",
     "fvcore>=0.1.5.post20221221",
     "gdown>=5.2.0",
+    "ipdb>=0.13.13",
     "ipykernel>=6.30.1",
     "matplotlib>=3.9.1",
     "notebook>=7.4.5",
