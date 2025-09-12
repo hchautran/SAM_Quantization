@@ -12,7 +12,7 @@ data:
   checkpoint_path: pretrained_checkpoint/groundingdino_swinb_cogcoor.pth
   data_path: data/seginw/
   num_select: 100
-  num_workers: 4
+  num_workers: 2
   device: cuda
   save_json: True
 

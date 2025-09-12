@@ -158,7 +158,6 @@ class SeginwSamEngine(Engine):
 
                 # feed to the model
                 outputs = model(images, captions=input_captions)
-                print(outputs)
                 orig_target_sizes = torch.stack(
                     [t["orig_size"] for t in targets], dim=0).to(images.device)
                 results = postprocessor(outputs, orig_target_sizes)
@@ -168,20 +167,14 @@ class SeginwSamEngine(Engine):
                 input_boxes = results[0]['boxes'].cpu()     
 
                 transformed_boxes = predictor.transform.apply_boxes_torch(input_boxes, self.strategy.image.shape[:2]).to(self.strategy.device)
-                # prompts = {
-                #     'point_coords': None, 
-                #     'point_labels': None,
-                #     'boxes': transformed_boxes,
-                #     'multimask_output': False,
-                # }
-                # masks, _, _ = self.strategy.inference(prompts, use_torch=True)
-                breakpoint()
-                masks, _, _ = self.strategy.predictor.predict_torch(
-                    point_coords = None,
-                    point_labels = None,
-                    boxes = transformed_boxes,
-                    multimask_output = False,
-                )
+                prompts = {
+                    'point_coords': None, 
+                    'point_labels': None,
+                    'boxes': transformed_boxes,
+                    'multimask_output': False,
+                }
+                masks, _, _ = self.strategy.inference(prompts, use_torch=True)
+        
                 results[0]['masks'] = masks.cpu().numpy()
 
                 cocogrounding_res = {

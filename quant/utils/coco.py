@@ -39,7 +39,7 @@ class CocoDetection(CocoDetection):
 class PostProcessSeginw(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
 
-    def __init__(self, num_select=300, coco_api=None, tokenlizer=None) -> None:
+    def __init__(self, num_select=100, coco_api=None, tokenlizer=None) -> None:
         super().__init__()
         self.num_select = num_select
 
