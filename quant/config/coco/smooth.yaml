@@ -26,7 +26,7 @@ data:
 quantization:
   quanrtn: True
   quangptq: False
-  quansmooth: False
+  quansmooth: True
   quanro: False
   rtn_cuda: False
   gptq_cuda: False
@@ -40,3 +40,14 @@ quantization:
   output: ./output/hq44k/base_l
   restore_model:  work_dirs/hq_sam_vit_l/epoch_11.pth
 
+gptq:
+  blocksize: 128
+  device: cuda
+  nsamples: 128
+  w_bits: 4
+  ac_bits: 4
+  w_asym: False
+  w_clip: False
+  w_groupsize: -1
+  percdamp: 0.01
+  act_order: False

@@ -163,7 +163,7 @@ class W8A8Linear(nn.Module):
 
     @staticmethod
     def from_float(
-        module, n_bits,weight_quant="per_channel", act_quant="per_token", quantize_output=False  , group_size=None
+        module, n_bits_w,n_bits_ac,weight_quant="per_channel", act_quant="per_token", quantize_output=False  , group_size=None, quantize_weight = True
     ):
         assert isinstance(module, torch.nn.Linear)
         new_module = W8A8Linear(
@@ -173,24 +173,28 @@ class W8A8Linear(nn.Module):
             act_quant=act_quant,
             quantize_output=quantize_output,
             group_size=group_size,
-            n_bit=n_bits 
+            n_bit=n_bits_ac 
         )
-        if weight_quant == "per_channel":
-            new_module.weight = quantize_weight_per_channel_absmax(
-                module.weight, n_bits=n_bits
-            )  # use 8-bit integer for weight
-            
-        elif weight_quant == "per_tensor":
-            new_module.weight = quantize_weight_per_tensor_absmax(
-                module.weight, n_bits=n_bits
-            )
-        elif weight_quant == "per_group":
-            new_module.weight = quantize_weight_per_group_absmax_input_features(
-                module.weight, group_size,n_bits=n_bits
-            )
+        if quantize_weight:
+            if weight_quant == "per_channel":
+                new_module.weight = quantize_weight_per_channel_absmax(
+                    module.weight, n_bits=n_bits_w
+                )  # use 8-bit integer for weight
+                
+            elif weight_quant == "per_tensor":
+                new_module.weight = quantize_weight_per_tensor_absmax(
+                    module.weight, n_bits=n_bits_w
+                )
+            elif weight_quant == "per_group":
+                new_module.weight = quantize_weight_per_group_absmax_input_features(
+                    module.weight, group_size,n_bits=n_bits_w
+                )
+            else:
+                raise ValueError(f"Invalid weight_quant: {weight_quant}")
+            new_module.weight_quant_name = weight_quant
         else:
-            raise ValueError(f"Invalid weight_quant: {weight_quant}")
-        new_module.weight_quant_name = weight_quant
+            new_module.weight = module.weight
+            new_module.weight_quant_name = "None"
         if module.bias is not None:
             new_module.bias = module.bias
         return new_module

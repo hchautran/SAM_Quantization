@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 from seginw.segment_anything import (
     build_sam,
     build_sam_hq,
+    build_sam_hq_vit_l,
     SamPredictor
 )
 import cv2
@@ -45,7 +46,7 @@ class SeginwInferenceStrategy(InferenceStrategy):
 
     def build_predictor(self)->SamPredictor:
         if self.use_sam_hq:
-            self.predictor = SamPredictor(build_sam_hq(checkpoint=self.sam_ckt).to(self.device))
+            self.predictor = SamPredictor(build_sam_hq_vit_l(checkpoint=self.sam_ckt).to(self.device))
         else:
             self.predictor = SamPredictor(build_sam(checkpoint=self.sam_ckt).to(self.device))
         return self.predictor
@@ -96,7 +97,8 @@ class SeginwSamEngine(Engine):
         model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
         model.eval()
         return model
-
+    def demo(self,):
+        pass
     def evaluate(self, args):
         objects = os.listdir(args.data_path)
         cfg = SLConfig.fromfile(args.config_file)
@@ -178,7 +180,6 @@ class SeginwSamEngine(Engine):
                     target["image_id"]: output for target, output in zip(targets, results)}
                 
                 save_items = evaluator.update(cocogrounding_res)
-
                 if args.save_json:
                     new_items = list()
                     for item in save_items:
@@ -224,7 +225,7 @@ class SeginwSamEngine(Engine):
 
 if __name__ == "__main__":
 
-    args = OmegaConf.load('config/coco/base_h.yaml')
+    args = OmegaConf.load('quant/config/coco/base_h.yaml')
 
     engine = SeginwSamEngine(SeginwInferenceStrategy(args.model))
     # breakpoint()

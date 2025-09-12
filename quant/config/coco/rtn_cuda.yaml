@@ -24,12 +24,13 @@ data:
     pipeline: test_pipeline
 
 quantization:
-  quanrtn: True
+  quanrtn: False
   quangptq: False
   quansmooth: False
   quanro: False
-  rtn_cuda: False
+  rtn_cuda: True
   gptq_cuda: False
+  save_rtn_cuda: True
   act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
   act_quant: per_token
   weight_quant: per_channel
@@ -40,3 +41,14 @@ quantization:
   output: ./output/hq44k/base_l
   restore_model:  work_dirs/hq_sam_vit_l/epoch_11.pth
 
+gptq:
+  blocksize: 128
+  device: cuda
+  nsamples: 128
+  w_bits: 4
+  ac_bits: 4
+  w_asym: False
+  w_clip: False
+  w_groupsize: -1
+  percdamp: 0.01
+  act_order: False

@@ -109,8 +109,8 @@ def print_model_structure(model, title="Model Structure"):
     
     print("=" * len(title))
 if __name__ == "__main__":
-    sam_checkpoint = "./pretrained_checkpoint/sam_hq_vit_l.pth"  # Updated path
-    model_type = "vit_l"
+    sam_checkpoint = "./pretrained_checkpoint/sam_hq_vit_h.pth"  # Updated path
+    model_type = "vit_h"
     device = "cuda"
     act_scales_file = None
     

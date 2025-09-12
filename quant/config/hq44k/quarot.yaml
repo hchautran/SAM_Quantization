@@ -6,10 +6,12 @@ model:
   restore_model:  ./pretrained_checkpoint/epoch_11.pth 
 
 quantization:
-  quandecoder: False
-  quanrtn: True
+  quandecoder: True
+  quanrtn: False
+  quangptq: False
   quansmooth: False
   quanro: True
+  rtn_cuda: False
   act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
   act_quant: per_token
   weight_quant: per_channel
@@ -32,3 +34,18 @@ rtn_ro_config:
   group_size: 64
   quantize_output: True
   quantize_input: True
+gptq:
+  blocksize: 128
+  device: cuda
+  nsamples: 128
+  w_bits: 4
+  ac_bits: 4
+  act_quant: per_token
+  quantize_output: True
+  quantize_input: True
+  group_size: 64
+  w_asym: False
+  w_clip: False
+  w_groupsize: -1
+  percdamp: 0.01
+  act_order: False

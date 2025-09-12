@@ -31,33 +31,29 @@ from transformers.models.mixtral.modeling_mixtral import (
 from transformers.models.falcon.modeling_falcon import FalconDecoderLayer
 
 def replace_linear_with_target_and_quantize(module, 
-                               target_class,n_bit, module_name_to_exclude, 
+                               target_class,n_bit_w,n_bit_ac, module_name_to_exclude, 
                                weight_quant="per_channel", act_quant="per_token", 
-                               quantize_output=False, group_size=None):
+                               quantize_output=False, group_size=None,quantize_weight = True):
     for name, child in module.named_children():
         if isinstance(child, nn.Linear) and not \
         any([x == name for x in module_name_to_exclude]):
             
-            # Use from_float method instead of manual creation
-            input_feature = child.in_features
-            output_feature = child.out_features
-            target_class.in_features= input_feature
-            target_class.out_features = output_feature
-            target_class.n_bits = n_bit
             new_module = target_class.from_float(
                 child, 
-                n_bits=n_bit,
+                n_bits_w=n_bit_w,
+                n_bits_ac=n_bit_ac,
                 weight_quant=weight_quant, 
                 act_quant=act_quant, 
                 quantize_output=quantize_output,
-                group_size=group_size
+                group_size=group_size,
+                quantize_weight = quantize_weight
             )
             setattr(module, name, new_module) # replace the module with the new module
             
         else:
             # Recursively call the function for nested modules
             replace_linear_with_target_and_quantize(child, 
-                     target_class,n_bit, module_name_to_exclude, 
+                     target_class,n_bit_w,n_bit_ac, module_name_to_exclude, 
                      weight_quant, act_quant, quantize_output, group_size)
 
 

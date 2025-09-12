@@ -26,14 +26,19 @@ import sys
 import importlib
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 quarot_path = os.path.join(project_root, 'quarot')
+qgemm_dir = os.path.join(project_root, 'quant', 'qgemm')
+rtn_cuda_dir = os.path.join(qgemm_dir, 'cuda_rtn_gptq') 
 sys.path.insert(0, project_root)  
-sys.path.insert(0, quarot_path)   
+sys.path.insert(0, quarot_path) 
+sys.path.insert(0, qgemm_dir)  
+sys.path.insert(0, rtn_cuda_dir) 
 from quarot import parser_gen
 
 from distribution_sam import get_channel_distribution_modify
 import RTN_quantization.utils as rtn_utils
-from RTN_quantization import per_tensor_channel_group
+from RTN_quantization import per_tensor_channel_group,gptq_utils
 import rotate_sam
+from quantizer import replace_linear_with_int4 ,save_cuda_quantized_model, replace_linear_with_int4_gptq
 from torch import nn
 def get_args_parser():
     parser = argparse.ArgumentParser('HQ-SAM', add_help=False)
@@ -91,22 +96,7 @@ def print_model_structure(model, title="Model Structure"):
     for name, module in model.named_modules():
         print(f"{name}: {module.__class__.__name__}")
     print("=" * len(title))
-def print_first_qkv_weights(sam_model):
-    """
-    Print the weights of the qkv layer of the first W8A8Linear module in the image_encoder.
 
-    Args:
-        sam_model: The SAM model instance (e.g., self.predictor).
-    """
-    if hasattr(sam_model, 'image_encoder') and hasattr(sam_model.image_encoder, 'blocks'):
-        for block in sam_model.image_encoder.blocks:
-            if hasattr(block, 'attn') and hasattr(block.attn, 'qkv'):
-                qkv_layer = block.attn.qkv
-                if isinstance(qkv_layer, per_tensor_channel_group.W8A8Linear) or isinstance(qkv_layer, nn.Linear):
-                    print("Weights of the first qkv W8A8Linear layer:")
-                    print(qkv_layer.weight[:5, :5])  # Print first 5x5 weights for brevity
-                    return
-    print("No W8A8Linear qkv layer found in the image_encoder.")
 class Hq44kInferenceStrategy(InferenceStrategy):
     def __init__(self, args):
         # build sam encoder
@@ -116,6 +106,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
         self.restore_model = args.model.restore_model
         self.predictor = None
         self.quant_rtn = args.quantization.quanrtn
+        self.quant_gptq = args.quantization.quangptq
         self.quant_smooth = args.quantization.quansmooth
         self.quant_ro  = args.quantization.quanro
         self.act_scales_file = args.quantization.act_scales_file
@@ -123,12 +114,18 @@ class Hq44kInferenceStrategy(InferenceStrategy):
         self.weight_quant = args.quantization.weight_quant
         self.n_bits = args.quantization.n_bits
         self.quantize_output = args.quantization.quantize_output
+        self.quantize_decoder = args.quantization.quandecoder
+        self.rtn_cuda = args.quantization.rtn_cuda
+        self.gptq_cuda = args.quantization.gptq_cuda
+        if self.quant_gptq or self.gptq_cuda:
+            self.args_gptq = args.gptq
+        if self.rtn_cuda:
+            self.save_rtn_cuda = args.quantization.save_rtn_cuda
         if self.quant_rtn and 'rtn_ro_config'  in args:
             self.rtn_ro = args.rtn_ro_config
         else:
             self.rtn_ro = None
-        self.plot_distribution =False
-        self.quantize_decoder = args.quantization.quandecoder
+        
         if self.quant_ro:
             self.rot_args = args.quarot_inf
     def build_predictor(self):
@@ -150,12 +147,151 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             self.quant_rtn = False
             if self.quantize_decoder:
                 rotate_sam.rotate_sam(self.hq_mask_decoder,self.rot_args,self.rtn_ro,decoder= True)
-                self.quantize_decoder = False
+                if not self.quant_gptq:
+                    self.quantize_decoder = False
+        if self.quant_gptq or self.gptq_cuda:
+            from train.utils.dataloader import OnlineDataset
+            from torchvision import transforms
+            import numpy as np
+            
+            # Dataset configuration
+            dataset_coift_val = {"name": "COIFT",
+                    "im_dir": "./data/thin_object_detection/COIFT/images",
+                    "gt_dir": "./data/thin_object_detection/COIFT/masks",
+                    "im_ext": ".jpg",
+                    "gt_ext": ".png"}
+
+            # Get file list
+            valid_im_gt_list = get_im_gt_name_dict([dataset_coift_val], flag="valid")
+            
+            # Create dataset with transforms
+            transform = transforms.Compose([Resize([1024,1024])])
+            gos_dataset = OnlineDataset(valid_im_gt_list, transform=transform, eval_ori_resolution=True)
+            
+            # Create simple dataloader without DistributedSampler
+            valid_dataloader = torch.utils.data.DataLoader(
+                gos_dataset, 
+                batch_size=1, 
+                shuffle=False, 
+                num_workers=0,
+                drop_last=False
+            )
+            
+            print(f"Created dataloader with {len(valid_dataloader)} samples for GPTQ")
+            
+            # Run GPTQ quantization
+            quantizer = gptq_utils.gptq_fwrd_sam(
+                self.predictor, 
+                valid_dataloader, 
+                self.args_gptq.device, 
+                self.args_gptq
+            )
+            
+            modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
+            if self.gptq_cuda:
+                replace_linear_with_int4_gptq(self.predictor,quantizer, exclude_modules=modules_to_exclude)
+            else:
+                rtn_utils.replace_linear_with_target_and_quantize(module=self.predictor,
+                                                            target_class=per_tensor_channel_group.W8A8Linear,
+                                                            n_bit_w=self.n_bits,
+                                                            n_bit_ac=self.args_gptq.ac_bits,
+                                                            module_name_to_exclude=modules_to_exclude,
+                                                            weight_quant=self.weight_quant,    
+                                                            act_quant=self.act_quant,           
+                                                            quantize_output=self.quantize_output,
+                                                            quantize_weight=False) # weight already quantized in gptq
+            
+                
+            if self.quantize_decoder:
+              
+                self.predictor = self.predictor.to('cuda')
+                self.hq_mask_decoder.eval()
+                
+                # Collect encoder outputs by processing the dataloader properly
+                batched_outputs = []
+                interm_embeddings_list = []
+                for i,data_batch in enumerate(valid_dataloader):
+                    if i >= self.args_gptq.nsamples:
+                        break
+                    print(f"Processing sample {i+1}/{self.args_gptq.nsamples} for GPTQ image encoder outputs", end='\r')
+                    _, inputs_val, labels_val, _, _ = data_batch['imidx'], data_batch['image'], data_batch['label'], data_batch['shape'], data_batch['ori_label']
+                    
+                    # Convert to device
+                    if torch.cuda.is_available():
+                        inputs_val = inputs_val.cuda()
+                        labels_val = labels_val.cuda()
+                    
+                    # Prepare inputs in the same format as inference time
+                    imgs = inputs_val.permute(0, 2, 3, 1).cpu().numpy()
+                    labels_box = misc.masks_to_boxes(labels_val[:,0,:,:])
+                    
+                    batched_input = []
+                    for b_i in range(len(imgs)):
+                        dict_input = dict()
+                        # Convert to tensor and move to CUDA to match model's device
+                        input_image = torch.as_tensor(imgs[b_i].astype(dtype=np.uint8), device='cuda').permute(2, 0, 1).contiguous()
+                        dict_input['image'] = input_image 
+                        dict_input['boxes'] = labels_box[b_i:b_i+1]  # Keep boxes on original device
+                        dict_input['original_size'] = imgs[b_i].shape[:2]
+                        batched_input.append(dict_input)
+                    
+                    # Get encoder outputs
+                    batch_output, batch_interm = self.predictor(batched_input, multimask_output=False)
+                    batched_outputs.extend(batch_output)
+                    interm_embeddings_list.extend(batch_interm)
+                    
+                    # Limit to nsamples for GPTQ
+                    if len(batched_outputs) >= self.args_gptq.nsamples:
+                        batched_outputs = batched_outputs[:self.args_gptq.nsamples]
+                        interm_embeddings_list = interm_embeddings_list[:self.args_gptq.nsamples]
+                        break
+                
+                # Process the collected outputs
+                batch_len = len(batched_outputs)
+                encoder_embedding = torch.cat([batched_outputs[i_l]['encoder_embedding'] for i_l in range(batch_len)], dim=0).to(self.args_gptq.device)
+                image_pe = [batched_outputs[i_l]['image_pe'].to(self.args_gptq.device) for i_l in range(batch_len)]
+                sparse_embeddings = [batched_outputs[i_l]['sparse_embeddings'].to(self.args_gptq.device) for i_l in range(batch_len)]
+                dense_embeddings = [batched_outputs[i_l]['dense_embeddings'].to(self.args_gptq.device) for i_l in range(batch_len)]
+                interm_embeddings_device = [interm_emb.to(self.args_gptq.device) if isinstance(interm_emb, torch.Tensor) else interm_emb for interm_emb in interm_embeddings_list]
+
+                quantizer = gptq_utils.gptq_fwrd_sam_maskdecoder(self.hq_mask_decoder,
+                    image_embeddings=encoder_embedding,
+                    image_pe=image_pe,
+                    sparse_prompt_embeddings=sparse_embeddings,
+                    dense_prompt_embeddings=dense_embeddings,
+                    multimask_output=False,
+                    hq_token_only=False,
+                    interm_embeddings=interm_embeddings_device,
+                    dev=self.args_gptq.device,
+                    args=self.args_gptq)
+                modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling","output_hypernetworks_mlps"]
+                
+                if self.gptq_cuda:
+                    replace_linear_with_int4_gptq(self.hq_mask_decoder,quantizer.modules_to_quantize, exclude_modules=modules_to_exclude)
+                else:
+                    rtn_utils.replace_linear_with_target_and_quantize(module=self.hq_mask_decoder,
+                                                            target_class=per_tensor_channel_group.W8A8Linear,
+                                                            n_bit_w=self.n_bits,
+                                                            n_bit_ac=self.args_gptq.ac_bits,
+                                                            module_name_to_exclude=modules_to_exclude,
+                                                            weight_quant=self.weight_quant,    
+                                                            act_quant=self.act_quant,           
+                                                            quantize_output=self.quantize_output,
+                                                            quantize_weight=False) # weight already quantized in gptq
+                
+                del batched_outputs
+                del interm_embeddings_list
+                del encoder_embedding
+                del image_pe
+                del sparse_embeddings
+                del dense_embeddings
+                
         if self.quant_rtn:
             modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
             rtn_utils.replace_linear_with_target_and_quantize(module=self.predictor,
                                                         target_class=per_tensor_channel_group.W8A8Linear,
-                                                        n_bit=self.n_bits,
+                                                        n_bit_w=self.n_bits,
+                                                        n_bit_ac=self.n_bits,
                                                         module_name_to_exclude=modules_to_exclude,
                                                         weight_quant=self.weight_quant,    
                                                         act_quant=self.act_quant,           
@@ -163,25 +299,37 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             if self.quantize_decoder:
                 rtn_utils.replace_linear_with_target_and_quantize(module=self.hq_mask_decoder,
                                                         target_class=per_tensor_channel_group.W8A8Linear,
-                                                        n_bit=self.n_bits,
+                                                        n_bit_w=self.n_bits,
+                                                        n_bit_ac=self.n_bits,
                                                         module_name_to_exclude=modules_to_exclude,
                                                         weight_quant=self.weight_quant,    
                                                         act_quant=self.act_quant,           
                                                         quantize_output=self.quantize_output)
         
-       
-        if self.plot_distribution:
-            act = ''
-            if self.quant_rtn:
-                act += "rtn"
-            if self.quant_smooth:
-                act += "smooth"
-            if self.quant_ro:
-                act += "ro_"
-            get_channel_distribution_modify(self.predictor,model_type="vit_l",act = act, rot_args = self.rot_args)
-        # print_model_structure(self.predictor, title="Final Structure")
-        # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
-        exit()
+        if self.rtn_cuda:
+            modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling","output_hypernetworks_mlps"]
+            replace_linear_with_int4(self.predictor,  exclude_modules=modules_to_exclude)
+            if self.quantize_decoder:
+                replace_linear_with_int4(self.hq_mask_decoder,  exclude_modules=modules_to_exclude)
+                
+            if self.save_rtn_cuda:
+                save_cuda_quantized_model(self.predictor, save_dir="./pretrained_checkpoint", model_name="sam_int4_full")
+                if self.quantize_decoder:
+                    save_cuda_quantized_model(self.hq_mask_decoder, save_dir="./pretrained_checkpoint", model_name="hq_decoder_int4_full")
+        print_model_structure(self.predictor, title="Final Structure")
+        print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
+        # ipdb.set_trace()
+        # exit()
+    def plot_distribution(self):
+        act = ''
+        if self.quant_rtn:
+            act += "rtn"
+        if self.quant_smooth:
+            act += "smooth"
+        if self.quant_ro:
+            act += "ro_"
+        get_channel_distribution_modify(self.predictor,model_type="vit_l",act = act, rot_args = self.rot_args)
+        
     def set_image(self, image_dir:str):
         raise NotImplementedError("")
 
@@ -322,7 +470,14 @@ class Hq44kSamEngine(Engine):
             state += "smooth"
         if model_args.quantization.quanro:
             state += "ro"
-        
+        if model_args.quantization.quandecoder:
+            state += "dec"
+        if model_args.quantization.quangptq:
+            state += "gptq"
+        if model_args.quantization.rtn_cuda:
+            state += "rtncuda"
+        if model_args.quantization.gptq_cuda:
+            state += "gptqcuda"
         logger =setup_logger(args.logging_path,state)
         
         misc.init_distributed_mode(args)
@@ -419,7 +574,7 @@ class Hq44kSamEngine(Engine):
 # %%
 
 if __name__ == "__main__":
-    model_args = OmegaConf.load('quant/config/hq44k/quarot.yaml')
+    model_args = OmegaConf.load('quant/config/hq44k/gptq.yaml')
     args = get_args_parser()
     
     engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
