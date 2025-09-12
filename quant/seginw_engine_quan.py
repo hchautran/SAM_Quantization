@@ -135,6 +135,9 @@ class SeginwSamEngine(Engine):
         model.eval()
         return model
 
+    def demo(self):
+        pass
+
     def evaluate(self, args,args_quant):
         state="hq44k_"
         if args_quant.quantization.quanrtn:
@@ -271,20 +274,20 @@ class SeginwSamEngine(Engine):
 
 if __name__ == "__main__":
 
-    args = OmegaConf.load('config/coco/base_h.yaml')
+    args = OmegaConf.load('/u/ctran3/Sam_quantization/quant/config/coco/base_h.yaml')
 
     engine = SeginwSamEngine(SeginwInferenceStrategy(args))
     # breakpoint()
     engine.evaluate(args.data,args.quantization)
     
-    prompts = {
-        'point_coords': None, 
-        'point_labels': None,
-        'box': np.array([[4,13,1007,1023]]),
-        'hq_token_only': True,
-    }
+    # prompts = {
+        # 'point_coords': None, 
+        # 'point_labels': None,
+        # 'box': np.array([[4,13,1007,1023]]),
+        # 'hq_token_only': True,
+    # }
     # image = Image.open('../input_imgs/example0.png')
-    engine.demo(prompts, image_dir='../input_imgs/example1.png', show_image=True)
+    # engine.demo(prompts, image_dir='../input_imgs/example1.png', show_image=True)
 
 # %%
 
