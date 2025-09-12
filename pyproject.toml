@@ -19,6 +19,8 @@ dependencies = [
     "plotly>=6.3.0",
     "pycocotools>=2.0.8",
     "scikit-image>=0.24.0",
+    "scikit-learn>=1.7.1",
+    "seaborn>=0.13.2",
     "submitit>=1.5.1",
     "tensorboard>=2.17.0",
     "tensordict>=0.6.0",
@@ -26,5 +28,6 @@ dependencies = [
     "torchvision>=0.23.0",
     "transformers>=4.55.4",
     "ufmt==2.0.0b2",
+    "umap-learn>=0.5.9.post2",
     "usort==1.0.2",
 ]
