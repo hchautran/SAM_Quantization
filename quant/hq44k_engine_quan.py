@@ -128,6 +128,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
         self.quantize_decoder = args.quantization.quandecoder
         if self.quant_ro:
             self.rot_args = args.quarot_inf
+
     def build_predictor(self):
         self.hq_mask_decoder = MaskDecoderHQ(self.model_type) 
         self.predictor = sam_model_registry[self.model_type](checkpoint=self.checkpoint)
@@ -142,7 +143,6 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             if self.quantize_decoder:
                 self.hq_mask_decoder = rtn_utils.smooth_sam(self.hq_mask_decoder, act_scales, alpha=0.5)
         elif self.quant_ro:
-            
             rotate_sam.rotate_sam(self.predictor,self.rot_args,self.rtn_ro)
             self.quant_rtn = False
             if self.quantize_decoder:
