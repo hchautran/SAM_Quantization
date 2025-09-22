@@ -3,7 +3,6 @@ import time
 import tqdm
 import torch
 import torch.nn as nn
-import utils
 import logging
 import numpy as np
 import ipdb
@@ -461,7 +460,7 @@ def gptq_fwrd_sam(model, dataloader, dev, args):
 
         inps, outs = outs, inps
 
-    utils.cleanup_memory(verbos=True)
+    cleanup_memory(verbos=True)
     logging.info('-----GPTQ Quantization for SAM Image Encoder Done-----\n')
     return quantizers
 
@@ -699,7 +698,6 @@ def gptq_fwrd_sam_maskdecoder(module,
         del gptq
         torch.cuda.empty_cache()
     
-    utils.cleanup_memory(verbos=True)
+    cleanup_memory(verbos=True)
     logging.info('-----GPTQ Quantization for Mask Decoder Done-----\n')
     return quantizers
-    

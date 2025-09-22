@@ -1,10 +1,10 @@
 model:
   name: sam
   use_hq: True
-  checkpoint: ./pretrained_checkpoint/sam_vit_h.pth
-  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_h.pth
-  model_type: vit_h 
-  device: cuda
+  checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
+  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  model_type: vit_l 
+  device: cpu
 
 
 data:
@@ -13,7 +13,7 @@ data:
   data_path: ./data/seginw/
   num_select: 300
   num_workers: 1
-  device: cuda
+  device: cpu
   save_json: True
   logging_path: ./logs
 
@@ -42,7 +42,7 @@ quantization:
 
 gptq:
   blocksize: 128
-  device: cuda
+  device: cpu
   nsamples: 128
   w_bits: 4
   ac_bits: 4

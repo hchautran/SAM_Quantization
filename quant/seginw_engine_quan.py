@@ -32,10 +32,10 @@ from omegaconf import OmegaConf
 
 import os.path as osp
 import argparse
-from mmengine.config import Config, DictAction
+
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
-from mmengine.registry import  DATA_SAMPLERS, FUNCTIONS, TRANSFORMS
+from mmengine.registry import  DATA_SAMPLERS, FUNCTIONS, TRANSFORMS, DATASETS
 from mmengine.dataset import worker_init_fn as default_worker_init_fn
 from functools import partial
 from mmengine.utils.dl_utils import TORCH_VERSION
@@ -43,16 +43,41 @@ from mmengine.utils import digit_version
 import copy
 
 import mmdet
-from mmdet import datasets, models, evaluation
-from mmdet.datasets import transforms
-from mmdet.registry import DATASETS,  TRANSFORMS as MMDET_TRANSFORMS
-from mmdet.utils import setup_cache_size_limit_of_dynamo
+from mmdet import datasets, models
+# from mmdet.datasets import transforms
+# from mmdet.registry import   TRANSFORMS as MMDET_TRANSFORMS
+# from mmdet.utils import setup_cache_size_limit_of_dynamo # install mmdet 3.3.0 to be able to use this function
 # Register mmdet transforms in mmengine registry
-for name, transform_cls in MMDET_TRANSFORMS.module_dict.items():
-    if not TRANSFORMS.get(name):
-        TRANSFORMS.register_module(module=transform_cls, name=name, force=True)
+# for name, transform_cls in MMDET_TRANSFORMS.module_dict.items():
+#     if not TRANSFORMS.get(name):
+#         TRANSFORMS.register_module(module=transform_cls, name=name, force=True)
 
-from configmmdet.utils_ import parse_args_test, parse_args_train
+import warnings
+
+import mmcv
+import pandas as pd
+from py import log
+from sympy import im
+
+from mmcv import Config, DictAction
+from mmcv.utils import get_logger
+from mmcv.cnn import fuse_conv_bn
+from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
+                         wrap_fp16_model)
+
+from mmdet.apis import multi_gpu_test, single_gpu_test
+from mmdet.datasets import (build_dataloader, build_dataset,
+                            replace_ImageToTensor)
+from mmdet.models import build_detector
+from mmdet.utils import (build_ddp, build_dp, compat_cfg, get_device,
+                         replace_cfg_vals, setup_multi_processes,
+                         update_data_root)
+
+
+
+
+
+from configmmdet.utils_ import  parse_args_train, parse_argsptq4sam
 import logging
 import ipdb
 import sys
@@ -61,17 +86,20 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 quarot_path = os.path.join(project_root, 'quarot')
 qgemm_dir = os.path.join(project_root, 'quant', 'qgemm')
 rtn_cuda_dir = os.path.join(qgemm_dir, 'cuda_rtn_gptq') 
+ptq4sam_path = os.path.join(project_root, 'PTQ4SAM')
+
 sys.path.insert(0, project_root)  
 sys.path.insert(0, quarot_path) 
 sys.path.insert(0, qgemm_dir)  
 sys.path.insert(0, rtn_cuda_dir) 
+sys.path.insert(0, ptq4sam_path)
 
 from distribution_sam import get_channel_distribution_modify
 import RTN_quantization.utils as rtn_utils
 from RTN_quantization import per_tensor_channel_group,gptq_utils
 import rotate_sam
 from quantizer import replace_linear_with_int4 ,save_cuda_quantized_model, replace_linear_with_int4_gptq
-
+from projects.instance_segment_anything.models.det_wrapper_instance_sam import DetWrapperInstanceSAM
 def setup_logger(path_log,state):
     if not os.path.exists(path_log):
         os.makedirs(path_log)
@@ -97,8 +125,7 @@ class SeginwInferenceStrategy(InferenceStrategy):
             self.sam_ckt = sam_config['model']['hq_checkpoint']
         else:
             self.sam_ckt = sam_config['model']['checkpoint']
-        # self.device = torch.device(sam_config['model']['device'])
-        self.device = "cpu"
+        self.device = torch.device(sam_config['model']['device'])
         self.predictor = None
         self.image = None
         
@@ -117,8 +144,10 @@ class SeginwInferenceStrategy(InferenceStrategy):
             self.args_gptq = sam_config.gptq
         if self.rtn_cuda:
             self.save_rtn_cuda = sam_config.quantization.save_rtn_cuda
-        if self.quant_gptq or self.gptq_cuda:
-            self.args_gptq = sam_config.gptq
+        if self.quant_rtn and 'rtn_ro_config'  in args:
+            self.rtn_ro = args.rtn_ro_config
+        else:
+            self.rtn_ro = None
         if self.rtn_cuda:
             self.save_rtn_cuda = sam_config.quantization.save_rtn_cuda
         if self.quant_ro:
@@ -243,7 +272,7 @@ class SeginwInferenceStrategy(InferenceStrategy):
 class SeginwSamEngine(Engine):
     def __init__(self, strategy:InferenceStrategy):
         super().__init__(strategy)
-        self.strategy.build_predictor()
+        self.predictor_ = self.strategy.build_predictor()
 
     
     def load_model(self, model_config_path: str, model_checkpoint_path: str): 
@@ -313,7 +342,7 @@ class SeginwSamEngine(Engine):
             cat_list = [item['name'] for item in category_dict]
             caption = " . ".join(cat_list) + ' .'
             print("Input text prompt:", caption)
-            predictor = self.strategy.build_predictor()
+            predictor = self.predictor_
 
             
             json_file = []
@@ -330,7 +359,8 @@ class SeginwSamEngine(Engine):
                 outputs = model(images, captions=input_captions)
                 orig_target_sizes = torch.stack(
                     [t["orig_size"] for t in targets], dim=0).to(images.device)
-                results = postprocessor(outputs, orig_target_sizes)                
+                results = postprocessor(outputs, orig_target_sizes)   
+                self.strategy.predictor.model = self.strategy.predictor.model.to(self.strategy.device)            
                 self.strategy.set_image(image_dir=f'{image_dir}/{targets[0]["file_path"]}')
 
                 input_boxes = results[0]['boxes'].cpu()     
@@ -437,7 +467,7 @@ class SeginwSamEngine(Engine):
         cat_list = [item['name'] for item in category_dict]
         caption = " . ".join(cat_list) + ' .'
         print("Input text prompt:", caption)
-        predictor = self.strategy.build_predictor()
+        predictor = self.predictor_
 
         
         json_file = []
@@ -748,7 +778,7 @@ class SeginwSamEngine(Engine):
         cat_list = [item['name'] for item in category_dict]
         caption = " . ".join(cat_list) + ' .'
         print("Input text prompt:", caption)
-        predictor = self.strategy.build_predictor()
+        predictor = self.predictor_
 
         json_file = []
         start = time.time()
@@ -860,8 +890,233 @@ class SeginwSamEngine(Engine):
             print(f"Results saved to: {save_path}")
 
 # %%
-    def evaluate_loadptq4sam(self, args, args_quant):
-        pass
+    def evaluate_loadptq4sam(self,args_, args_quant):
+        state="seginw_"
+        if args_quant.quanrtn:
+            state +="rtn"
+        if args_quant.quansmooth:
+            state += "smooth"
+        if args_quant.quanro:
+            state += "ro"
+
+        logger =setup_logger(args_.logging_path,state)
+        
+        args = parse_argsptq4sam()
+        brecq = args.brecq
+        assert args.out or args.eval or args.format_only or args.show \
+            or args.show_dir, \
+            ('Please specify at least one operation (save/eval/format/show the '
+            'results / save the results) with the argument "--out", "--eval"'
+            ', "--format-only", "--show" or "--show-dir"')
+
+        if args.eval and args.format_only:
+            raise ValueError('--eval and --format_only cannot be both specified')
+
+        if args.out is not None and not args.out.endswith(('.pkl', '.pickle')):
+            raise ValueError('The output file must be a pkl file.')
+
+        cfg = Config.fromfile(args.config)
+
+        # replace the ${key} with the value of cfg.key
+        cfg = replace_cfg_vals(cfg)
+
+        # update data root according to MMDET_DATASETS
+        update_data_root(cfg)
+
+        if args.cfg_options is not None:
+            cfg.merge_from_dict(args.cfg_options)
+
+        cfg = compat_cfg(cfg)
+
+        # set multi-process settings
+        setup_multi_processes(cfg)
+
+        # import modules from plguin/xx, registry will be updated
+        if hasattr(cfg, 'plugin'):
+            if cfg.plugin:
+                import importlib
+                if hasattr(cfg, 'plugin_dir'):
+                    plugin_dir = os.path.abspath(cfg.plugin_dir)
+            
+                    # Add parent directory to Python path
+                    parent_dir = os.path.dirname(os.path.dirname(plugin_dir))
+                    if parent_dir not in sys.path:
+                        sys.path.insert(0, parent_dir)
+                    
+                    # Get module path relative to parent_dir
+                    rel_path = os.path.relpath(plugin_dir, parent_dir)
+                    _module_path = rel_path.replace('/', '.')
+                    
+                    # Remove leading dots for absolute import
+                    _module_path = _module_path.lstrip('.')
+                    
+                    print(f"Importing module: {_module_path}")
+                    plg_lib = importlib.import_module(_module_path)
+                else:
+                    # import dir is the dirpath for the config file
+                    _module_dir = os.path.dirname(args.config)
+                    _module_dir = _module_dir.split('/')
+                    _module_path = _module_dir[0]
+                    for m in _module_dir[1:]:
+                        _module_path = _module_path + '.' + m
+                    # print(_module_path)
+                    plg_lib = importlib.import_module(_module_path)
+
+
+        # set cudnn_benchmark
+        if cfg.get('cudnn_benchmark', False):
+            torch.backends.cudnn.benchmark = True
+
+        if 'pretrained' in cfg.model:
+            cfg.model.pretrained = None
+        elif (cfg.model.get('backbone', None) is not None
+            and 'init_cfg' in cfg.model.backbone):
+            cfg.model.backbone.init_cfg = None
+
+        if cfg.model.get('neck'):
+            if isinstance(cfg.model.neck, list):
+                for neck_cfg in cfg.model.neck:
+                    if neck_cfg.get('rfp_backbone'):
+                        if neck_cfg.rfp_backbone.get('pretrained'):
+                            neck_cfg.rfp_backbone.pretrained = None
+            elif cfg.model.neck.get('rfp_backbone'):
+                if cfg.model.neck.rfp_backbone.get('pretrained'):
+                    cfg.model.neck.rfp_backbone.pretrained = None
+
+        if args.gpu_ids is not None:
+            cfg.gpu_ids = args.gpu_ids[0:1]
+            warnings.warn('`--gpu-ids` is deprecated, please use `--gpu-id`. '
+                        'Because we only support single GPU mode in '
+                        'non-distributed testing. Use the first GPU '
+                        'in `gpu_ids` now.')
+        else:
+            cfg.gpu_ids = [args.gpu_id]
+        cfg.device = get_device()
+        # cfg.device = 'cpu'
+        # init distributed env first, since logger depends on the dist info.
+        if args.launcher == 'none':
+            distributed = False
+        else:
+            distributed = True
+            init_dist(args.launcher, **cfg.dist_params)
+        
+        # if args.q_config:
+        #     q_config = utils.parse_config(args.q_config)
+
+        test_dataloader_default_args = dict(
+            samples_per_gpu=1, workers_per_gpu=2, dist=distributed, shuffle=False)
+
+        # in case the test dataset is concatenated
+        if isinstance(cfg.data.test, dict):
+            cfg.data.test.test_mode = True
+            if cfg.data.test_dataloader.get('samples_per_gpu', 1) > 1:
+                # Replace 'ImageToTensor' to 'DefaultFormatBundle'
+                cfg.data.test.pipeline = replace_ImageToTensor(
+                    cfg.data.test.pipeline)
+        elif isinstance(cfg.data.test, list):
+            for ds_cfg in cfg.data.test:
+                ds_cfg.test_mode = True
+            if cfg.data.test_dataloader.get('samples_per_gpu', 1) > 1:
+                for ds_cfg in cfg.data.test:
+                    ds_cfg.pipeline = replace_ImageToTensor(ds_cfg.pipeline)
+        
+        test_loader_cfg = {
+            **test_dataloader_default_args,
+            **cfg.data.get('test_dataloader', {})
+        }
+
+        rank, _ = get_dist_info()
+        # allows not to create
+        if args.work_dir is not None and rank == 0:
+            mmcv.mkdir_or_exist(osp.abspath(args.work_dir))
+            timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
+            log_file = osp.join(args.work_dir, f'{timestamp}.log')
+            logger = get_logger(name='ptq4sam', log_file=log_file, log_level=logging.INFO)
+            json_file = osp.join(args.work_dir, f'eval_{timestamp}.json')
+
+        # build the dataloader
+        dataset = build_dataset(cfg.data.test)
+        data_loader = build_dataloader(dataset, **test_loader_cfg)
+        
+        # cali_data = utils.load_calibration(cfg, distributed, q_config.calibrate)
+
+        # build the model and load checkpoint
+        cfg.model.train_cfg = None
+        model = build_detector(cfg.model, test_cfg=cfg.get('test_cfg'))
+        fp16_cfg = cfg.get('fp16', None)
+        if fp16_cfg is not None:
+            wrap_fp16_model(model)
+        # checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
+        checkpoint = {}
+        if args.fuse_conv_bn:
+            model = fuse_conv_bn(model)
+        # old versions did not save class info in checkpoints, this walkaround is
+        # for backward compatibility
+        if 'CLASSES' in checkpoint.get('meta', {}):
+            model.CLASSES = checkpoint['meta']['CLASSES']
+        else:
+            model.CLASSES = dataset.CLASSES
+        
+        
+        model.det_model.to(cfg.device)
+        #TODO: implement quantization for SAM predictor = model.predictor
+        # if want to quantize ptq4sam need to look back the github repo
+        
+        model.replace_quant_sam(self.predictor_)
+        # move predictor to device
+        model.predictor.model.to(cfg.device)
+        model.to(cfg.device)
+      
+        if not distributed:
+            if args.show_dir is not None and 'gt' in args.show_dir:
+                gt = True
+            else:
+                gt = False
+            model = build_dp(model, cfg.device, device_ids=cfg.gpu_ids)
+            # ipdb.set_trace()
+            outputs = single_gpu_test(model, data_loader, args.show, args.show_dir,
+                                    args.show_score_thr, gt=gt)
+        else:
+            model = build_ddp(
+                model,
+                cfg.device,
+                device_ids=[int(os.environ['LOCAL_RANK'])],
+                broadcast_buffers=False)
+
+            # In multi_gpu_test, if tmpdir is None, some tesnors
+            # will init on cuda by default, and no device choice supported.
+            # Init a tmpdir to avoid error on npu here.
+            if cfg.device == 'npu' and args.tmpdir is None:
+                args.tmpdir = './npu_tmpdir'
+
+            outputs = multi_gpu_test(
+                model, data_loader, args.tmpdir, args.gpu_collect
+                or cfg.evaluation.get('gpu_collect', False))
+
+        rank, _ = get_dist_info()
+        if rank == 0:
+            if args.out:
+                print(f'\nwriting results to {args.out}')
+                mmcv.dump(outputs, args.out)
+            kwargs = {} if args.eval_options is None else args.eval_options
+            if args.format_only:
+                dataset.format_results(outputs, **kwargs)
+            if args.eval:
+                eval_kwargs = cfg.get('evaluation', {}).copy()
+                # hard-code way to remove EvalHook args
+                for key in [
+                        'interval', 'tmpdir', 'start', 'gpu_collect', 'save_best',
+                        'rule', 'dynamic_intervals'
+                ]:
+                    eval_kwargs.pop(key, None)
+                eval_kwargs.update(dict(metric=args.eval, **kwargs))
+                metric = dataset.evaluate(outputs, **eval_kwargs)
+                print(metric)
+                logger.info(q_config)
+                logger.info(metric)
+                metric_dict = dict(config=args.config, metric=metric)
+                if args.work_dir is not None and rank == 0:
+                    mmcv.dump(metric_dict, json_file)
 
 # %%
 
@@ -871,10 +1126,10 @@ if __name__ == "__main__":
 
     engine = SeginwSamEngine(SeginwInferenceStrategy(args))
     # breakpoint()
-    # engine.evaluate(args.data,args.quantization)
+    engine.evaluate(args.data,args.quantization)
     # engine.evaluate_coco(args.data,args.quantization)
-    engine.evaluate_coco_mmdet(args.data,args.quantization)
-  
+    # engine.evaluate_coco_mmdet(args.data,args.quantization)
+    # engine.evaluate_loadptq4sam(args.data,args.quantization)
     prompts = {
         'point_coords': None, 
         'point_labels': None,

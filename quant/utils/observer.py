@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 from typing import Optional, Tuple, Callable, List
-from sam2.sam2_video_predictor import SAM2VideoPredictor
-from sam2.sam2_image_predictor import SAM2ImagePredictor
+# from sam2.sam2_video_predictor import SAM2VideoPredictor
+# from sam2.sam2_image_predictor import SAM2ImagePredictor
 from functools import partial
 from PIL import Image
 from matplotlib import pyplot as plt
@@ -44,7 +44,7 @@ class ObserverBase:
 
     def add_prompt(
         self,
-        predictor:SAM2VideoPredictor,
+        predictor,
         inference_state,
         points,
         labels,
@@ -83,7 +83,7 @@ class ObserverBase:
     @torch.autocast(device_type='cuda', dtype=torch.float16)
     def inference_video(
         self,
-        predictor:SAM2VideoPredictor,
+        predictor,
         video_dir:str='./notebooks/videos/bedroom',
         show_video:bool=False
     ):
@@ -133,7 +133,7 @@ class ObserverBase:
     @torch.autocast(device_type='cuda', dtype=torch.float16)
     def inference_image(
         self,
-        predictor:SAM2ImagePredictor,
+        predictor,
         image_dir:str='./notebooks/images/cars.jpg',
         show_image:bool=False,
     ):

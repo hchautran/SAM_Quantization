@@ -11,7 +11,7 @@ data:
   config_file: ./GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py
   checkpoint_path: ./pretrained_checkpoint/groundingdino_swint_ogc.pth
   data_path: ./data/seginw/
-  num_select: 300
+  num_select: 100
   num_workers: 1
   device: cuda
   save_json: True

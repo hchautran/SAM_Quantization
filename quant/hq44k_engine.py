@@ -26,8 +26,6 @@ def get_args_parser():
                         # help="Path to the directory where masks and checkpoints will be output")
     parser.add_argument("--model-type", type=str, default="vit_l", 
                         help="The type of model to load, in ['vit_h', 'vit_l', 'vit_b']")
-    # parser.add_argument("--checkpoint", type=str, required=True, 
-                        # help="The path to the SAM checkpoint to use for mask generation.")
     parser.add_argument("--device", type=str, default="cuda", 
                         help="The device to run generation on.")
 

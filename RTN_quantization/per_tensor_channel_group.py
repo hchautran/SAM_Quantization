@@ -53,7 +53,7 @@ def quantize_weight_per_group_absmax_input_features(w, group_size, n_bits=8):
 @torch.no_grad()
 def quantize_activation_per_token_absmax(t, n_bits=8):
     t_shape = t.shape
-    t.view(-1, t_shape[-1])
+    t.contiguous().view(-1, t_shape[-1])
     scales = t.abs().max(dim=-1, keepdim=True)[0]
     q_max = 2 ** (n_bits - 1) - 1
     scales.clamp_(min=1e-5).div_(q_max)
@@ -64,7 +64,7 @@ def quantize_activation_per_token_absmax(t, n_bits=8):
 @torch.no_grad()
 def quantize_activation_per_tensor_absmax(t, n_bits=8):
     t_shape = t.shape
-    t.view(-1, t_shape[-1])
+    t.contiguous().view(-1, t_shape[-1])
     scales = t.abs().max()
     q_max = 2 ** (n_bits - 1) - 1
     scales.clamp_(min=1e-5).div_(q_max)

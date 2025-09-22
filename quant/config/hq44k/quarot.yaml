@@ -4,19 +4,28 @@ model:
   seed: 42
   output: ./output/hq44k/base_l
   restore_model:  ./pretrained_checkpoint/epoch_11.pth 
+  device: cuda
+
+plot_distribution: True
 
 quantization:
-  quandecoder: True
+  quandecoder: False
   quanrtn: False
-  quangptq: False
+  quangptq: True
   quansmooth: False
   quanro: True
   rtn_cuda: False
+  gptq_cuda: False
   act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 8
+<<<<<<< Updated upstream
   quantize_output: True
+    
+=======
+  quantize_output: False
+>>>>>>> Stashed changes
 
 quarot_inf:
   hidden_size_image_en: 1024
@@ -32,7 +41,7 @@ rtn_ro_config:
   act_quant: per_token
   weight_quant: per_channel
   group_size: 64
-  quantize_output: True
+  quantize_output: False
   quantize_input: True
 gptq:
   blocksize: 128

@@ -1,4 +1,3 @@
-import utils
 import torch
 import model_utils
 import rotation_utils
@@ -14,6 +13,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from RTN_quantization.utils import replace_linear_with_target_and_quantize
 from RTN_quantization.per_tensor_channel_group import W8A8Linear
+import quarot.utils as utils_q
 def show_mask(mask, ax, random_color=False):
     if random_color:
         color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
@@ -63,6 +63,7 @@ def show_res_multi(masks, scores, input_point, input_label, input_box, filename,
     plt.axis('off')
     plt.savefig(filename +'.png',bbox_inches='tight',pad_inches=-0.1)
     plt.close()
+
 def rotate_sam(sam_model, args, rtn_ro_config,decoder= False):
     sam_model.eval()
     Q_image_encoder = rotation_utils.get_orthogonal_matrix(args.hidden_size_image_en,args.rotate_mode,device = args.device,seed=args.seed)
@@ -70,9 +71,9 @@ def rotate_sam(sam_model, args, rtn_ro_config,decoder= False):
     if not decoder:
         # rotation_utils.fuse_layer_norms_sam(sam_model)  
         rotation_utils.rotate_model(sam_model,Q_image_encoder, Q_mask_decoder , args)  
-        utils.cleanup_memory(verbos=True)
-        utils.add_actquant(sam_model,rtn_ro_config=rtn_ro_config) 
-        qlayers = utils.find_qlayers(sam_model)
+        utils_q.cleanup_memory(verbos=True)
+        utils_q.add_actquant(sam_model,rtn_ro_config=rtn_ro_config) 
+        qlayers = utils_q.find_qlayers(sam_model)
         for name in qlayers:
             if ("lin2" in name) and  not ("final_attn" in name): 
                 if "mask_decoder" in name:  
@@ -100,9 +101,9 @@ def rotate_sam(sam_model, args, rtn_ro_config,decoder= False):
                 qlayers[name].fp32_had = args.fp32_had
     else:
         rotation_utils.rotate_decoder(sam_model, Q_mask_decoder, args)  
-        utils.cleanup_memory(verbos=True)
-        utils.add_actquant(sam_model,rtn_ro_config=rtn_ro_config) 
-        qlayers = utils.find_qlayers(sam_model)
+        utils_q.cleanup_memory(verbos=True)
+        utils_q.add_actquant(sam_model,rtn_ro_config=rtn_ro_config) 
+        qlayers = utils_q.find_qlayers(sam_model)
         for name in qlayers:
             if ("lin2" in name)  and not ("final_attn" in name): 
                 intermidiate_size = sam_model.transformer.layers[0].mlp.lin2.weight.shape[1]
@@ -122,7 +123,7 @@ def rotate_sam(sam_model, args, rtn_ro_config,decoder= False):
     # exit()
     
 def main():
-    args = utils.parser_gen()
+    args = utils_q.parser_gen()
     if args.wandb:
         import wandb
         wandb.init(project=args.wandb_project, entity=args.wandb_id)
@@ -147,10 +148,10 @@ def main():
         # rotation_utils.fuse_layer_norms_sam(sam_model)
         
         rotation_utils.rotate_model(sam_model,Q_image_encoder, Q_mask_decoder , args)  # Use SAM-specific rotation
-        utils.cleanup_memory(verbos=True)
+        utils_q.cleanup_memory(verbos=True)
         
-        utils.add_actquant(sam_model,rtn_ro_config=None) #Add Activation Wrapper to the model
-        qlayers = utils.find_qlayers(sam_model)
+        utils_q.add_actquant(sam_model,rtn_ro_config=None) #Add Activation Wrapper to the model
+        qlayers = utils_q.find_qlayers(sam_model)
         for name in qlayers:
             
             if ("lin2" in name) and not ("final_attn" in name): #ffn layers

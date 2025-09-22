@@ -408,8 +408,11 @@ def rotate_model(model, Q_image_encoder,Q_mask_decoder, args):
         block.mlp = custom_mlp
     
     rotate_model_sam(model,Q_image_encoder,Q_mask_decoder,args)
-    utils.cleanup_memory()
-
+    # utils.cleanup_memory()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    import gc
+    gc.collect()
 
 @torch.inference_mode
 def online_rotate(module, inp):

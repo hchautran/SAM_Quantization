@@ -13,7 +13,7 @@ sam_hq_path = os.path.join(project_root, "sam-hq")
 sys.path.insert(0, sam_hq_path)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from segment_anything import sam_model_registry, SamPredictor
-# from calibration import get_act_scales_sam
+from calibration import get_act_scales_sam
 from utils import smooth_sam
 
 
@@ -120,8 +120,9 @@ if __name__ == "__main__":
     sam.to(device=device)
     sam.eval()
   
+    
     # Load or calculate activation scales
-    act_scales_file = f"./pretrained_checkpoint/sam_{model_type}activation_scales.pt"
+    act_scales_file = f"./pretrained_checkpoint/sam_{model_type}_activation_scales.pt"
     # act_scales_file ="/media/caduser/MyBook/chau/chi/SAM_Quantization/pretrained_checkpoint/sam_vit_lactivation_scales.pt"
     if os.path.exists(act_scales_file):
         print("Loading activation scales...")

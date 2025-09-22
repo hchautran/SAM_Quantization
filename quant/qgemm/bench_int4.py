@@ -13,11 +13,13 @@ def sym_quant_rowwise(x: torch.Tensor):
     return q, scale
 
 
-def run_once(M: int, N: int, K: int, warmup: int, iters: int, dtype: str, check_error: bool = False):
+def run_once(M: int, N: int, K: int, warmup: int, iters: int, dtype: str, check_error: bool = False, batch: int = 1):
     device = torch.device("cuda")
     torch.manual_seed(0)
 
-    xa = torch.randn((M, K), device=device, dtype=torch.float16)
+    effective_M = M * batch
+
+    xa = torch.randn((effective_M, K), device=device, dtype=torch.float16)
     xb = torch.randn((N, K), device=device, dtype=torch.float16)
 
     qa, sa = sym_quant_rowwise(xa)
@@ -34,9 +36,30 @@ def run_once(M: int, N: int, K: int, warmup: int, iters: int, dtype: str, check_
     end = time.perf_counter()
 
     avg_ms = (end - start) * 1000.0 / iters
-    macs = M * N * K
+    macs = effective_M * N * K
     tflops = (macs / 1e12) / (avg_ms / 1000.0)
-    print(f"INT4 matmul:    M={M} N={N} K={K} | latency={avg_ms:.3f} ms | Throughput={tflops:.2f} TFLOPS (int4 muls)")
+    print(f"INT4 matmul:    B={batch} M={M} N={N} K={K} | latency={avg_ms:.3f} ms | Throughput={tflops:.2f} TFLOPS (int4 muls)")
+
+    # End-to-end: quant + int4 matmul + dequant timing
+    for _ in range(warmup):
+        qa_w, sa_w = sym_quant_rowwise(xa)
+        qb_w, sb_w = sym_quant_rowwise(xb)
+        c_w = qgemm.matmul(qa_w, qb_w)
+        c_deq_w = qgemm.sym_dequant(c_w, sa_w, sb_w, 32)
+    torch.cuda.synchronize()
+
+    start = time.perf_counter()
+    for _ in range(iters):
+        qa_i, sa_i = sym_quant_rowwise(xa)
+        qb_i, sb_i = sym_quant_rowwise(xb)
+        c_i = qgemm.matmul(qa_i, qb_i)
+        c_deq_i = qgemm.sym_dequant(c_i, sa_i, sb_i, 32)
+    torch.cuda.synchronize()
+    end = time.perf_counter()
+
+    avg_ms_e2e = (end - start) * 1000.0 / iters
+    tflops_e2e = (macs / 1e12) / (avg_ms_e2e / 1000.0)
+    print(f"Quant+Matmul+Dequant: B={batch} M={M} N={N} K={K} | latency={avg_ms_e2e:.3f} ms | Throughput={tflops_e2e:.2f} TFLOPS (end-to-end)")
 
     for _ in range(warmup):
         c_fp = xa @ xb.t()
@@ -48,11 +71,10 @@ def run_once(M: int, N: int, K: int, warmup: int, iters: int, dtype: str, check_
     end = time.perf_counter()
     avg_ms_fp = (end - start) * 1000.0 / iters
     tflops_fp = (macs / 1e12) / (avg_ms_fp / 1000.0)
-    print(f"FP16 matmul:    M={M} N={N} K={K} | latency={avg_ms_fp:.3f} ms | Throughput={tflops_fp:.2f} TFLOPS")
+    print(f"FP16 matmul:    B={batch} M={M} N={N} K={K} | latency={avg_ms_fp:.3f} ms | Throughput={tflops_fp:.2f} TFLOPS")
 
     if check_error:
-        s = sa @ sb.t() 
-        c_deq = c.to(torch.float16) * s
+        c_deq = qgemm.sym_dequant(c, sa, sb, 32)
         diff = (c_deq - c_fp).float()
         mae = diff.abs().mean().item()
         rmse = torch.sqrt((diff * diff).mean()).item()
@@ -82,6 +104,12 @@ def parse_args():
         choices=["square", "llm"],
         help="Preset list of sizes: square (512/1024/2048), llm (token-projection-like).",
     )
+    p.add_argument(
+        "--batch-sizes",
+        type=int,
+        nargs="*",
+        help="Optional list of batch sizes B to simulate. If omitted, B=1.",
+    )
     return p.parse_args()
 
 
@@ -108,10 +136,14 @@ if __name__ == "__main__":
     if args.sizes:
         sizes.extend([parse_size_token(s) for s in args.sizes])
 
+    batches = args.batch_sizes if args.batch_sizes else [1]
+
     if sizes:
         for (M, N, K) in sizes:
-            run_once(M, N, K, args.warmup, args.iters, dtype="i4", check_error=args.check_error)
+            for B in batches:
+                run_once(M, N, K, args.warmup, args.iters, dtype="i4", check_error=args.check_error, batch=B)
     else:
-        run_once(args.M, args.N, args.K, args.warmup, args.iters, dtype="i4", check_error=args.check_error)
+        for B in batches:
+            run_once(args.M, args.N, args.K, args.warmup, args.iters, dtype="i4", check_error=args.check_error, batch=B)
 
 

@@ -1,9 +1,9 @@
 model:
   name: sam
   use_hq: True
-  checkpoint: ./pretrained_checkpoint/sam_vit_h.pth
-  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_h.pth
-  model_type: vit_h 
+  checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
+  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  model_type: vit_l 
   device: cuda
 
 

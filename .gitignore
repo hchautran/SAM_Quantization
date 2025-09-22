@@ -14,6 +14,7 @@ GroundingDINO/
 quant/load_coco_ptq4sam/
 fast-hadamard-transform/
 seginw_output/
+PTQ4SAM/
 # Exclude Python cache files
 __pycache__/
 *.pyc
