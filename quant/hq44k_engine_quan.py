@@ -25,7 +25,6 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 quarot_path = os.path.join(project_root, 'quarot')
 sys.path.insert(0, project_root)  
 sys.path.insert(0, quarot_path)   
-from quarot import parser_gen
 
 from distribution_sam import get_channel_distribution_modify
 import RTN_quantization.utils as rtn_utils
