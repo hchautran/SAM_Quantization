@@ -14,21 +14,6 @@ sam_hq_path = os.path.join(project_root, "sam-hq")
 
 sys.path.insert(0, sam_hq_path)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from segment_anything import sam_model_registry, SamPredictor
-
-# Import transformer decoder layers for smooth_lm function
-from transformers.models.opt.modeling_opt import OPTDecoderLayer
-from transformers.models.bloom.modeling_bloom import BloomBlock
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
-from transformers.models.mistral.modeling_mistral import (
-    MistralDecoderLayer,
-    MistralRMSNorm,
-)
-from transformers.models.mixtral.modeling_mixtral import (
-    MixtralDecoderLayer,
-    MixtralRMSNorm,
-)
-from transformers.models.falcon.modeling_falcon import FalconDecoderLayer
 
 def replace_linear_with_target_and_quantize(module, 
                                target_class,n_bit, module_name_to_exclude, 

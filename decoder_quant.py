@@ -1,8 +1,10 @@
+from abc import abstractmethod
 import torch
 import torch.nn.functional as F
 from segment_anything.modeling.transformer import TwoWayAttentionBlock, TwoWayTransformer, Attention
 from quant.utils.observer import ObserverBase 
 import torch.nn as nn
+from tqdm.auto import tqdm
 from collections import defaultdict
 from typing import Type, Tuple, Optional
 import math
@@ -13,9 +15,212 @@ import cv2
 import matplotlib.pyplot  as plt
 from typing import Optional
 import pandas as pd 
+from quant_utils import quantize_activation_per_token_absmax
+from functools import partial
+from accelerate import Accelerator 
+from train.utils.dataloader import get_im_gt_name_dict, Resize
+from data_utils import OnlineDataset
+from torch.utils.data import Dataset, DataLoader, ConcatDataset, Sampler
+from train.utils.misc import   F, random
+import train.utils.misc as misc
+from torchvision import transforms, utils
+import os
+import logging
+import time
 
 def to_numpy(x:torch.Tensor):
     return x.detach().cpu().numpy()
+
+
+def create_dataloaders(name_im_gt_list, my_transforms=[], batch_size=1 ):
+    gos_dataloaders = []
+    gos_datasets = []
+    for i in range(len(name_im_gt_list)):   
+        gos_dataset = OnlineDataset([name_im_gt_list[i]], transform = transforms.Compose(my_transforms), eval_ori_resolution = True)
+        dataloader = DataLoader(gos_dataset, batch_size, drop_last=False)
+        gos_dataloaders.append(dataloader)
+        gos_datasets.append(gos_dataset) 
+    return gos_dataloaders, gos_datasets
+
+
+def separate_heads(x: torch.Tensor, num_heads: int) -> torch.Tensor:
+    b, n, c = x.shape
+    x = x.reshape(b, n, num_heads, c // num_heads)
+    return x.transpose(1, 2)  # B x N_heads x N_tokens x C_per_head
+
+def recombine_heads(x: torch.Tensor) -> torch.Tensor:
+    b, n_heads, n_tokens, c_per_head = x.shape
+    x = x.transpose(1, 2)
+    return x.reshape(b, n_tokens, n_heads * c_per_head)  # B x N_tokens x C
+
+def re_cal_attn(q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+    _, _, _, c_per_head = q.shape
+    attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
+    attn = attn / math.sqrt(c_per_head)
+    attn = torch.softmax(attn, dim=-1)
+
+    return attn
+
+
+def setup_logger(path_log,state):
+    if not os.path.exists(path_log):
+        os.makedirs(path_log)
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    fh = logging.FileHandler(os.path.join(path_log, f'{state}.log'))
+    fh.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(message)s')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    return logger
+
+
+class ProcessStrategy():
+    def __init__(self, strategy_name:str) -> None:
+        self.accelerator = Accelerator()
+        self.strategy_name = strategy_name
+        self.device = self.accelerator.device
+        self.stat = {}
+        dataset_dis = {
+            "name": "DIS5K-VD",
+            "im_dir": "./data/DIS5K/DIS-VD/im",
+            "gt_dir": "./data/DIS5K/DIS-VD/gt",
+            "im_ext": ".jpg",
+            "gt_ext": ".png"
+        }
+        valid_im_gt_list = get_im_gt_name_dict([dataset_dis], flag="valid")
+        self.dataloaders, self.datasets = create_dataloaders(
+            valid_im_gt_list,
+            my_transforms = [
+                        Resize([1024, 1024])
+                    ],
+            batch_size=1,
+        )
+
+    @abstractmethod
+    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor):
+        pass
+
+
+    @abstractmethod
+    def stat_tensor(self, X, Y, name):
+        pass
+
+        
+    @abstractmethod
+    def calibrate(self, predictor:SamPredictor,  num_samples=32):
+        # model.eval()
+
+        def stat_hook(module, X, Y:torch.Tensor, name):
+            if isinstance(X, tuple):
+                X = X[0]
+
+            self.stat_tensor(X, Y, name)
+
+        hooks = []
+        for name, m in predictor.model.named_modules():
+            if isinstance(m, nn.Linear):
+                hooks.append(
+                    m.register_forward_hook(partial(stat_hook, name=name))
+                )
+
+                
+        logger =setup_logger('./calib_logs', self.strategy_name)
+        logger.info(f'______Using: {self.strategy_name}_______')
+
+        #load data
+        # model = self.accelerator.prepare(model) 
+        for k in range(len(self.dataloaders)):
+            dataloader = self.accelerator.prepare(self.dataloaders[k])
+            print('valid_dataloader len:', len(dataloader))
+            # logger.info(f"\nCalibarating {self.datasets[k]['name']}:")
+            progress_bar = tqdm(total=num_samples, desc=f"Calibrating")
+            for i, data_val in enumerate(dataloader):
+                if i == num_samples: break 
+                _, inputs_val, labels_val, _, labels_ori, ori_image = data_val['imidx'], data_val['image'], data_val['label'], data_val['shape'], data_val['ori_label'], data_val['ori_im']
+                
+                imgs = inputs_val.permute(0, 2, 3, 1).squeeze().cpu().numpy()
+                predictor.set_image(imgs)
+                labels_boxes = misc.masks_to_boxes(labels_val[:,0,:,:]).cpu().numpy()
+                masks, scores, logits = predictor.predict(
+                    # model, 
+                    # image=inputs_val, 
+                    box=labels_boxes, 
+                    hq_token_only=True
+                )
+                progress_bar.update(1)
+                if True:
+
+                    plt.figure(figsize=(10, 10))
+                    plt.imshow(ori_image)
+
+                    
+                    # if len(masks) > 0:
+                        # show_mask_image(masks[0], plt.gca(), random_color=False)
+                    
+                    # box = labels_boxes[0]
+                    # x0, y0 = box[0], box[1]
+                    # w, h = box[2] - box[0], box[3] - box[1]
+                    # plt.gca().add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))
+                    
+                        
+                    plt.title(f'Example {i} - Score: {scores[0]:.3f}')
+                    plt.savefig(f'./sample_{i}.png')
+                    plt.axis('off')
+                    plt.show()
+
+
+                #TODO: forward and record input/output stats
+
+
+        for h in hooks:
+            h.remove()
+
+
+
+
+
+
+
+class SignProcessor(ProcessStrategy):
+
+    def __init__(self, strategy_name):
+        super().__init__(strategy_name)
+
+
+    def stat_tensor(self, X, Y, name):
+        self.stat[self.strategy_name] = {}  
+        
+    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor):
+        # K_sign = K.mean(-2, keepdim=True).sign_()
+        Q.mul_(self.sign_vector)
+        K.mul_(self.sign_vector)
+        return Q, K, V
+
+
+class SmoothProcessor(ProcessStrategy):
+    def __init__(self):
+        self.smooth_vector = None 
+
+        
+    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor):
+        K_sign = K.mean(-2, keepdim=True).sign_()
+        Q.mul_(self.smooth_vector)
+        K.mul_(self.smooth_vector)
+        return Q, K, V
+
+
+class SSProcessor(ProcessStrategy):
+    def __init__(self):
+        self.sign_vector = {} 
+        
+    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor):
+        K_sign = K.mean(-2, keepdim=True).sign_()
+        Q.mul_(K_sign)
+        K.mul_(K_sign)
+        return Q, K, V
+
+
 
 
 class TwoWayTransformerObserver(TwoWayTransformer):
@@ -122,6 +327,8 @@ class TwoWayAttentionBlockObserver(TwoWayAttentionBlock):
         return queries, keys, p2p_attn,  p2p_q, p2p_k, p2p_v ,p2i_attn, p2i_q, p2i_k, p2i_v ,i2p_attn,  i2p_q, i2p_k, i2p_v
 
 
+
+
 class AttentionObserver(Attention):
     """
     An attention layer that allows for downscaling the size of the embedding
@@ -131,13 +338,16 @@ class AttentionObserver(Attention):
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         # Input projections
-        q = self.q_proj(q)/2
-        k = self.k_proj(k)*2
+        q = self.q_proj(q)
+        k = self.k_proj(k)
         v = self.v_proj(v)
 
-        
+        q =   quantize_activation_per_token_absmax(q, n_bits=4)
+        k =   quantize_activation_per_token_absmax(k, n_bits=4)
+        v =   quantize_activation_per_token_absmax(v, n_bits=4)
 
         # Separate into heads
+
         q = self._separate_heads(q, self.num_heads)
         k = self._separate_heads(k, self.num_heads)
         v = self._separate_heads(v, self.num_heads)
@@ -307,6 +517,7 @@ def inference_image(
     # Check if predictor is SamPredictor or Sam model
     if isinstance(predictor, SamPredictor):
         # Use existing SamPredictor logic
+        print(image.shape)
         predictor.set_image(image)
         
         try:
@@ -444,23 +655,19 @@ def get_activation_boxplot(
         
 
 
-def separate_heads(x: torch.Tensor, num_heads: int) -> torch.Tensor:
-    b, n, c = x.shape
-    x = x.reshape(b, n, num_heads, c // num_heads)
-    return x.transpose(1, 2)  # B x N_heads x N_tokens x C_per_head
 
-def recombine_heads(x: torch.Tensor) -> torch.Tensor:
-    b, n_heads, n_tokens, c_per_head = x.shape
-    x = x.transpose(1, 2)
-    return x.reshape(b, n_tokens, n_heads * c_per_head)  # B x N_tokens x C
 
-def re_cal_attn(q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-    _, _, _, c_per_head = q.shape
-    attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
-    attn = attn / math.sqrt(c_per_head)
-    attn = torch.softmax(attn, dim=-1)
 
-    return attn
+if __name__ == '__main__':
 
+    model_type = 'vit_l'
+    num_calib_samples=32
+    checkpoint_path= '/u/ctran3/Sam_quantization/pretrained_checkpoint/sam_hq_vit_l.pth'
+    sam = sam_hq_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
+    predictor = SamPredictor(sam)
+    processor = SignProcessor('sign') 
+    
+    processor.calibrate(predictor, num_calib_samples)
+    
 
     

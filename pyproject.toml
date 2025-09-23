@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "SAM Quantization"
 readme = "README.md"
 dependencies = [
+    "accelerate>=1.10.1",
     "addict>=2.4.0",
     "black==24.2.0",
     "cython>=3.1.3",
