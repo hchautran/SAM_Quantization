@@ -7,7 +7,7 @@ import random
 from copy import deepcopy
 from skimage import io
 import os
-from glob import glob
+import torchvision.transforms as transforms
 
 class OnlineDataset(Dataset):
     def __init__(self, name_im_gt_list, transform=None, eval_ori_resolution=False):
@@ -54,15 +54,11 @@ class OnlineDataset(Dataset):
         gt = io.imread(gt_path)
         ori_im = im
 
-        if len(gt.shape) > 2:
-            gt = gt[:, :, 0]
-        if len(im.shape) < 3:
-            im = im[:, :, np.newaxis]
-        if im.shape[2] == 1:
-            im = np.repeat(im, 3, axis=2)
-        im = torch.tensor(im.copy(), dtype=torch.float32)
-        im = torch.transpose(torch.transpose(im,1,2),0,1)
         gt = torch.unsqueeze(torch.tensor(gt, dtype=torch.float32),0)
+        resize_transform = transforms.Resize((1024, 1024))
+        im = resize_transform(torch.from_numpy(im.squeeze()).permute(2,0,1)) 
+        # breakpoint()
+        gt = resize_transform(gt)
 
         sample = {
             "imidx": torch.from_numpy(np.array(idx)),
@@ -72,8 +68,6 @@ class OnlineDataset(Dataset):
             "ori_im": ori_im   
         }
         
-        if self.transform:
-            sample = self.transform(sample)
 
         if self.eval_ori_resolution:
             sample["ori_label"] = gt.type(torch.uint8)  # NOTE for evaluation only. And no flip here

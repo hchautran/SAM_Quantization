@@ -8,7 +8,7 @@ from tqdm.auto import tqdm
 from collections import defaultdict
 from typing import Type, Tuple, Optional
 import math
-from segment_anything import SamPredictor, sam_hq_model_registry
+from segment_anything import SamPredictor, sam_model_registry
 import numpy as np
 import numpy as np
 import cv2
@@ -138,30 +138,31 @@ class ProcessStrategy():
             for i, data_val in enumerate(dataloader):
                 if i == num_samples: break 
                 _, inputs_val, labels_val, _, labels_ori, ori_image = data_val['imidx'], data_val['image'], data_val['label'], data_val['shape'], data_val['ori_label'], data_val['ori_im']
+                # breakpoint()
                 
-                imgs = inputs_val.permute(0, 2, 3, 1).squeeze().cpu().numpy()
-                predictor.set_image(imgs)
+                imgs = inputs_val.permute(0, 2, 3, 1).cpu().numpy()
+                # breakpoint()
+                predictor.set_image(imgs.squeeze())
                 labels_boxes = misc.masks_to_boxes(labels_val[:,0,:,:]).cpu().numpy()
                 masks, scores, logits = predictor.predict(
                     # model, 
-                    # image=inputs_val, 
                     box=labels_boxes, 
-                    hq_token_only=True
+                    hq_token_only=False
                 )
                 progress_bar.update(1)
                 if True:
 
                     plt.figure(figsize=(10, 10))
-                    plt.imshow(ori_image)
+                    plt.imshow(imgs.squeeze())
 
                     
-                    # if len(masks) > 0:
-                        # show_mask_image(masks[0], plt.gca(), random_color=False)
+                    if len(masks) > 0:
+                        show_mask_image(masks[0], plt.gca(), random_color=False)
                     
-                    # box = labels_boxes[0]
-                    # x0, y0 = box[0], box[1]
-                    # w, h = box[2] - box[0], box[3] - box[1]
-                    # plt.gca().add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))
+                    box = labels_boxes[0]
+                    x0, y0 = box[0], box[1]
+                    w, h = box[2] - box[0], box[3] - box[1]
+                    plt.gca().add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))
                     
                         
                     plt.title(f'Example {i} - Score: {scores[0]:.3f}')
@@ -662,8 +663,8 @@ if __name__ == '__main__':
 
     model_type = 'vit_l'
     num_calib_samples=32
-    checkpoint_path= '/u/ctran3/Sam_quantization/pretrained_checkpoint/sam_hq_vit_l.pth'
-    sam = sam_hq_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
+    checkpoint_path= './pretrained_checkpoint/sam_hq_vit_l.pth'
+    sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
     predictor = SamPredictor(sam)
     processor = SignProcessor('sign') 
     
