@@ -2,7 +2,6 @@ from torch.utils.data import Dataset
 from copy import deepcopy
 import torch
 import numpy as np
-import numpy as np
 import random
 from copy import deepcopy
 from skimage import io
