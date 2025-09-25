@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from functools import  partial
@@ -232,30 +233,45 @@ class ProcessStrategy():
     def stat_tensor(self, X, Y, name):
         pass
 
+    @abstractmethod
+    def stat_attn(self, X, Y, name):
+        pass
+
+
         
     @abstractmethod
     def calibrate(self, predictor:SamPredictor,  modules, num_samples=32):
         # model.eval()
 
-        def stat_hook(module, X, Y:torch.Tensor, name, linear_name):
+        def stat_linear_hook(module, X, Y:torch.Tensor, name, linear_name):
             if isinstance(X, tuple):
                 X = X[0]
+            self.stat_linear(X, Y, name, linear_name)
 
-            self.stat_tensor(X, Y, name, linear_name)
+        def stat_attn_hook(module, X, Y:torch.Tensor, name, n_heads ):
+            self.stat_attn(X, Y,  name, n_heads)
 
-        hooks = []
+
+        linear_hooks = []
+        attn_hooks = []
+        mlp_hooks = []
 
         for name, component in predictor.model.named_modules():
             if isinstance(component, Attention):
                 for linear_name, m in component.named_modules():
                     if isinstance(m, nn.Linear):
-                        hooks.append(
-                            m.register_forward_hook(partial(stat_hook, name=name, linear_name=linear_name))
+                        linear_hooks.append(
+                            m.register_forward_hook(partial(stat_linear_hook, name=name, linear_name=linear_name))
                         )
-
+                attn_hooks.append(
+                    component.register_forward_hook(partial(stat_attn_hook, name=name, n_heads=component.num_heads))
+                )
                 
+                
+
         logger =setup_logger('./calib_logs', self.strategy_name)
         logger.info(f'______Using: {self.strategy_name}_______')
+        
 
         #load data
         # model = self.accelerator.prepare(model) 
@@ -270,7 +286,6 @@ class ProcessStrategy():
                 # breakpoint()
                 
                 imgs = inputs_val.permute(0, 2, 3, 1).cpu().numpy()
-                # breakpoint()
                 predictor.set_image(imgs.squeeze())
                 labels_boxes = misc.masks_to_boxes(labels_val[:,0,:,:]).cpu().numpy()
                 masks, scores, logits = predictor.predict(
@@ -303,7 +318,10 @@ class ProcessStrategy():
                 #TODO: forward and record input/output stats
 
 
-        for h in hooks:
+        for h in linear_hooks:
+            h.remove()
+            
+        for h in attn_hooks:
             h.remove()
 
     def clear_dict(self):
@@ -371,7 +389,10 @@ class DoNothingProcessor(ProcessStrategy):
         super().__init__(strategy_name)
         self.stat = {} 
 
-    def stat_tensor(self, X, Y:torch.Tensor, name, linear_name):
+    def stat_linear(self, X, Y:torch.Tensor, name, linear_name):
+        pass
+
+    def stat_attn(self, X, Y:torch.Tensor, name, linear_name):
         pass
         
 
@@ -379,6 +400,57 @@ class DoNothingProcessor(ProcessStrategy):
         pass
 
 
+class AttnBasedProcessor(ProcessStrategy):
 
+    def __init__(self, strategy_name):
+        super().__init__(strategy_name)
+        self.stat = {} 
+
+    def stat_linear(self, X, Y:torch.Tensor, name, linear_name):
+        if name not in self.stat:
+            self.stat[name] =  defaultdict() 
+        self.stat[name][linear_name] = Y
+
+    def _separate_heads(self, x: torch.Tensor, num_heads: int) -> torch.Tensor:
+        b, n, c = x.shape
+        x = x.reshape(b, n, num_heads, c // num_heads)
+        return x.transpose(1, 2) 
+
+    def stat_attn(self, X, Y:torch.Tensor, name, n_heads):
+        if 'final' in name:
+            q = self.stat[name]['q_proj']
+            k = self.stat[name]['k_proj']
+            v = self.stat[name]['v_proj']
+            q = self._separate_heads(q, n_heads)
+            k = self._separate_heads(k, n_heads)
+            v = self._separate_heads(v, n_heads)
+            
+
+            # Attention
+            _, _, _, c_per_head = q.shape
+            attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
+            attn = attn / math.sqrt(c_per_head)
+            attn = torch.softmax(attn, dim=-1)
+            attn = attn.mean(1).mean(1) #[B, T]
+            mask = torch.where(attn > attn.mean(-1,keepdim=True),1,0)
+            k_high=k.permute(2,0,1,3)[mask.squeeze().nonzero()].squeeze().reshape(1, -1, q.shape[-1]*n_heads)
+            k_low= k.permute(2,0,1,3)[(1-mask).squeeze().nonzero()].squeeze().reshape(1, -1, q.shape[-1]*n_heads)
+
+            diff = torch.abs(k_high.mean(-2) - k_low.mean(-2))
+            diff = diff.reshape(n_heads, -1)
+            if 'diff' not in self.stat[name].keys():
+                # self.stat[name]['diff'] = torch.abs(dif.reshape(n_heads, -1))
+                self.stat[name]['diff'] = diff
+            else:
+                self.stat[name]['diff'] += diff
+
+            self.stat[name]['order'] = torch.argsort(self.stat[name]['diff'], descending=False)
+
+            
+
+    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name):
+        pass
+        
+        
 
 

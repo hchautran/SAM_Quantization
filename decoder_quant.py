@@ -17,7 +17,7 @@ from typing import Optional
 import pandas as pd 
 from quant_utils import ProcessStrategy, quantize_activation_per_token_absmax
 from utils import show_points, show_mask_image
-from quant_utils import SignProcessor
+from quant_utils import AttnBasedProcessor 
 
 
 
@@ -43,6 +43,7 @@ def re_cal_attn(q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
     attn = attn / math.sqrt(c_per_head)
     attn = torch.softmax(attn, dim=-1)
+    
 
     return attn
 
@@ -99,6 +100,7 @@ class TwoWayTransformerObserver(TwoWayTransformer):
         q = queries + point_embedding
         k = keys + image_pe
         attn_out, final_attn, final_q, final_k, final_v = self.final_attn_token_to_image(q=q, k=k, v=keys)
+        print(final_k.shape)
         TwoWayTransformerObserver.attention_score['final_attn'] = final_attn
         TwoWayTransformerObserver.attention_score['final_q'] = final_q
         TwoWayTransformerObserver.attention_score['final_k'] = final_k
@@ -170,10 +172,16 @@ class AttentionObserver(Attention):
         q = self.q_proj(q)
         k = self.k_proj(k)
         v = self.v_proj(v)
-        self.processor.process(q, k, v, self.name)
-        q =   quantize_activation_per_token_absmax(q, n_bits=self.n_bits)
-        k =   quantize_activation_per_token_absmax(k, n_bits=self.n_bits)
-        v =   quantize_activation_per_token_absmax(v, n_bits=self.n_bits)
+
+        if self.processor is not None: 
+            self.processor.process(q, k, v, self.name)
+        
+        # q =   quantize_activation_per_token_absmax(q, n_bits=self.n_bits)
+        # k =   quantize_activation_per_token_absmax(k, n_bits=self.n_bits)
+        # v =   quantize_activation_per_token_absmax(v, n_bits=self.n_bits)
+        # q =   quantize_activation_per_token_absmax(q, n_bits=4)
+        # k =   quantize_activation_per_token_absmax(k, n_bits=8)
+        # v =   quantize_activation_per_token_absmax(v, n_bits=8)
 
         # Separate into heads
 
@@ -397,7 +405,11 @@ def get_activation_boxplot(
     high_activations:torch.Tensor, 
     low_activations:torch.Tensor, 
     ax,
-    token_wise=False, max_channels=64, offset=0, show_plot=True
+    token_wise=False, 
+    max_channels=64, 
+    offset=0, 
+    show_plot=True,
+    diff:torch.Tensor = None 
 ):
     
     if not token_wise:
@@ -426,6 +438,23 @@ def get_activation_boxplot(
             split=True,
             inner='quart'
         )
+        if diff is not None:
+            diff = to_numpy(diff.squeeze())[offset:offset+max_channels]
+            print(diff.shape)
+            print(len(high_channel_names))
+            
+            df = pd.DataFrame({
+                'value':  diff,
+                'channel': np.array([f"{i+1}" for i in  range(max_channels)])
+            }) 
+            sns.barplot(
+                df, 
+                ax=ax,
+                x='channel', 
+                y='value', 
+                alpha=0.5
+            )
+
     else:
         if len(high_activations.shape)== 3:
             Bh, Th, Ch = high_activations.shape
@@ -440,6 +469,7 @@ def get_activation_boxplot(
 
         high_data = high_data.reshape(Th, -1)
         low_data = low_data.reshape(Tl, -1)
+
         high_token_names = np.repeat(np.array([f"{i+1}" for i in  range(Th)]), max_channels*Bh)
         low_token_names = np.repeat(np.array([f"{i+1}" for i in  range(Tl)]), max_channels*Bl)
 
@@ -464,7 +494,7 @@ def get_activation_boxplot(
             split=True,
             inner='quart'
         )
-        
+
 
 
 
@@ -478,7 +508,7 @@ if __name__ == '__main__':
     checkpoint_path= './pretrained_checkpoint/sam_hq_vit_l.pth'
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
     predictor = SamPredictor(sam)
-    processor = SignProcessor('sign') 
+    processor = AttnBasedProcessor('attn') 
     
     processor.calibrate(
         predictor=predictor, 
