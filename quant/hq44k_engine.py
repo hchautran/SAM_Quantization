@@ -256,6 +256,7 @@ class Hq44kSamEngine(Engine):
                     batched_input.append(dict_input)
 
                 _, masks_hq = self.strategy.inference(batched_input)
+                breakpoint()
                 # compute metric & update
                 iou = compute_iou(masks_hq,labels_ori)
                 boundary_iou = compute_boundary_iou(masks_hq,labels_ori)

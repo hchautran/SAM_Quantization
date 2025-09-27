@@ -89,6 +89,7 @@ def quantize_weight_per_tensor_absmax(w, n_bits=8):
 
 @torch.no_grad()
 def quantize_activation_per_token_absmax(t, n_bits=8):
+    # print('got here', n_bits)
     t_shape = t.shape
     t.view(-1, t_shape[-1])
     scales = t.abs().max(dim=-1, keepdim=True)[0]
@@ -234,7 +235,7 @@ class ProcessStrategy():
         pass
 
     @abstractmethod
-    def stat_attn(self, X, Y, name):
+    def stat_attn(self, X, Y, name, n_heads):
         pass
 
 
@@ -336,7 +337,7 @@ class SignProcessor(ProcessStrategy):
         super().__init__(strategy_name)
         self.stat = {} 
 
-    def stat_tensor(self, X, Y:torch.Tensor, name, linear_name):
+    def stat_linear(self, X, Y:torch.Tensor, name, linear_name):
         # attn_name = name 
         sign = torch.sign(torch.sign(Y).mean(-2, keepdim=True))
         if 'k' in linear_name:
@@ -349,10 +350,11 @@ class SignProcessor(ProcessStrategy):
 
         
     def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name):
-        # name = module_name_dict[name]
+        # breakpoint()
+        sign = self.stat[name]['k_proj'].sign().reshape(-1, 16)[None, None, ...].permute(0,2,1,3)
 
-        Q.mul_(self.stat[name]['k_proj'].sign())
-        K.mul_(self.stat[name]['k_proj'].sign())
+        Q.mul_(sign)
+        K.mul_(sign)
         return Q, K, V
 
 
@@ -363,7 +365,7 @@ class MyProcessor(ProcessStrategy):
         super().__init__(strategy_name)
         self.stat = {} 
 
-    def stat_tensor(self, X, Y:torch.Tensor, name, linear_name):
+    def stat_linear(self, X, Y:torch.Tensor, name, linear_name):
         # attn_name = name 
         sign = torch.sign(torch.sign(Y).mean(-2, keepdim=True))
         if 'k' in linear_name:
@@ -397,7 +399,7 @@ class DoNothingProcessor(ProcessStrategy):
         
 
     def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name):
-        pass
+        return Q, K ,V
 
 
 class AttnBasedProcessor(ProcessStrategy):
@@ -417,10 +419,12 @@ class AttnBasedProcessor(ProcessStrategy):
         return x.transpose(1, 2) 
 
     def stat_attn(self, X, Y:torch.Tensor, name, n_heads):
-        if 'final' in name:
+        if 'final' in name or 'cross' in name:
             q = self.stat[name]['q_proj']
             k = self.stat[name]['k_proj']
             v = self.stat[name]['v_proj']
+            sign = torch.sign(torch.sign(k).mean(-2, keepdim=True))
+
             q = self._separate_heads(q, n_heads)
             k = self._separate_heads(k, n_heads)
             v = self._separate_heads(v, n_heads)
@@ -435,21 +439,45 @@ class AttnBasedProcessor(ProcessStrategy):
             mask = torch.where(attn > attn.mean(-1,keepdim=True),1,0)
             k_high=k.permute(2,0,1,3)[mask.squeeze().nonzero()].squeeze().reshape(1, -1, q.shape[-1]*n_heads)
             k_low= k.permute(2,0,1,3)[(1-mask).squeeze().nonzero()].squeeze().reshape(1, -1, q.shape[-1]*n_heads)
+            k_high_mean = k_high.mean(-2)
+            k_low_mean = k_low.mean(-2)
+            diff = torch.abs(k_high_mean  - k_low_mean)
 
-            diff = torch.abs(k_high.mean(-2) - k_low.mean(-2))
             diff = diff.reshape(n_heads, -1)
             if 'diff' not in self.stat[name].keys():
                 # self.stat[name]['diff'] = torch.abs(dif.reshape(n_heads, -1))
                 self.stat[name]['diff'] = diff
+                self.stat[name]['sign'] = sign
             else:
                 self.stat[name]['diff'] += diff
+                self.stat[name]['sign'] += sign 
 
             self.stat[name]['order'] = torch.argsort(self.stat[name]['diff'], descending=False)
 
             
 
     def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name):
-        pass
+        # diff = self.stat[name]['diff']
+        order = self.stat[name]['order']
+        sign = torch.sign(self.stat[name]['sign'])[None, ...].reshape(-1, 8, 1,Q.shape[-1]) 
+        
+        Q = Q.mul_(sign).permute(0,2,1,3)
+        K = K.mul_(sign).permute(0,2,1,3)
+
+        Q = torch.gather(Q, index=order[None, None,...].expand(Q.shape), dim=-1 )
+        K = torch.gather(K, index=order[None, None,...].expand(K.shape), dim=-1 )
+
+        
+        scales_1= torch.linspace(1.0, 0.25, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
+        scales_2 = torch.linspace(1.0, 1.25, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
+        scales = torch.cat([scales_1, scales_2], dim=-1)
+
+   
+        # breakpoint()
+        K.mul_(1/scales)
+        Q.mul_(scales)
+        return Q.permute(0,2,1,3), K.permute(0,2,1,3), V
+
         
         
 

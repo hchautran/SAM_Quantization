@@ -17,7 +17,7 @@ from typing import Optional
 import pandas as pd 
 from quant_utils import ProcessStrategy, quantize_activation_per_token_absmax
 from utils import show_points, show_mask_image
-from quant_utils import AttnBasedProcessor 
+from quant_utils import AttnBasedProcessor ,DoNothingProcessor
 
 
 
@@ -173,18 +173,28 @@ class AttentionObserver(Attention):
         k = self.k_proj(k)
         v = self.v_proj(v)
 
-        if self.processor is not None: 
-            self.processor.process(q, k, v, self.name)
         
-        # q =   quantize_activation_per_token_absmax(q, n_bits=self.n_bits)
-        # k =   quantize_activation_per_token_absmax(k, n_bits=self.n_bits)
-        # v =   quantize_activation_per_token_absmax(v, n_bits=self.n_bits)
         # q =   quantize_activation_per_token_absmax(q, n_bits=4)
         # k =   quantize_activation_per_token_absmax(k, n_bits=8)
         # v =   quantize_activation_per_token_absmax(v, n_bits=8)
 
-        # Separate into heads
 
+        if self.processor is not None and ('cross' in self.name or 'final' in self.name): 
+            q = self._separate_heads(q, self.num_heads)
+            k = self._separate_heads(k, self.num_heads)
+            v = self._separate_heads(v, self.num_heads)
+            q,k,v = self.processor.process(q, k, v, self.name)
+            q = self._recombine_heads(q )
+            k = self._recombine_heads(k )
+            v = self._recombine_heads(v )
+
+        
+
+        q =  quantize_activation_per_token_absmax(q, n_bits=self.n_bits)
+        k =  quantize_activation_per_token_absmax(k, n_bits=self.n_bits)
+        v =  quantize_activation_per_token_absmax(v, n_bits=self.n_bits)
+
+        # Separate into heads
         q = self._separate_heads(q, self.num_heads)
         k = self._separate_heads(k, self.num_heads)
         v = self._separate_heads(v, self.num_heads)
@@ -391,6 +401,7 @@ def inference_image(
             show_points(input_point, input_label, plt.gca())
             
         plt.title(f'Example {example_idx} - Score: {scores[0]:.3f}')
+        plt.savefig('demo.png')
         plt.axis('off')
         plt.show()
 
@@ -504,18 +515,20 @@ if __name__ == '__main__':
 
 
     model_type = 'vit_l'
-    num_calib_samples=32
+    num_calib_samples=8
     checkpoint_path= './pretrained_checkpoint/sam_hq_vit_l.pth'
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
     predictor = SamPredictor(sam)
-    processor = AttnBasedProcessor('attn') 
+    processor = DoNothingProcessor('base') 
     
-    processor.calibrate(
-        predictor=predictor, 
-        modules=(TwoWayTransformer),
-        num_samples=num_calib_samples
-    )
-    breakpoint()
+    # processor = AttnBasedProcessor('attn') 
+    # processor.calibrate(
+    #     predictor=predictor, 
+    #     modules=(TwoWayTransformer),
+    #     num_samples=num_calib_samples
+    # )
+    mask_decoder_monkey_patch(predictor.model, processor, n_bits=3)
+    results = inference_image(predictor, image_dir='./input_imgs/', example_idx=3, show_image=True)
     
 
     
