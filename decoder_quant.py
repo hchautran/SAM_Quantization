@@ -6,7 +6,7 @@ import torch.nn as nn
 from collections import defaultdict
 from typing import Type, Tuple, Optional
 import math
-from segment_anything import SamPredictor, sam_hq_model_registry
+from segment_anything import SamPredictor
 import numpy as np
 import numpy as np
 import cv2
@@ -17,7 +17,60 @@ import pandas as pd
 def to_numpy(x:torch.Tensor):
     return x.detach().cpu().numpy()
 
+@torch.no_grad()
+def quantize_activation_per_token_absmax(t, n_bits=8):
+    t_shape = t.shape
+    t.contiguous().view(-1, t_shape[-1])
+    scales = t.abs().max(dim=-1, keepdim=True)[0]
+    q_max = 2 ** (n_bits - 1) - 1
+    scales.clamp_(min=1e-5).div_(q_max)
+    t.div_(scales).round_().mul_(scales)
+    return t
+@torch.no_grad()
+def quantize_specific_heads(t, head_indices, num_heads, n_bits=8):
+    """
+    Quantize specific attention heads using per-token absmax quantization.
 
+    Args:
+        t: Input tensor of shape (Bz, T, C) where C = num_heads * head_dim
+        head_indices: List or tensor of head indices to quantize
+        head_dim: Dimension of each attention head
+        n_bits: Number of bits for quantization
+
+    Returns:
+        Quantized tensor with same shape as input
+    """
+    Bz, T, C = t.shape
+    head_dim = C // num_heads
+
+    # Reshape to separate heads: (Bz, T, num_heads, head_dim)
+    t_heads = t.view(Bz, T, num_heads, head_dim)
+
+    # Convert head_indices to tensor if it's a list
+    if isinstance(head_indices, list):
+        head_indices = torch.tensor(head_indices, device=t.device)
+
+    # Quantize specified heads
+    for head_idx in head_indices:
+        if head_idx < num_heads:
+            # Extract specific head: (Bz, T, head_dim)
+            head_data = t_heads[:, :, head_idx, :]
+
+            # Reshape for quantization: (Bz * T, head_dim)
+            head_data_2d = head_data.contiguous().view(-1, head_dim)
+
+            # Apply per-token absmax quantization
+            scales = head_data_2d.abs().max(dim=-1, keepdim=True)[0]
+            q_max = 2 ** (n_bits - 1) - 1
+            scales.clamp_(min=1e-5).div_(q_max)
+            head_data_2d.div_(scales).round_().mul_(scales)
+
+            # Reshape back and update the original tensor
+            t_heads[:, :, head_idx, :] = head_data_2d.view(Bz, T, head_dim)
+
+    # Reshape back to original shape
+    return t_heads.view(Bz, T, C)
+    
 class TwoWayTransformerObserver(TwoWayTransformer):
     attention_score = defaultdict(list) 
     
@@ -68,10 +121,14 @@ class TwoWayTransformerObserver(TwoWayTransformer):
         q = queries + point_embedding
         k = keys + image_pe
         attn_out, final_attn, final_q, final_k, final_v = self.final_attn_token_to_image(q=q, k=k, v=keys)
-        TwoWayTransformerObserver.attention_score['final_attn'] = final_attn
-        TwoWayTransformerObserver.attention_score['final_q'] = final_q
-        TwoWayTransformerObserver.attention_score['final_k'] = final_k
-        TwoWayTransformerObserver.attention_score['final_v'] = final_v
+        # TwoWayTransformerObserver.attention_score['final_attn'] = final_attn
+        # TwoWayTransformerObserver.attention_score['final_q'] = final_q
+        # TwoWayTransformerObserver.attention_score['final_k'] = final_k
+        # TwoWayTransformerObserver.attention_score['final_v'] = final_v
+        TwoWayTransformerObserver.attention_score['final_attn'].append(final_attn)
+        TwoWayTransformerObserver.attention_score['final_q'].append(final_q)
+        TwoWayTransformerObserver.attention_score['final_k'].append(final_k)
+        TwoWayTransformerObserver.attention_score['final_v'].append(final_v)
         queries = queries + attn_out
         queries = self.norm_final_attn(queries)
 
@@ -131,8 +188,8 @@ class AttentionObserver(Attention):
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         # Input projections
-        q = self.q_proj(q)/2
-        k = self.k_proj(k)*2
+        q = self.q_proj(q)
+        k = self.k_proj(k)
         v = self.v_proj(v)
 
         
@@ -154,11 +211,54 @@ class AttentionObserver(Attention):
         out = self.out_proj(out)
 
         return out, attn, q, k, v
+list_he=[0,1,2,3,4,5,6,7] # 5 7
+str_list="_"
+for i in range(len(list_he)):
+    str_list += str(list_he[i])+"_"
+class AttentionObserver_q(Attention):
+    """
+    An attention layer that allows for downscaling the size of the embedding
+    after projection to queries, keys, and values.
+    """
 
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        # Input projections
+        q = self.q_proj(q)
+        k = self.k_proj(k)
+        v = self.v_proj(v)
+        
+        print("chiiiiiiiiiii",self.num_heads)
+        
+        q= quantize_specific_heads(q, head_indices=list_he, num_heads=self.num_heads, n_bits=2)
+        k= quantize_specific_heads(k, head_indices=list_he, num_heads=self.num_heads, n_bits=2)
+        # q=quantize_activation_per_token_absmax(q, n_bits=2)
+        # k=quantize_activation_per_token_absmax(k, n_bits=2)
+        # Separate into heads
+        q = self._separate_heads(q, self.num_heads)
+        k = self._separate_heads(k, self.num_heads)
+        v = self._separate_heads(v, self.num_heads)
+
+        # Attention
+        _, _, _, c_per_head = q.shape
+        attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
+        attn = attn / math.sqrt(c_per_head)
+        attn = torch.softmax(attn, dim=-1)
+        # import ipdb; ipdb.set_trace()
+        # Get output
+        out = attn @ v
+        out = self._recombine_heads(out)
+        out = self.out_proj(out)
+
+        return out, attn, q, k, v
 def mask_decoder_monkey_patch(model):
     for name, module in model.named_modules():
-        if isinstance(module, Attention):
+        if isinstance(module, Attention) and "self_attn" not in name:
             module.__class__ = AttentionObserver
+        if isinstance(module, Attention) and "self_attn" in name:
+            module.__class__ = AttentionObserver_q
+        # if isinstance(module, Attention) :
+        #     module.__class__ = AttentionObserver_q
         if isinstance(module, TwoWayAttentionBlock):
             module.__class__ = TwoWayAttentionBlockObserver
         if isinstance(module, TwoWayTransformer):
@@ -290,8 +390,15 @@ def inference_image(
         input_box = None
         hq_token_only = True
     elif example_idx == 3:
+        random_points = generate_random_points(5)
         input_point = np.array([[221, 482], [498, 633], [750, 379]])
+        all_points = np.concatenate([input_point, random_points])
+        
         input_label = np.ones(input_point.shape[0])
+        new_labels = np.ones(random_points.shape[0])
+        all_labels = np.concatenate([input_label, new_labels])
+        input_label = all_labels
+        input_point = all_points
         input_box = None
         hq_token_only = False
     elif example_idx == 4:
@@ -347,26 +454,101 @@ def inference_image(
     if show_image:
         plt.figure(figsize=(10, 10))
         plt.imshow(image)
-        
+
         if len(masks) > 0:
             show_mask_image(masks[0], plt.gca(), random_color=False)
-        
+
         if input_box is not None:
             box = input_box[0]
             x0, y0 = box[0], box[1]
             w, h = box[2] - box[0], box[3] - box[1]
             plt.gca().add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))
-        
+
         if input_point is not None and input_label is not None:
             show_points(input_point, input_label, plt.gca())
-            
-        plt.title(f'Example {example_idx} - Score: {scores[0]:.3f}')
+
+        output_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/decoder_quant_r"
+        import os
+        os.makedirs(output_path, exist_ok=True)
+
+        # Handle non-quantized model
+        if str_list == "_":
+            # Save mask (no quant)
+            output_filename = os.path.join(output_path, f'example_{example_idx}_no_quant.png')
+            # Save mask information to a file
+            if len(masks) > 0:
+                mask_info_file = os.path.join(output_path, f'example_{example_idx}_mask_info.npy')
+                np.save(mask_info_file, masks[0])
+                print(f"Saved non-quantized mask information to: {mask_info_file}")
+
+            plt.title(f'Example {example_idx} - No Quantization - Score: {scores[0]:.3f}')
+
+        # Handle quantized model
+        else:
+            # Try to load the non-quantized mask from the saved file
+            non_quant_mask = None
+            mask_info_file = os.path.join(output_path, f'example_{example_idx}_mask_info.npy')
+
+            if os.path.exists(mask_info_file):
+
+                non_quant_mask = np.load(mask_info_file)
+                print(f"Loaded non-quantized mask from: {mask_info_file}")
+
+                if non_quant_mask.dtype == bool or masks[0].dtype == bool:
+                    # For boolean masks, convert to float (0 and 1) before calculating MSE
+                    non_quant_float = non_quant_mask.astype(float)
+                    mask_float = masks[0].astype(float)
+                    mse = np.mean((non_quant_float - mask_float) ** 2)
+                else:
+                    # For non-boolean masks, calculate MSE directly
+                    mse = np.mean((non_quant_mask - masks[0]) ** 2)
+
+                # Calculate IoU (Intersection over Union)
+                intersection = np.logical_and(non_quant_mask, masks[0])
+                union = np.logical_or(non_quant_mask, masks[0])
+                iou = np.sum(intersection) / np.sum(union) if np.sum(union) > 0 else 0
+
+                title = f'Example {example_idx} - Quant: {str_list} - Score: {scores[0]:.3f} - MSE: {mse:.4f} - IoU: {iou:.4f}'
+
+            else:
+                print(f"No non-quantized mask found at: {mask_info_file}")
+                title = f'Example {example_idx} - Quant: {str_list} - Score: {scores[0]:.3f} - No reference mask'
+
+            output_filename = os.path.join(output_path, f'example_{example_idx}_quant_{str_list}_self_attn_2.png')
+            plt.title(title)
+
         plt.axis('off')
+        plt.savefig(output_filename, bbox_inches='tight', pad_inches=0.1)
         plt.show()
+        print(f"Image saved to: {output_filename}")
 
     return masks, scores, logits
 
+def generate_random_points(num_points, image_width=1024, image_height=1024, seed=None):
+    """
+    Generate random points within the specified image dimensions.
 
+    Args:
+        num_points (int): Number of random points to generate
+        image_width (int, optional): Width of the image. Defaults to 1024.
+        image_height (int, optional): Height of the image. Defaults to 1024.
+        seed (int, optional): Random seed for reproducibility. Defaults to None.
+
+    Returns:
+        np.ndarray: Array of shape (num_points, 2) containing random points
+                   where each point is [x, y] coordinates
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    # Generate random x and y coordinates
+    x_coords = np.random.randint(0, image_width, size=num_points)
+    y_coords = np.random.randint(0, image_height, size=num_points)
+
+    # Stack them into a single array of shape (num_points, 2)
+    random_points = np.column_stack((x_coords, y_coords))
+
+    return random_points
 
 
 import seaborn as  sns
@@ -375,7 +557,7 @@ def get_activation_boxplot(
     high_activations:torch.Tensor, 
     low_activations:torch.Tensor, 
     ax,
-    token_wise=False, max_channels=64, offset=0, show_plot=True
+    token_wise=False,pertoken=False, max_channels=64, offset=0, show_plot=True
 ):
     
     if not token_wise:
@@ -405,42 +587,90 @@ def get_activation_boxplot(
             inner='quart'
         )
     else:
-        if len(high_activations.shape)== 3:
-            Bh, Th, Ch = high_activations.shape
-            Bl, Tl, Cl = low_activations.shape
-            high_data = to_numpy(high_activations.permute(1,0,2).reshape(Th, Bh, Ch)[:, :, offset:offset+max_channels])
-            low_data = to_numpy(low_activations.permute(1,0,2).reshape(Tl, Bl, Cl)[:, :, offset:offset+max_channels])
+        if not pertoken:
+            if len(high_activations.shape)== 3:
+                Bh, Th, Ch = high_activations.shape
+                Bl, Tl, Cl = low_activations.shape
+                high_data = to_numpy(high_activations.permute(1,0,2).reshape(Th, Bh, Ch)[:, :, offset:offset+max_channels])
+                low_data = to_numpy(low_activations.permute(1,0,2).reshape(Tl, Bl, Cl)[:, :, offset:offset+max_channels])
+                # max_token = max_channels
+                # high_data = to_numpy(high_activations.permute(1,0,2).reshape(Th, Bh, Ch)[offset:offset+max_token, :, :])
+                # low_data = to_numpy(low_activations.permute(1,0,2).reshape(Tl, Bl, Cl)[offset:offset+max_token, :, :])
+            else:
+                Bh, Hh, Th,Ch = high_activations.shape
+                Bl, Hl, Tl, Cl = low_activations.shape
+                high_data = to_numpy(high_activations.permute(2,0,1,3).reshape(Th, Bh, Ch*Hh)[:, :, offset:offset+max_channels])
+                low_data = to_numpy(low_activations.permute(2,0,1,3).reshape(Tl, Bl, Cl*Hl)[:, :, offset:offset+max_channels])
+                # high_data = to_numpy(high_activations.permute(1,0,2).reshape(Th, Bh, Ch)[offset:offset+max_token, :, :])
+                # low_data = to_numpy(low_activations.permute(1,0,2).reshape(Tl, Bl, Cl)[offset:offset+max_token, :, :])
+
+            high_data = high_data.reshape(Th, -1)
+            low_data = low_data.reshape(Tl, -1)
+            
+            high_token_names = np.repeat(np.array([f"{i+1}" for i in  range(Th)]), max_channels*Bh)
+            low_token_names = np.repeat(np.array([f"{i+1}" for i in  range(Tl)]), max_channels*Bl)
+            
+            high_data = high_data.flatten(order='C')
+            low_data = low_data.flatten(order='C')
+            
+            types = ['high']*(Th*max_channels*Bh)+['low']*(Tl*max_channels*Bl)
+            
+            df = pd.DataFrame({
+                'values':  np.concatenate([high_data, low_data]),
+                'token': np.concatenate([high_token_names, low_token_names]),
+                'types':  types,
+            }) 
+        
+            sns.violinplot(
+                df, 
+                ax=ax,
+                x='types', 
+                y='values', 
+                hue='types',
+                split=True,
+                inner='quart'
+            )
         else:
-            Bh, Hh, Th,Ch = high_activations.shape
-            Bl, Hl, Tl, Cl = low_activations.shape
-            high_data = to_numpy(high_activations.permute(2,0,1,3).reshape(Th, Bh, Ch*Hh)[:, :, offset:offset+max_channels])
-            low_data = to_numpy(low_activations.permute(2,0,1,3).reshape(Tl, Bl, Cl*Hl)[:, :, offset:offset+max_channels])
+            if len(high_activations.shape)== 3:
+                Bh, Th, Ch = high_activations.shape
+                Bl, Tl, Cl = low_activations.shape
+                max_token = max_channels
+                high_data = to_numpy(high_activations.permute(1,0,2).reshape(Th, Bh, Ch)[offset:offset+max_token, :, :])
+                low_data = to_numpy(low_activations.permute(1,0,2).reshape(Tl, Bl, Cl)[offset:offset+max_token, :, :])
+            else:
+                Bh, Hh, Th,Ch = high_activations.shape
+                Bl, Hl, Tl, Cl = low_activations.shape
+                max_token = max_channels
+                high_data = to_numpy(high_activations.permute(2,0,1,3).reshape(Th, Bh, Ch*Hh)[:, :, offset:offset+max_channels])
+                low_data = to_numpy(low_activations.permute(2,0,1,3).reshape(Tl, Bl, Cl*Hl)[:, :, offset:offset+max_channels])
 
-        high_data = high_data.reshape(Th, -1)
-        low_data = low_data.reshape(Tl, -1)
-        high_token_names = np.repeat(np.array([f"{i+1}" for i in  range(Th)]), max_channels*Bh)
-        low_token_names = np.repeat(np.array([f"{i+1}" for i in  range(Tl)]), max_channels*Bl)
+            
+            high_data = high_data.reshape(max_token, -1)
+            low_data = low_data.reshape(max_token, -1)   
+            
+            a=high_data.shape[1]
+            high_token_names = np.repeat(np.array([f"{i+1}" for i in  range(max_token)]), a)
+            low_token_names = np.repeat(np.array([f"{i+1}" for i in  range(max_token)]),a)
 
-        high_data = high_data.flatten(order='C')
-        low_data = low_data.flatten(order='C')
-
-        types = ['high']*(Th*max_channels*Bh)+['low']*(Tl*max_channels*Bl)
-
-        df = pd.DataFrame({
-            'values':  np.concatenate([high_data, low_data]),
-            'token': np.concatenate([high_token_names, low_token_names]),
-            'types':  types,
-        }) 
-
-        sns.violinplot(
-            df, 
-            ax=ax,
-            x='types', 
-            y='values', 
-            hue='types',
-            split=True,
-            inner='quart'
-        )
+            high_data = high_data.flatten(order='C')
+            low_data = low_data.flatten(order='C')
+            types = ['high']*(max_token*a)+['low']*(max_token*a)
+            
+            df = pd.DataFrame({
+                'values':  np.concatenate([high_data, low_data]),
+                'token': np.concatenate([high_token_names, low_token_names]),
+                'types':  np.array(types),
+            }) 
+        
+            sns.violinplot(
+                df, 
+                ax=ax,
+                x='token', 
+                y='values', 
+                hue='types',
+                split=True,
+                inner='quart'
+            )
         
 
 

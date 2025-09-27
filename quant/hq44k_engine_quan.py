@@ -358,11 +358,11 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                 if self.quantize_decoder:
                     save_cuda_quantized_model(self.hq_mask_decoder, save_dir="./pretrained_checkpoint", model_name="hq_decoder_int4_full")
                     
-        self.plot_distribution()
+        # self.plot_distribution()
             
-        # print_model_structure(self.predictor, title="Final Structure")
-        # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
-        exit()
+        # # print_model_structure(self.predictor, title="Final Structure")
+        # # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
+        # exit()
     def plot_distribution(self):
         act = ''
         if self.quant_rtn:
@@ -697,7 +697,7 @@ class Hq44kSamEngine(Engine):
 
             image = cv2.imread('/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam-hq/demo/input_imgs/example'+str(i)+'.png')
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            boxes_add = generate_random_bboxes(198, image.shape[:2])
+            boxes_add = generate_random_bboxes(0, image.shape[:2])
 
             if i==0:
                 continue
@@ -725,12 +725,12 @@ class Hq44kSamEngine(Engine):
                 input_point, input_label = None, None
                 hq_token_only = True
             elif i==5:
-                continue
+                # continue
                 input_point = np.array([[373,363], [452, 575]])
                 input_label = np.ones(input_point.shape[0])
                 input_box = None
             elif i==6:
-                continue
+                # continue
                 input_box = np.array([[181, 196, 757, 495]])
                 input_point, input_label = None, None
             elif i==7:
@@ -1096,12 +1096,12 @@ def save_baseline_results(masks, scores, save_path):
         pickle.dump(baseline_data, f)
 # %%
 if __name__ == "__main__":
-    model_args = OmegaConf.load('quant/config/hq44k/base_l.yaml')
+    model_args = OmegaConf.load('quant/config/hq44k/rtn.yaml')
     args = get_args_parser()
     
     engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
-    engine.evaluate(args,model_args)
-    # engine.visual_eval(args,model_args)
+    # engine.evaluate(args,model_args)
+    engine.visual_eval(args,model_args)
 
 # %%
 

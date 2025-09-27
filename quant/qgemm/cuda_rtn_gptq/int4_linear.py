@@ -34,8 +34,8 @@ class Int4Linear(nn.Module):
         input_dtype = x.dtype                 
         if x.dtype != torch.float16:
             x = x.to(torch.float16)                    
-        x_flat = x.view(-1, x.shape[-1]).contiguous()
-        
+        # x_flat = x.view(-1, x.shape[-1]).contiguous()
+        x_flat = x.contiguous().view(-1, x.shape[-1]).contiguous()
         x_q, x_scale = sym_quant_rowwise(x_flat)
         
         # matmul: x_q[M, K//2] @ qweight[N, K//2] -> output[M, N] (INT32)

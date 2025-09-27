@@ -67,7 +67,7 @@ def parse_argsptq4sam():
         '--work-dir',
         default='result/tmp',
         help='the directory to save the file containing evaluation metrics')
-    parser.add_argument('--out', help='output result file in pickle format')
+    parser.add_argument('--out', default='/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/demo/coco/results.pkl', help='output result file in pickle format')
     parser.add_argument(
         '--fuse-conv-bn',
         action='store_true',
@@ -82,7 +82,7 @@ def parse_argsptq4sam():
     parser.add_argument(
         '--gpu-id',
         type=int,
-        default=0,
+        default=[0,1,2,3],
         help='id of gpu to use '
         '(only applicable to non-distributed testing)')
     parser.add_argument(
@@ -178,7 +178,7 @@ def parse_argsptq4sam():
     parser.add_argument(
         '--launcher',
         choices=['none', 'pytorch', 'slurm', 'mpi'],
-        default='none',
+        default='pytorch',
         help='job launcher')
     parser.add_argument(
         '--q_config',

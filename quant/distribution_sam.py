@@ -180,7 +180,7 @@ class ObserverBase:
             input_point, input_label = None, None
         elif example_idx==7:
             # multi box input
-            tyact+= 'boxmul'
+            tyact+= 'boxmul75'
             transform_ = ResizeLongestSide(predictor.image_encoder.img_size)
             input_box = torch.tensor([[45,260,515,470], [310,228,424,296]],device=device)
             input_box = torch.cat([input_box, torch.tensor(boxes_add, device=device)], dim=0)

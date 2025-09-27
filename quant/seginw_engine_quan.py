@@ -86,20 +86,20 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 quarot_path = os.path.join(project_root, 'quarot')
 qgemm_dir = os.path.join(project_root, 'quant', 'qgemm')
 rtn_cuda_dir = os.path.join(qgemm_dir, 'cuda_rtn_gptq') 
-ptq4sam_path = os.path.join(project_root, 'PTQ4SAM')
+
 
 sys.path.insert(0, project_root)  
 sys.path.insert(0, quarot_path) 
 sys.path.insert(0, qgemm_dir)  
 sys.path.insert(0, rtn_cuda_dir) 
-sys.path.insert(0, ptq4sam_path)
 
 from distribution_sam import get_channel_distribution_modify
 import RTN_quantization.utils as rtn_utils
 from RTN_quantization import per_tensor_channel_group,gptq_utils
 import rotate_sam
 from quantizer import replace_linear_with_int4 ,save_cuda_quantized_model, replace_linear_with_int4_gptq
-from projects.instance_segment_anything.models.det_wrapper_instance_sam import DetWrapperInstanceSAM
+from quant.configmmdet.det_observer_instance_sam_ import DetObserverInstanceSAM
+
 def setup_logger(path_log,state):
     if not os.path.exists(path_log):
         os.makedirs(path_log)
@@ -937,7 +937,6 @@ class SeginwSamEngine(Engine):
                 import importlib
                 if hasattr(cfg, 'plugin_dir'):
                     plugin_dir = os.path.abspath(cfg.plugin_dir)
-            
                     # Add parent directory to Python path
                     parent_dir = os.path.dirname(os.path.dirname(plugin_dir))
                     if parent_dir not in sys.path:
@@ -1042,6 +1041,7 @@ class SeginwSamEngine(Engine):
 
         # build the model and load checkpoint
         cfg.model.train_cfg = None
+        # import ipdb; ipdb.set_trace()
         model = build_detector(cfg.model, test_cfg=cfg.get('test_cfg'))
         fp16_cfg = cfg.get('fp16', None)
         if fp16_cfg is not None:
@@ -1112,7 +1112,7 @@ class SeginwSamEngine(Engine):
                 eval_kwargs.update(dict(metric=args.eval, **kwargs))
                 metric = dataset.evaluate(outputs, **eval_kwargs)
                 print(metric)
-                logger.info(q_config)
+                # logger.info(q_config)
                 logger.info(metric)
                 metric_dict = dict(config=args.config, metric=metric)
                 if args.work_dir is not None and rank == 0:
@@ -1126,10 +1126,10 @@ if __name__ == "__main__":
 
     engine = SeginwSamEngine(SeginwInferenceStrategy(args))
     # breakpoint()
-    engine.evaluate(args.data,args.quantization)
+    # engine.evaluate(args.data,args.quantization)
     # engine.evaluate_coco(args.data,args.quantization)
     # engine.evaluate_coco_mmdet(args.data,args.quantization)
-    # engine.evaluate_loadptq4sam(args.data,args.quantization)
+    engine.evaluate_loadptq4sam(args.data,args.quantization)
     prompts = {
         'point_coords': None, 
         'point_labels': None,
@@ -1137,7 +1137,7 @@ if __name__ == "__main__":
         'hq_token_only': True,
     }
     # image = Image.open('../input_imgs/example0.png')
-    engine.demo(prompts, image_dir='../input_imgs/example1.png', show_image=True)
+    # engine.demo(prompts, image_dir='../input_imgs/example1.png', show_image=True)
 
 # %%
 

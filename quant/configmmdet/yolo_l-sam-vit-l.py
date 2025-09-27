@@ -3,10 +3,10 @@ _base_ = [
 ]
 
 plugin = True
-plugin_dir = 'projects/instance_segment_anything/'
+plugin_dir = 'PTQ4SAM/projects/instance_segment_anything/'
 
 model = dict(
-    type='DetWrapperInstanceSAM',
+    type='DetObserverInstanceSAM',
     det_wrapper_type='generalized_detector',
     det_wrapper_cfg=dict(
         det_config = './PTQ4SAM/mmdetection/configs/yolox/yolox_l_8x8_300e_coco.py',
@@ -16,6 +16,9 @@ model = dict(
     model_type='vit_l',
     sam_checkpoint='pretrained_checkpoint/sam_vit_l_0b3195.pth',
     use_sam_iou=True,
+    
+    show_image = 10,
+    result_coco_path ="/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/demo/coco"
 )
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)

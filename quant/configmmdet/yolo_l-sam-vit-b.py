@@ -6,7 +6,7 @@ plugin = True
 plugin_dir = 'projects/instance_segment_anything/'
 
 model = dict(
-    type='DetWrapperInstanceSAM',
+    type='DetObserverInstanceSAM',
     det_wrapper_type='generalized_detector',
     det_wrapper_cfg=dict(
         det_config = './PTQ4SAM/mmdetection/configs/yolox/yolox_l_8x8_300e_coco.py',
