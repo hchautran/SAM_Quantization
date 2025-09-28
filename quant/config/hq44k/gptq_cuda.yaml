@@ -1,0 +1,33 @@
+model:
+  model_type: vit_l
+  checkpoint: ./pretrained_checkpoint/sam_vit_l_0b3195.pth
+  seed: 42
+  output: ./output/hq44k/base_l
+  restore_model:  ./pretrained_checkpoint/epoch_11.pth 
+  device: cuda
+
+quantization:
+  quandecoder: False
+  quanrtn: False
+  quangptq: False
+  quansmooth: False
+  quanro: False
+  rtn_cuda: False
+  gptq_cuda: True
+  save_rtn_cuda: True
+  act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
+  act_quant: per_token
+  weight_quant: per_channel
+  n_bits: 4
+  quantize_output: True
+gptq:
+  blocksize: 128
+  device: cuda
+  nsamples: 128
+  w_bits: 4
+  ac_bits: 4
+  w_asym: False
+  w_clip: False
+  w_groupsize: -1
+  percdamp: 0.01
+  act_order: False

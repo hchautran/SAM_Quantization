@@ -1,0 +1,73 @@
+model:
+  name: sam
+  use_hq: True
+  checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
+  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  model_type: vit_l 
+  device: cuda
+
+
+data:
+  config_file: ./GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py
+  checkpoint_path: ./pretrained_checkpoint/groundingdino_swint_ogc.pth
+  data_path: ./data/seginw/
+  num_select: 300
+  num_workers: 1
+  device: cuda
+  save_json: True
+  logging_path: ./logs
+
+  test:
+    dataset_type: CocoDataset
+    ann_file: ./data/coco/annotations/instances_val2017.json
+    img_prefix: ./data/coco/val2017/
+    pipeline: test_pipeline
+
+quantization:
+  quanrtn: True
+  quangptq: False
+  quansmooth: False
+  quanro: True
+  rtn_cuda: False
+  gptq_cuda: False
+  act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
+  act_quant: per_token
+  weight_quant: per_channel
+  n_bits: 4
+  quantize_output: True
+  checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
+  seed: 42
+  output: ./output/hq44k/base_l
+  restore_model:  work_dirs/hq_sam_vit_l/epoch_11.pth
+
+quarot_inf:
+  hidden_size_image_en: 1024
+  num_attention_head_image_en: 64
+  hidden_size_mask_de: 256
+  num_attention_head_mask_de: 32
+  fp32_had: False #Apply Hadamard rotation in FP32 (default: False)
+  device: cuda:0
+  seed: 42
+  rotate_mode: hadamard
+rtn_ro_config:
+  n_bits: 4
+  act_quant: per_token
+  weight_quant: per_channel
+  group_size: 64
+  quantize_output: True
+  quantize_input: True
+gptq:
+  blocksize: 128
+  device: cuda
+  nsamples: 128
+  w_bits: 4
+  ac_bits: 4
+  act_quant: per_token
+  quantize_output: True
+  quantize_input: True
+  group_size: 64
+  w_asym: False
+  w_clip: False
+  w_groupsize: -1
+  percdamp: 0.01
+  act_order: False

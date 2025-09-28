@@ -10,6 +10,13 @@ pretrained_checkpoint/
 quarot/fast-hadamard-transform/
 sam2_ckts/
 demo/
+GroundingDINO/
+quant/load_coco_ptq4sam/
+fast-hadamard-transform/
+seginw_output/
+PTQ4SAM/
+decoder_quant_r/
+
 # Exclude Python cache files
 __pycache__/
 *.pyc

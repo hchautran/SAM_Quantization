@@ -21,7 +21,9 @@ from segment_anything import build_sam, sam_model_registry, SamPredictor
 from segment_anything.modeling.image_encoder import ImageEncoderViT  
 from segment_anything.modeling.mask_decoder_hq import MaskDecoderHQ
 from segment_anything.modeling.mask_decoder import MaskDecoder
+from segment_anything.utils.transforms import ResizeLongestSide
 from train.segment_anything_training.modeling.image_encoder import ImageEncoderViT as ImageEncoderViTtrain
+from train.train import MaskDecoderHQ as MaskDecoderHQtrain
 from RTN_quantization import per_tensor_channel_group
 from quarot import utils, rotation_utils
 def show_points(coords, labels, ax, marker_size=200):
@@ -45,7 +47,49 @@ def show_mask_image(mask, ax, random_color=False, borders = True):
         contours = [cv2.approxPolyDP(contour, epsilon=0.01, closed=True) for contour in contours]
         mask_image = cv2.drawContours(mask_image, contours, -1, (1, 1, 1, 0.5), thickness=2)
     ax.imshow(mask_image)
+def generate_random_bboxes(n, image_shape):
 
+    height, width = image_shape[:2]
+    bboxes = []
+    
+    for _ in range(n):
+        # Generate two random points
+        x1 = np.random.randint(0, width)
+        y1 = np.random.randint(0, height)
+        x2 = np.random.randint(0, width)
+        y2 = np.random.randint(0, height)
+        
+        # Ensure x1 < x2 and y1 < y2 (top-left, bottom-right format)
+        x_min, x_max = min(x1, x2), max(x1, x2)
+        y_min, y_max = min(y1, y2), max(y1, y2)
+        
+        # Ensure minimum box size of 1x1
+        if x_max == x_min:
+            x_max = min(x_min + 1, width - 1)
+        if y_max == y_min:
+            y_max = min(y_min + 1, height - 1)
+            
+        bboxes.append([x_min, y_min, x_max, y_max])
+    
+    return np.array(bboxes)
+def generate_random_points(n, image_shape):
+    height, width = image_shape[:2]
+    points = []
+    
+    for _ in range(n):
+        x = np.random.randint(0, width)
+        y = np.random.randint(0, height)
+        points.append([x, y])
+    
+    points_array = np.array(points)
+    
+    # Ensure always returns 2D array, even when n=0
+    if points_array.size == 0:
+        return np.empty((0, 2), dtype=int)  # Empty 2D array with shape (0, 2)
+    elif points_array.ndim == 1:
+        return points_array.reshape(1, -1)  # Convert 1D to 2D
+    else:
+        return points_array
 class ObserverBase:
     dictionary = {}
     def __init__(self, module_list: Tuple):
@@ -80,45 +124,69 @@ class ObserverBase:
     def inference_image(
         self,
         predictor,
-        image_dir: str = './input_imgs/example1.png',
+        hq_decoder,
+        image_dir: str = '/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/input_imgs/example7.png',
         show_image: bool = False,
-        example_idx: int = 1,  # Which example configuration to use
+        example_idx: int =7,  # Which example configuration to use
     ):
         """
         Run inference on a single image using either SamPredictor or Sam model directly
         """
+        device= "cuda"
         import cv2
         image = cv2.imread(image_dir)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
+        tyact=str(example_idx)
+        boxes_add = generate_random_bboxes(75, image.shape[:2])
         # Configure based on example index
+        point_add = generate_random_points(1, image.shape[:2])
         if example_idx == 0:
+            tyact+= 'box'
             input_box = np.array([[4, 13, 1007, 1023]])
             input_point, input_label = None, None
             hq_token_only = False
         elif example_idx == 1:
+            tyact+= 'box'
             input_box = np.array([[306, 132, 925, 893]])
             input_point, input_label = None, None
             hq_token_only = True
         elif example_idx == 2:
+            tyact+= 'point'
             input_point = np.array([[495, 518], [217, 140]])
             input_label = np.ones(input_point.shape[0])
             input_box = None
             hq_token_only = True
         elif example_idx == 3:
+            tyact += 'mulpoint01'
             input_point = np.array([[221, 482], [498, 633], [750, 379]])
             input_label = np.ones(input_point.shape[0])
+            input_point = np.concatenate([input_point, point_add], axis=0)
+            input_label = np.concatenate([input_label, np.ones(point_add.shape[0])], axis=0)
             input_box = None
             hq_token_only = False
         elif example_idx == 4:
+            tyact+= 'box'
             input_box = np.array([[64, 76, 940, 919]])
             input_point, input_label = None, None
             hq_token_only = True
-        else:
-            # Default fallback
-            input_box = np.array([[306, 132, 925, 893]])
+        elif example_idx==5:
+            tyact+= 'point'
+            input_point = np.array([[373,363], [452, 575]])
+            input_label = np.ones(input_point.shape[0])
+            input_box = None
+        elif example_idx==6:
+            tyact+= 'box'
+            input_box = np.array([[181, 196, 757, 495]])
             input_point, input_label = None, None
-            hq_token_only = True
+        elif example_idx==7:
+            # multi box input
+            tyact+= 'boxmul75'
+            transform_ = ResizeLongestSide(predictor.image_encoder.img_size)
+            input_box = torch.tensor([[45,260,515,470], [310,228,424,296]],device=device)
+            input_box = torch.cat([input_box, torch.tensor(boxes_add, device=device)], dim=0)
+            transformed_box = transform_.apply_boxes_torch(input_box, image.shape[:2])
+            input_point, input_label = None, None
+            hq_token_only= False
         
         # Check if predictor is SamPredictor or Sam model
         if isinstance(predictor, SamPredictor):
@@ -151,6 +219,7 @@ class ObserverBase:
             # Use direct Sam model inference
             masks, scores, logits = self._inference_with_sam_model(
                 sam_model=predictor,
+                hq_decoder = hq_decoder,
                 image=image,
                 input_point=input_point,
                 input_label=input_label,
@@ -180,11 +249,12 @@ class ObserverBase:
             plt.axis('off')
             plt.show()
 
-        return masks, scores, logits
+        return masks, scores, logits, tyact
 
     def _inference_with_sam_model(
         self,
         sam_model: 'Sam',
+        hq_decoder: 'MaskDecoderHQ',
         image: np.ndarray,
         input_point: Optional[np.ndarray] = None,
         input_label: Optional[np.ndarray] = None,
@@ -211,6 +281,10 @@ class ObserverBase:
         
         # Add prompts if provided
         if input_point is not None and input_label is not None:
+            if input_point.ndim == 2:
+                input_point = input_point[None, :]  # Add batch dimension
+            if input_label.ndim == 1:
+                input_label = input_label[None, :]  # Add batch dimension# Add batch dimension
             point_coords = torch.as_tensor(input_point).to(device)
             point_labels = torch.as_tensor(input_label).to(device)
             dict_input['point_coords'] = point_coords
@@ -225,36 +299,70 @@ class ObserverBase:
         # Make sure the model is in eval mode
         sam_model.eval()
         
-        # Force all model parameters to correct device
         for module in sam_model.modules():
             for param in module.parameters(recurse=False):
                 param.data = param.data.to(device)
             for buffer in module.buffers(recurse=False):
                 buffer.data = buffer.data.to(device)
 
-        with torch.no_grad():
-            outputs = sam_model(batched_input, multimask_output=False)
-            if isinstance(outputs, tuple):
-                outputs, interm_embeddings = outputs
-            else:
-                interm_embeddings = None
+        
                 
     
         
-        # Extract results from outputs
-        if len(outputs) > 0:
-            output = outputs[0]
-            masks = output['masks'].detach().cpu().numpy()
-            scores = output['iou_predictions'].detach().cpu().numpy()
-            logits = output['low_res_logits'].detach().cpu().numpy()
-        else:
-            # Fallback if no outputs
-            h, w = original_size
-            masks = np.zeros((1, h, w), dtype=bool)
-            scores = np.array([0.0])
-            logits = np.zeros((1, 256, 256))
+        if hq_decoder is None:
+            # with torch.no_grad():
+            #     outputs = sam_model(batched_input, multimask_output=False)
+            #     if isinstance(outputs, tuple):
+            #         outputs, interm_embeddings = outputs
+            #     else:
+            #         interm_embeddings = None
+            if len(outputs) > 0:
+                output = outputs[0]
+                masks = output['masks'].detach().cpu().numpy()
+                scores = output['iou_predictions'].detach().cpu().numpy()
+                logits = output['low_res_logits'].detach().cpu().numpy()
+            else:
+                # Fallback if no outputs
+                h, w = original_size
+                masks = np.zeros((1, h, w), dtype=bool)
+                scores = np.array([0.0])
+                logits = np.zeros((1, 256, 256))
+                return masks, scores, logits
+        else :
+            # import ipdb; ipdb.set_trace()
+            batched_output, interm_embeddings = sam_model(batched_input, multimask_output=False)
+            batch_len = len(batched_output)
+            encoder_embedding = torch.cat([batched_output[i_l]['encoder_embedding'] for i_l in range(batch_len)], dim=0)
+            image_pe = [batched_output[i_l]['image_pe'] for i_l in range(batch_len)]
+            sparse_embeddings = [batched_output[i_l]['sparse_embeddings'] for i_l in range(batch_len)]
+            dense_embeddings = [batched_output[i_l]['dense_embeddings'] for i_l in range(batch_len)]
             
-        return masks, scores, logits
+            vit_features = interm_embeddings[0].permute(0, 3, 1, 2) # early-layer ViT feature, after 1st global attention block in ViT
+            hq_features = hq_decoder.embedding_encoder(encoder_embedding) + hq_decoder.compress_vit_feat(vit_features)
+
+            batch_len = len(encoder_embedding)
+            masks = []
+            iou_preds = []
+
+            for i_batch in range(batch_len):
+                mask, iou_pred = hq_decoder.predict_masks(
+                    image_embeddings=encoder_embedding[i_batch].unsqueeze(0),
+                    image_pe=image_pe[i_batch],
+                    sparse_prompt_embeddings=sparse_embeddings[i_batch],
+                    dense_prompt_embeddings=dense_embeddings[i_batch],
+                    hq_feature = hq_features[i_batch].unsqueeze(0)
+                )
+                masks.append(mask)
+                iou_preds.append(iou_pred)
+            masks = torch.cat(masks,0)
+            iou_preds = torch.cat(iou_preds,0)
+            
+            mask_slice = slice(0, 1)
+            masks_sam = masks[:,mask_slice]
+            masks_hq = masks[:,slice(hq_decoder.num_mask_tokens-1, hq_decoder.num_mask_tokens), :, :]
+            iou_preds= iou_preds[:,mask_slice]
+            return masks_sam, masks_hq, iou_preds
+        
 
 class Distribution():
     def __init__(self, n_channels:int, dist_name:str ,mean:np.ndarray, max:np.ndarray, min:np.ndarray, p75:np.ndarray, p25:np.ndarray, p99:np.ndarray, p1:np.ndarray):
@@ -313,7 +421,7 @@ def get_activation_distribution(activations:np.ndarray, title:str) -> Distributi
 
 
 def get_submodule_names(module:nn.Module)->dict:
-    if isinstance(module, ImageEncoderViT) or isinstance(module, ImageEncoderViTtrain):
+    if isinstance(module, ImageEncoderViT) or isinstance(module, ImageEncoderViTtrain) :
         return {
             'QKV': 'attn.qkv',
             'O': 'attn.proj',
@@ -321,7 +429,7 @@ def get_submodule_names(module:nn.Module)->dict:
             'MLP_down': 'mlp.lin2'
         }
 
-    elif isinstance(module, MaskDecoder):
+    elif isinstance(module, MaskDecoder) or isinstance(module,MaskDecoderHQtrain):
         return {
             'self attn Q': 'self_attn.q_proj',
             'self attn K': 'self_attn.k_proj',
@@ -347,8 +455,10 @@ def get_submodule_names(module:nn.Module)->dict:
 def get_model_name(module:nn.Module):
     if isinstance(module, ImageEncoderViT) or isinstance(module, ImageEncoderViTtrain):
         return 'image_encoder.blocks'
-    elif isinstance(module, MaskDecoderHQ):
+    elif isinstance(module, MaskDecoderHQ) :
         return 'mask_decoder.transformer.layers'
+    elif isinstance(module, MaskDecoderHQtrain):
+        return 'transformer.layers'
 
 
 class ActivationObserver(ObserverBase):
@@ -366,10 +476,10 @@ class ActivationObserver(ObserverBase):
         self.activation_dict = {}
 
     def get_linear_name(self, module:nn.Module, layer_idxes:List[int]):
+        self.sub_moduless=get_submodule_names(module)
         sub_modules = get_submodule_names(module)
 
         model = get_model_name(module)
-
         if  isinstance(module, ImageEncoderViT) or isinstance(module, ImageEncoderViTtrain):
             num_layers=len(module.blocks)
             print('init num layers', num_layers)
@@ -377,14 +487,17 @@ class ActivationObserver(ObserverBase):
                 if layer_idx in layer_idxes:
                     for key in sub_modules.keys():
                         self.name_dict[self.IMAGE_ENCODER].append(f'{model}.{layer_idx}.{sub_modules[key]}')
-        elif isinstance(module, MaskDecoderHQ):
+        elif isinstance(module, MaskDecoderHQ) or (isinstance(module, MaskDecoderHQtrain)):
             num_layers=len(module.transformer.layers)
             print('init num layers', num_layers)
             for layer_idx in range(num_layers):
                 if layer_idx in layer_idxes:
                     for key in sub_modules.keys():
-                        self.name_dict[self.MASK_DECODER].append(f'{model}.{layer_idx}.{sub_modules[key]}')
-      
+                        if "final" in sub_modules[key]:
+                            self.name_dict[self.MASK_DECODER].append(f'transformer.{sub_modules[key]}')
+                        else:
+                            self.name_dict[self.MASK_DECODER].append(f'{model}.{layer_idx}.{sub_modules[key]}')
+        # import ipdb; ipdb.set_trace()
     def init_activation_cache(self, module:nn.Module, layer_idxes:List[int]=[0]):
         if 'activation' not in self.activation_dict.keys():
             self.activation_dict = {}
@@ -395,7 +508,7 @@ class ActivationObserver(ObserverBase):
                 for module in self.name_dict[module_type]:
                     self.activation_dict[module]=None
                     # ]=torch.zeros((self.bins,)).cpu().detach().numpy()
-
+        # import ipdb; ipdb.set_trace()
     def register_tensor_distribution_hook(self, model:nn.Module, use_post_hook=False, min=-0.05, max=0.05):
         def pre_hook(module, input, name):
             input_tensor = input[0]
@@ -719,44 +832,100 @@ def get_tensor_density_distribution(checkpoint_path, model_type='vit_l', min_val
     observer.clear_hook()
     observer.clear_dict()
 
-def get_channel_distribution_modify(sam,model_type, act,rot_args=None):
+def get_channel_distribution_modify(sam,hq_decoder,model_type, act,rot_args):
     if rot_args is not None:
         Q_image_encoder = rotation_utils.get_orthogonal_matrix(rot_args.hidden_size_image_en,rot_args.rotate_mode,device = rot_args.device,seed=rot_args.seed)
     else:
         Q_image_encoder = None   
     observer = ActivationObserver(module_list=(nn.Linear,))
-    observer.init_activation_cache(sam.image_encoder, layer_idxes=[1, 6, 12, 18])
-    observer.register_channel_distribution_hook(sam,Q_image_encoder)
-    observer.inference_image(predictor=sam, show_image=False)
+    if hq_decoder is None:
+        observer.init_activation_cache(sam.image_encoder, layer_idxes=[1, 6, 12, 18])
+        observer.register_channel_distribution_hook(sam,Q_image_encoder)
+    else:
+        observer.init_activation_cache(hq_decoder, layer_idxes=[0,1])
+        observer.register_channel_distribution_hook(hq_decoder,Q_image_encoder)
+    _,_,_,tyact= observer.inference_image(predictor=sam,hq_decoder=hq_decoder, show_image=False)
 
+    submodule= observer.sub_moduless
     names = list(observer.activation_dict.keys())
     if len(names) > 0:
-        fig, axes = plt.subplots(len(names), 1, figsize=(15, 4 * len(names)))
-        if len(names) == 1:
-            axes = [axes]
+        # fig, axes = plt.subplots(len(names), 1, figsize=(15, 4 * len(names)))
+        # if len(names) == 1:
+        #     axes = [axes]
             
-        for i, name in enumerate(names):
-            print(f"Plotting distribution for {name}")
-            if observer.activation_dict[name] is not None:
-                observer.activation_dict[name].plot_channel_distribution(axes[i])
-                axes[i].legend()
+        # for i, name in enumerate(names):
+        #     print(f"Plotting distribution for {name}")
+        #     if observer.activation_dict[name] is not None:
+        #         observer.activation_dict[name].plot_channel_distribution(axes[i])
+        #         axes[i].legend()
         
-        plt.suptitle(f'Channel Distribution Analysis - {model_type}', fontsize=16)
-        plt.tight_layout()
+        # plt.suptitle(f'Channel Distribution Analysis - {model_type}', fontsize=16)
+        # plt.tight_layout()
 
-        output_dir = os.path.join(project_root, 'demo', 'distribution')
+        # output_dir = os.path.join(project_root, 'demo', 'distribution')
+        # os.makedirs(output_dir, exist_ok=True)
+        # filename = os.path.join(output_dir, f'channel_distribution_{model_type}_{act}_{tyact}.png')
+        # plt.savefig(filename, dpi=300, bbox_inches='tight')
+        # print(f"Plot saved as: {filename}")
+        # plt.show()
+        output_dir = os.path.join(project_root, 'demo', 'distribution', f'channel_distribution_{model_type}_{act}_{tyact}')
         os.makedirs(output_dir, exist_ok=True)
-        filename = os.path.join(output_dir, f'channel_distribution_{model_type}_{act}.png')
-        plt.savefig(filename, dpi=300, bbox_inches='tight')
-        print(f"Plot saved as: {filename}")
-        plt.show()
+        
+        # Group names by attention type
+        attention_groups = {
+            'self_attn': [],
+            'cross_attn_i2t': [],
+            'cross_attn_t2i': [],
+            'final_attn_t2i': [],
+            'mlp': [],
+            'qkv': [],
+            'proj': []
+        }
+        
+        # Categorize names into groups
+        for name in names:
+            if 'self_attn' in name:
+                attention_groups['self_attn'].append(name)
+            elif 'cross_attn_image_to_token' in name:
+                attention_groups['cross_attn_i2t'].append(name)
+            elif 'cross_attn_token_to_image' in name:
+                attention_groups['cross_attn_t2i'].append(name)
+            elif 'final_attn_token_to_image' in name:
+                attention_groups['final_attn_t2i'].append(name)
+            elif 'mlp' in name:
+                attention_groups['mlp'].append(name)
+            elif 'qkv' in name:
+                attention_groups['qkv'].append(name)
+            elif 'proj' in name:
+                attention_groups['proj'].append(name)
+        
+        # Create separate plots for each group
+        for group_name, group_names in attention_groups.items():
+            if len(group_names) > 0:
+                fig, axes = plt.subplots(len(group_names), 1, figsize=(15, 4 * len(group_names)))
+                if len(group_names) == 1:
+                    axes = [axes]
+                
+                for i, name in enumerate(group_names):
+                    print(f"Plotting distribution for {name}")
+                    if observer.activation_dict[name] is not None:
+                        observer.activation_dict[name].plot_channel_distribution(axes[i])
+                        axes[i].legend()
+                
+                plt.suptitle(f'{group_name.replace("_", " ").title()} - {model_type}', fontsize=16)
+                plt.tight_layout()
+                
+                # Save each group as separate file
+                filename = os.path.join(output_dir, f'{group_name}.png')
+                plt.savefig(filename, dpi=300, bbox_inches='tight')
+                print(f"Plot saved as: {filename}")
+                plt.close()  # Close figure to save memory
+        
     else:
         print("No distributions to plot!")
     
     observer.clear_hook()
     observer.clear_dict()
-
-# %%
 if __name__ == '__main__':
 
     checkpoint_path = "/media/caduser/MyBook/chau/chi/SAM_Quantization/pretrained_checkpoint/sam_hq_vit_l.pth"

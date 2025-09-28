@@ -180,12 +180,10 @@ class ActQuantWrapper(torch.nn.Module):
         a pre-forward hook will be registered to rotate the activation before quantization.
     '''
 
-    def __init__(self, module: torch.nn.Linear, act_quant="per_token",weight_quant ="per_channel", n_bit =8, group_size=None):
+    def __init__(self, module: torch.nn.Linear, act_quant="non",weight_quant ="non", n_bit =8, group_size=None):
         super(ActQuantWrapper, self).__init__()
         assert isinstance(module, torch.nn.Linear)
         self.module = module
-        self.weight = module.weight
-        self.bias = module.bias
         self.group_size = group_size
         self.n_bits = n_bit
         # Set the activation quantization method
@@ -199,8 +197,8 @@ class ActQuantWrapper(torch.nn.Module):
         elif act_quant == "per_group_token":
             self.act_quant_name = "per_group_token"
             self.act_quant = partial(quantize_activation_per_group_absmax_token_dim, group_size=self.group_size, n_bits=self.n_bits)
-        else:
-            raise ValueError(f"Invalid act_quant: {act_quant}")
+        # else:
+        #     raise ValueError(f"Invalid act_quant: {act_quant}")
 
         self.register_buffer('had_K', torch.tensor(0))
         self._buffers['had_K'] = None
@@ -213,12 +211,14 @@ class ActQuantWrapper(torch.nn.Module):
         self.quantize_input = False
         
         if weight_quant == "per_channel":
-            self.weight = quantize_weight_per_channel_absmax(self.weight, n_bits=self.n_bits)
+            self.module.weight.data = quantize_weight_per_channel_absmax(self.module.weight.data, n_bits=self.n_bits)
         elif weight_quant == "per_tensor":  
-            self.weight = quantize_weight_per_tensor_absmax(self.weight, n_bits=self.n_bits)
+            self.module.weight.data = quantize_weight_per_tensor_absmax(self.module.weight.data, n_bits=self.n_bits)
         elif weight_quant == "per_group":
-            self.weight = quantize_weight_per_group_absmax_input_features(self.weight, n_bits=self.n_bits, group_size=group_size)
-
+            self.module.weight.data = quantize_weight_per_group_absmax_input_features(self.module.weight.data, n_bits=self.n_bits, group_size=group_size)
+        self.weight = self.module.weight
+        self.bias = self.module.bias
+        
     def extra_repr(self) -> str:
         return f"Activation Quantization: {self.act_quant_name}"
 

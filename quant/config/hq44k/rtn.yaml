@@ -3,15 +3,18 @@ model:
   checkpoint: ./pretrained_checkpoint/sam_vit_l_0b3195.pth
   seed: 42
   output: ./output/hq44k/base_l
-  restore_model:  work_dirs/hq_sam_vit_l/epoch_11.pth 
-
+  restore_model:  ./pretrained_checkpoint/epoch_11.pth 
+  device: cuda
 quantization:
-  quandecoder: True
+  quandecoder: False
   quanrtn: True
+  quangptq: False
   quansmooth: False
   quanro: False
+  rtn_cuda: False
+  gptq_cuda: False
   act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 4
-  quantize_output: True
+  quantize_output: False

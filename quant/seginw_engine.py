@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 from seginw.segment_anything import (
     build_sam,
     build_sam_hq,
+    build_sam_hq_vit_l,
     SamPredictor
 )
 import cv2
@@ -45,7 +46,7 @@ class SeginwInferenceStrategy(InferenceStrategy):
 
     def build_predictor(self)->SamPredictor:
         if self.use_sam_hq:
-            self.predictor = SamPredictor(build_sam_hq(checkpoint=self.sam_ckt).to(self.device))
+            self.predictor = SamPredictor(build_sam_hq_vit_l(checkpoint=self.sam_ckt).to(self.device))
         else:
             self.predictor = SamPredictor(build_sam(checkpoint=self.sam_ckt).to(self.device))
         return self.predictor
@@ -96,7 +97,8 @@ class SeginwSamEngine(Engine):
         model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
         model.eval()
         return model
-
+    def demo(self,):
+        pass
     def evaluate(self, args):
         objects = os.listdir(args.data_path)
         cfg = SLConfig.fromfile(args.config_file)
@@ -161,27 +163,23 @@ class SeginwSamEngine(Engine):
                 orig_target_sizes = torch.stack(
                     [t["orig_size"] for t in targets], dim=0).to(images.device)
                 results = postprocessor(outputs, orig_target_sizes)
-
                 self.strategy.set_image(image_dir=f'{image_dir}/{targets[0]["file_path"]}')
 
                 input_boxes = results[0]['boxes'].cpu()     
-
                 transformed_boxes = predictor.transform.apply_boxes_torch(input_boxes, self.strategy.image.shape[:2]).to(self.strategy.device)
                 prompts = {
                     'point_coords': None, 
                     'point_labels': None,
                     'boxes': transformed_boxes,
-                    'multimask_output': False,
+                    'hq_token_only': True,
                 }
                 masks, _, _ = self.strategy.inference(prompts, use_torch=True)
-        
                 results[0]['masks'] = masks.cpu().numpy()
 
                 cocogrounding_res = {
                     target["image_id"]: output for target, output in zip(targets, results)}
                 
                 save_items = evaluator.update(cocogrounding_res)
-
                 if args.save_json:
                     new_items = list()
                     for item in save_items:
@@ -219,8 +217,6 @@ class SeginwSamEngine(Engine):
                 with open(save_path,'w') as f:
                     json.dump(json_file,f)
                 print(save_path)
-    def demo(self):
-        pass
 
 
                 
@@ -229,7 +225,7 @@ class SeginwSamEngine(Engine):
 
 if __name__ == "__main__":
 
-    args = OmegaConf.load('/u/ctran3/Sam_quantization/quant/config/coco/base_h.yaml')
+    args = OmegaConf.load('quant/config/coco/base_h.yaml')
 
     engine = SeginwSamEngine(SeginwInferenceStrategy(args.model))
     # breakpoint()
