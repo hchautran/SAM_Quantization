@@ -514,6 +514,15 @@ wheels = [
 ]
 
 [[package]]
+name = "claude-code"
+version = "0.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/10/15/b6a11fd4675b0d8e10d4130e4293ec26e039444ac1295df22844b994322a/claude_code-0.0.1.tar.gz", hash = "sha256:655af6860495cfb0b7e51ef4fd7d98f367a68c0471ba04e7815816c2889704e5", size = 818, upload-time = "2025-06-10T21:05:17.768Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f7/53/e6c2e97cbe66e8a75431dcf05b196b07cf92360f27a6de907d9b4d3b7d6b/claude_code-0.0.1-py3-none-any.whl", hash = "sha256:e576e5c95ce231b99ec550db46c1c44280c69ebe352b25d17c5fb355751d9391", size = 1202, upload-time = "2025-06-10T21:05:13.575Z" },
+]
+
+[[package]]
 name = "click"
 version = "8.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3716,6 +3725,7 @@ dependencies = [
     { name = "accelerate" },
     { name = "addict" },
     { name = "black" },
+    { name = "claude-code" },
     { name = "cython" },
     { name = "datasets" },
     { name = "eva-decord" },
@@ -3751,6 +3761,7 @@ requires-dist = [
     { name = "accelerate", specifier = ">=1.10.1" },
     { name = "addict", specifier = ">=2.4.0" },
     { name = "black", specifier = "==24.2.0" },
+    { name = "claude-code", specifier = ">=0.0.1" },
     { name = "cython", specifier = ">=3.1.3" },
     { name = "datasets", specifier = ">=4.0.0" },
     { name = "eva-decord", specifier = ">=0.6.1" },

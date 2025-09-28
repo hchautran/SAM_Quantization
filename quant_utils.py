@@ -350,7 +350,6 @@ class SignProcessor(ProcessStrategy):
 
         
     def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name):
-        # breakpoint()
         sign = self.stat[name]['k_proj'].sign().reshape(-1, 16)[None, None, ...].permute(0,2,1,3)
 
         Q.mul_(sign)
@@ -379,7 +378,6 @@ class MyProcessor(ProcessStrategy):
         
     def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name):
         # name = module_name_dict[name]
-
         Q.mul_(self.stat[name]['k_proj'].sign())
         K.mul_(self.stat[name]['k_proj'].sign())
         return Q, K, V
@@ -396,10 +394,13 @@ class DoNothingProcessor(ProcessStrategy):
 
     def stat_attn(self, X, Y:torch.Tensor, name, linear_name):
         pass
-        
 
-    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name):
-        return Q, K ,V
+    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name, n_bits):
+        # breakpoint()
+        Q =  quantize_activation_per_token_absmax(Q.permute(0,2,1,3), n_bits=4)
+        K =  quantize_activation_per_token_absmax(K.permute(0,2,1,3), n_bits=4)
+        
+        return Q.permute(0,2,1,3), K.permute(0,2,1,3) ,V
 
 
 class AttnBasedProcessor(ProcessStrategy):
@@ -429,7 +430,6 @@ class AttnBasedProcessor(ProcessStrategy):
             k = self._separate_heads(k, n_heads)
             v = self._separate_heads(v, n_heads)
             
-
             # Attention
             _, _, _, c_per_head = q.shape
             attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
@@ -468,7 +468,7 @@ class AttnBasedProcessor(ProcessStrategy):
         K = torch.gather(K, index=order[None, None,...].expand(K.shape), dim=-1 )
 
         
-        scales_1= torch.linspace(1.0, 0.25, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
+        scales_1= torch.linspace(1.0, 1.0, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
         scales_2 = torch.linspace(1.0, 1.25, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
         scales = torch.cat([scales_1, scales_2], dim=-1)
 
@@ -482,3 +482,113 @@ class AttnBasedProcessor(ProcessStrategy):
         
 
 
+
+
+class AttnBasedProcessor(ProcessStrategy):
+
+    def __init__(self, strategy_name):
+        super().__init__(strategy_name)
+        self.stat = {} 
+
+    def stat_linear(self, X, Y:torch.Tensor, name, linear_name):
+        if name not in self.stat:
+            self.stat[name] =  defaultdict() 
+        self.stat[name][linear_name] = Y
+
+    def _separate_heads(self, x: torch.Tensor, num_heads: int) -> torch.Tensor:
+        b, n, c = x.shape
+        x = x.reshape(b, n, num_heads, c // num_heads)
+        return x.transpose(1, 2) 
+
+    def stat_attn(self, X, Y:torch.Tensor, name, n_heads):
+        if 'final' in name or 'cross' in name:
+            q = self.stat[name]['q_proj']
+            k = self.stat[name]['k_proj']
+            v = self.stat[name]['v_proj']
+            sign = torch.sign(torch.sign(k).mean(-2, keepdim=True))
+
+            #cal q_max 
+            # breakpoint()
+            k_mean = torch.abs(k).mean(-2)
+
+            #cal k_max 
+            q_mean = torch.abs(q).mean(-2)
+
+
+            #cal diff
+
+            q = self._separate_heads(q, n_heads)
+            k = self._separate_heads(k, n_heads)
+            v = self._separate_heads(v, n_heads)
+            _, _, _, c_per_head = q.shape
+            attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
+            attn = attn / math.sqrt(c_per_head)
+            attn = torch.softmax(attn, dim=-1)
+            attn = attn.mean(1).mean(1) #[B, T]
+            mask = torch.where(attn > attn.mean(-1,keepdim=True),1,0)
+
+
+            k_high=k.permute(2,0,1,3)[mask.squeeze().nonzero()].squeeze().reshape(1, -1, q.shape[-1]*n_heads)
+            k_low= k.permute(2,0,1,3)[(1-mask).squeeze().nonzero()].squeeze().reshape(1, -1, q.shape[-1]*n_heads)
+            k_high_mean = k_high.mean(-2)
+            k_low_mean = k_low.mean(-2)
+            diff = torch.abs(k_high_mean  - k_low_mean)
+            if 'diff' not in self.stat[name].keys():
+                # self.stat[name]['diff'] = torch.abs(dif.reshape(n_heads, -1))
+                self.stat[name]['diff'] = diff
+                self.stat[name]['sign'] = sign
+                self.stat[name]['q'] = q_mean
+                self.stat[name]['k'] = k_mean 
+            else:
+                self.stat[name]['diff'] += diff
+                self.stat[name]['sign'] += sign 
+                self.stat[name]['q'] += q_mean
+                self.stat[name]['k'] += k_mean 
+
+            # breakpoint()
+            self.stat[name]['order'] = torch.argsort(self.stat[name]['diff'].reshape(n_heads, -1), descending=True)
+            self.stat[name]['order_q'] = torch.argsort(self.stat[name]['q'].reshape(n_heads, -1), descending=True)
+            self.stat[name]['order_k'] = torch.argsort(self.stat[name]['k'].reshape(n_heads, -1), descending=True)
+            # self.stat[name]['topk_diff'] = torch.topk(self.stat[name]['diff'].reshape(n_heads,-1), largest=True, k=2)[1]
+            # self.stat[name]['topk_q_max'] = torch.topk(self.stat[name]['q'].reshape(n_heads,-1), largest=True, k=2)[1]
+            # self.stat[name]['topk_k_max'] = torch.topk(self.stat[name]['k'].reshape(n_heads,-1), largest=True, k=2)[1]
+            
+
+            
+
+    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name, n_bits):
+        # diff = self.stat[name]['diff']
+        order = self.stat[name]['order']
+        sign = torch.sign(self.stat[name]['sign'])[None, ...].reshape(-1, 8, 1,Q.shape[-1]) 
+        
+        Q = Q.permute(0,2,1,3)
+        K = K.permute(0,2,1,3)
+
+        Q = torch.gather(Q, index=order[None, None,...].expand(Q.shape), dim=-1 )
+        K = torch.gather(K, index=order[None, None,...].expand(K.shape), dim=-1 )
+
+        
+        # # scales_1= torch.linspace(1.0, 1.0, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
+        # # scales_2 = torch.linspace(1.0, 1.25, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
+        # # scales = torch.cat([scales_1, scales_2], dim=-1)
+        # # breakpoint()
+        # # K.mul_(1/scales)
+        # # Q.mul_(scales)
+        # Q_shape = Q.shape
+        # K_shape = K.shape
+        # breakpoint()
+        # Q = Q.reshape(-1, K_shape[-1])
+        # K = K.reshape(-1, K_shape[-1])
+        topk_indices = torch.tensor([0,1])
+
+        # breakpoint()
+        q_backup = Q[:, :, :,topk_indices].detach().clone()
+        k_backup = K[:, :, :,topk_indices].detach().clone()
+        Q =  quantize_activation_per_token_absmax(Q, n_bits=4)
+        K =  quantize_activation_per_token_absmax(K, n_bits=4)
+        Q[:, :, :,topk_indices] = q_backup
+        K[:, :, :,topk_indices] = k_backup
+        return Q.permute(0,2,1,3), K.permute(0,2,1,3), V
+        # return  Q.reshape(Q_shape), K.reshape(K_shape) ,V
+
+        

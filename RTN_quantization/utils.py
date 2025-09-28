@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from Smooth import smooth_ln_fcs
+from .Smooth import smooth_ln_fcs
 from matplotlib import pyplot as plt
 
 

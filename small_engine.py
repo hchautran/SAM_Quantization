@@ -150,7 +150,7 @@ if __name__ == '__main__':
 
 
     model_type = 'vit_l'
-    num_calib_samples=16
+    num_calib_samples=32
     checkpoint_path= './pretrained_checkpoint/sam_hq_vit_l.pth'
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
     predictor = SamPredictor(sam)
@@ -158,7 +158,6 @@ if __name__ == '__main__':
     # processor = SignProcessor('sign') 
     # processor = DoNothingProcessor('base') 
     processor = AttnBasedProcessor('attn') 
-    
     processor.calibrate(
         predictor=predictor, 
         modules=(TwoWayTransformer),
@@ -166,7 +165,7 @@ if __name__ == '__main__':
     )
     mask_decoder_monkey_patch(predictor.model, processor, n_bits=4)
     engine = Engine('hq44k') 
-    engine.eval_hq44k(predictor=predictor, num_samples=32, plot_figures=True)
+    engine.eval_hq44k(predictor=predictor, num_samples=256, plot_figures=False)
     
     
 
