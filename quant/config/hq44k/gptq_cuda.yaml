@@ -20,6 +20,7 @@ quantization:
   weight_quant: per_channel
   n_bits: 4
   quantize_output: True
+  low_high_density: none
 gptq:
   blocksize: 128
   device: cuda

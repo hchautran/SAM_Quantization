@@ -6,8 +6,9 @@ model:
   restore_model:  ./pretrained_checkpoint/epoch_11.pth 
   device: cuda
 quantization:
-  quandecoder: False
+  quandecoder: True
   quanrtn: True
+  low_high_density: none
   quangptq: False
   quansmooth: False
   quanro: False
@@ -18,3 +19,4 @@ quantization:
   weight_quant: per_channel
   n_bits: 4
   quantize_output: False
+  up_down_RTN: random

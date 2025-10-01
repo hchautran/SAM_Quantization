@@ -23,3 +23,4 @@ quantization:
   seed: 42
   output: ./output/hq44k/base_l
   restore_model:  work_dirs/hq_sam_vit_l/epoch_11.pth
+  low_high_density: none

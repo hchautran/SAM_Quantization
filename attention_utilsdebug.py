@@ -17,6 +17,9 @@ predictor = SamPredictor(sam)
 results = inference_image(predictor, image_dir='./input_imgs/', example_idx=3, show_image=True)
 import torch.nn.functional as F
 import torch
+k1 = TwoWayTransformerObserver.attention_score['p2i_k'][1]
+print(k1.shape)
+exit()
 q = TwoWayTransformerObserver.attention_score['p2i_q'][1].permute(0,2,1,3).reshape(1,-1,128 )
 k = TwoWayTransformerObserver.attention_score['p2i_k'][1].permute(0,2,1,3).reshape(1,-1,128 )
 print("k.shape,", k.shape)

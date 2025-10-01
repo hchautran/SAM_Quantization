@@ -228,7 +228,7 @@ class AttentionObserver_q(Attention):
         k = self.k_proj(k)
         v = self.v_proj(v)
         
-        print("chiiiiiiiiiii",self.num_heads)
+        
         
         q= quantize_specific_heads(q, head_indices=list_he, num_heads=self.num_heads, n_bits=2)
         k= quantize_specific_heads(k, head_indices=list_he, num_heads=self.num_heads, n_bits=2)
@@ -253,12 +253,12 @@ class AttentionObserver_q(Attention):
         return out, attn, q, k, v
 def mask_decoder_monkey_patch(model):
     for name, module in model.named_modules():
-        if isinstance(module, Attention) and "self_attn" not in name:
-            module.__class__ = AttentionObserver
-        if isinstance(module, Attention) and "self_attn" in name:
-            module.__class__ = AttentionObserver_q
-        # if isinstance(module, Attention) :
+        # if isinstance(module, Attention) and "self_attn" not in name:
+        #     module.__class__ = AttentionObserver
+        # if isinstance(module, Attention) and "self_attn" in name:
         #     module.__class__ = AttentionObserver_q
+        if isinstance(module, Attention) :
+            module.__class__ = AttentionObserver
         if isinstance(module, TwoWayAttentionBlock):
             module.__class__ = TwoWayAttentionBlockObserver
         if isinstance(module, TwoWayTransformer):

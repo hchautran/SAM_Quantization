@@ -112,6 +112,64 @@ result_coco_path = "/result/path"
 
 + bash scripts/eval_seginw.sh
 
+## Quantization Methods
+
+### Weight Quantization (RTN, UP, DOWN, RANDOM)
+
+#### Basic Configuration
+To quantize weights using RTN (Round to Nearest):
+1. Set the config file to `rtn.yaml`
+2. Configure the `up_down_RTN` parameter:
+   - Set to `none` for standard RTN (full quantization)
+   - Other options: `up`, `down`, `random`, or percentage-based RTN
+
+#### Encoder Quantization
+To enable RTN quantization for the encoder:
+1. Open `hq44k_engine_quan.py`
+2. Locate the `if self.quant_rtn:` block
+3. Uncomment the encoder quantization section
+
+#### Percentage-based RTN
+- Default: 75%
+- To modify: Edit the `quantize_weight_per_channel_random_round_up_down_absmax` function
 
 
+In hq44k_engine_quan.py set:
 
+if name == "main":
+model_args = OmegaConf.load('quant/config/hq44k/rtn.yaml') # Note: Should be rtn.yaml for RTN
+args = get_args_parser()
+#engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
+#engine.evaluate(args,model_args)
+#exit()
+
+---
+
+### Activation Quantization (High/Low Density)
+
+#### Basic Setup
+1. Set the config file to `low_high.yaml` in `hq44k_engine_quan.py`
+2. Run the script
+3. **Important**: Add `exit()` after running to prevent further execution
+
+#### Configuration Options
+
+##### Density Selection
+In the config file, set the `low_high_density` parameter:
+- `high` - for high density quantization
+- `low` - for low density quantization
+
+##### Token Quantization Percentage
+To modify the percentage of tokens to quantize:
+1. Open `per_tensor_channel_group.py`
+2. Locate the `quantize_activation_low_high_density_activation` function
+3. Modify the `percent` variable (default: 50)
+
+In hq44k_engine_quan.py set:
+
+if name == "main":
+model_args = OmegaConf.load('quant/config/hq44k/low_high.yaml')
+args = get_args_parser()
+engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
+engine.evaluate(args, model_args)
+exit() # Important: Exit after evaluation

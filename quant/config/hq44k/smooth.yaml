@@ -20,7 +20,7 @@ quantization:
   weight_quant: per_channel
   n_bits: 4
   quantize_output: False
-
+  up_down_RTN: random
 gptq:
   blocksize: 128
   device: cuda
