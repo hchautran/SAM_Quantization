@@ -18,11 +18,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def replace_linear_with_target_and_quantize(module, 
                                target_class,n_bit_w,n_bit_ac, module_name_to_exclude, 
                                weight_quant="per_channel", act_quant="per_token", 
-                               quantize_output=False, group_size=None,quantize_weight = True):
+                               quantize_output=False, group_size=None,quantize_weight = True,  k_preserve=0):
+    
     for name, child in module.named_children():
         if isinstance(child, nn.Linear) and not \
         any([x == name for x in module_name_to_exclude]):
-            
             new_module = target_class.from_float(
                 child, 
                 n_bits_w=n_bit_w,

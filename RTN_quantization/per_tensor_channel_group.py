@@ -12,6 +12,59 @@ def quantize_weight_per_channel_absmax(w, n_bits=8):
     return w
 
 @torch.no_grad()
+def quantize_weight_per_channel_absmax_selective(w, n_bits=8, order=None, topk=None):
+    """
+    Reorder weight channels first, then apply selective quantization.
+
+    Args:
+        w: Weight tensor of shape (out_features, in_features)
+        n_bits: Number of bits for quantization
+        order: Tensor for reordering channels before quantization
+        topk: List/tensor of channel indices to preserve in full precision (after reordering)
+
+    Returns:
+        Reordered and selectively quantized weight tensor
+    """
+    w_reordered = w.clone()
+    
+
+    # Step 1: Reorder channels if order is provided
+    # breakpoint()
+    if order is not None:
+        if order.dim() == 1:
+            # Apply same reordering to all output channels
+            w_reordered = torch.gather(w_reordered, dim=1, index=order.unsqueeze(0).expand(w_reordered.size(0), -1))
+        elif order.dim() == 2:
+            # Apply different reordering per output channel
+            print('reordering')
+            d_out, d_in= w_reordered.shape
+            w_reordered = w_reordered.reshape( 8, d_out//8, d_in)
+            w_reordered = torch.gather(w_reordered, dim=1, index=order[...,None].expand(w_reordered.shape))
+
+    # Step 2: Preserve specific channels if specified (after reordering)
+    w_backup = None
+    if topk is not None:
+        if isinstance(topk, list):
+            topk = torch.tensor(topk, device=w.device)
+        # Backup important channels after reordering
+        w_backup = w_reordered[:, topk, :].clone()
+        w_reordered = w_reordered.reshape(d_out, d_in)
+
+    # Step 3: Apply per-channel quantization
+    scales = w_reordered.abs().max(dim=-1, keepdim=True)[0]
+    q_max = 2 ** (n_bits - 1) - 1
+    scales.clamp_(min=1e-5).div_(q_max)
+    w_reordered.div_(scales).round_().mul_(scales)
+
+    # Step 4: Restore preserved channels
+    if w_backup is not None:
+        w_reordered = w_reordered.reshape( 8, d_out//8, d_in)
+        w_reordered[:, topk, :] = w_backup
+        w_reordered=w_reordered.reshape(d_out, d_in)
+
+    return w_reordered
+
+@torch.no_grad()
 def quantize_weight_per_tensor_absmax(w, n_bits=8):
     # w: (out_features, in_features)
     scales = w.abs().max()
@@ -163,7 +216,7 @@ class W8A8Linear(nn.Module):
 
     @staticmethod
     def from_float(
-        module, n_bits_w,n_bits_ac,weight_quant="per_channel", act_quant="per_token", quantize_output=False  , group_size=None, quantize_weight = True
+        module, n_bits_w,n_bits_ac,weight_quant="per_channel", act_quant="per_token", quantize_output=False, group_size=None, quantize_weight=True, order=None, topk=None
     ):
         assert isinstance(module, torch.nn.Linear)
         new_module = W8A8Linear(
@@ -176,11 +229,14 @@ class W8A8Linear(nn.Module):
             n_bit=n_bits_ac 
         )
         if quantize_weight:
-            if weight_quant == "per_channel":
+            if weight_quant == "selective_channel":
+                new_module.weight = quantize_weight_per_channel_absmax_selective(
+                    module.weight, n_bits=n_bits_w, order=order, topk=topk
+                )
+            elif weight_quant == "per_channel":
                 new_module.weight = quantize_weight_per_channel_absmax(
                     module.weight, n_bits=n_bits_w
-                )  # use 8-bit integer for weight
-                
+                )
             elif weight_quant == "per_tensor":
                 new_module.weight = quantize_weight_per_tensor_absmax(
                     module.weight, n_bits=n_bits_w

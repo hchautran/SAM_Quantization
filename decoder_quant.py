@@ -1,57 +1,108 @@
-from abc import abstractmethod
-import torch
-import torch.nn.functional as F
-from segment_anything.modeling.transformer import (
-    TwoWayAttentionBlock,
-    TwoWayTransformer,
-    Attention,
-)
-from quant.utils.observer import ObserverBase
-import torch.nn as nn
-from tqdm.auto import tqdm
-from collections import defaultdict
-from typing import Type, Tuple, Optional
+# Standard library imports
 import math
-from segment_anything import SamPredictor, sam_model_registry
-import numpy as np
-import numpy as np
+from collections import defaultdict
+from typing import Optional, Tuple
+
+# Third-party imports
 import cv2
 import matplotlib.pyplot as plt
-from typing import Optional
+import numpy as np
 import pandas as pd
-from quant_utils import ProcessStrategy, quantize_activation_per_token_absmax
-from utils import show_points, show_mask_image
-from quant_utils import AttnBasedProcessor, DoNothingProcessor
-import RTN_quantization.utils as rtn_utils
+import seaborn as sns
+import torch
+import torch.nn as nn
+
+# SAM model imports
+from segment_anything import SamPredictor, sam_model_registry
+from segment_anything.modeling.transformer import (
+    Attention,
+    TwoWayAttentionBlock,
+    TwoWayTransformer,
+)
+
+# Local imports
+from quant_utils import (
+    AttnBasedProcessor,
+    DoNothingProcessor,
+    ProcessStrategy,
+    quantize_activation_per_token_absmax,
+)
 from RTN_quantization import per_tensor_channel_group
+from utils import inference_image
 
 
-def to_numpy(x: torch.Tensor):
-    return x.detach().cpu().numpy()
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+
 
 
 def separate_heads(x: torch.Tensor, num_heads: int) -> torch.Tensor:
+    """
+    Separate tensor into multiple attention heads.
+
+    Args:
+        x: Input tensor of shape (B, N_tokens, C)
+        num_heads: Number of attention heads
+
+    Returns:
+        Tensor of shape (B, N_heads, N_tokens, C_per_head)
+    """
     b, n, c = x.shape
     x = x.reshape(b, n, num_heads, c // num_heads)
-    return x.transpose(1, 2)  # B x N_heads x N_tokens x C_per_head
+    return x.transpose(1, 2)
 
 
 def recombine_heads(x: torch.Tensor) -> torch.Tensor:
+    """
+    Recombine multiple attention heads back into single tensor.
+
+    Args:
+        x: Input tensor of shape (B, N_heads, N_tokens, C_per_head)
+
+    Returns:
+        Tensor of shape (B, N_tokens, C)
+    """
     b, n_heads, n_tokens, c_per_head = x.shape
     x = x.transpose(1, 2)
-    return x.reshape(b, n_tokens, n_heads * c_per_head)  # B x N_tokens x C
+    return x.reshape(b, n_tokens, n_heads * c_per_head)
 
 
 def re_cal_attn(q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+    """
+    Recalculate attention scores from query and key tensors.
+
+    Args:
+        q: Query tensor of shape (B, N_heads, N_tokens, C_per_head)
+        k: Key tensor of shape (B, N_heads, N_tokens, C_per_head)
+
+    Returns:
+        Attention scores of shape (B, N_heads, N_tokens, N_tokens)
+    """
     _, _, _, c_per_head = q.shape
-    attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
+    attn = q @ k.permute(0, 1, 3, 2)
     attn = attn / math.sqrt(c_per_head)
     attn = torch.softmax(attn, dim=-1)
     return attn
 
 
+# ============================================================================
+# Observer Classes
+# ============================================================================
+
+
 class TwoWayTransformerObserver(TwoWayTransformer):
+    """
+    Observer wrapper for TwoWayTransformer that tracks attention scores.
+
+    This class extends TwoWayTransformer to capture and store attention scores,
+    queries, keys, and values from all attention layers for analysis.
+    """
+
     attention_score = defaultdict(list)
+    weights = {}  # Store weights separately, extracted once
 
     def forward(
         self,
@@ -66,11 +117,11 @@ class TwoWayTransformerObserver(TwoWayTransformer):
         # Prepare queries
         queries = point_embedding
         keys = image_embedding
-        TwoWayTransformerObserver.attention_score["pre_p"] = queries
-        TwoWayTransformerObserver.attention_score["pre_i"] = keys
 
         # Apply transformer blocks and final layernorm
         for layer in self.layers:
+            TwoWayTransformerObserver.attention_score["pre_p"].append(queries)
+            TwoWayTransformerObserver.attention_score["pre_i"].append(keys)
             (
                 queries,
                 keys,
@@ -78,14 +129,23 @@ class TwoWayTransformerObserver(TwoWayTransformer):
                 p2p_q,
                 p2p_k,
                 p2p_v,
+                p2p_q_pre,
+                p2p_k_pre,
+                p2p_v_pre,
                 p2i_attn,
                 p2i_q,
                 p2i_k,
                 p2i_v,
+                p2i_q_pre,
+                p2i_k_pre,
+                p2i_v_pre,
                 i2p_attn,
                 i2p_q,
                 i2p_k,
                 i2p_v,
+                i2p_q_pre,
+                i2p_k_pre,
+                i2p_v_pre,
             ) = layer(
                 queries=queries,
                 keys=keys,
@@ -93,6 +153,7 @@ class TwoWayTransformerObserver(TwoWayTransformer):
                 key_pe=image_pe,
             )
 
+            # Post-projection activations
             TwoWayTransformerObserver.attention_score["p2p_q"].append(p2p_q)
             TwoWayTransformerObserver.attention_score["p2p_k"].append(p2p_k)
             TwoWayTransformerObserver.attention_score["p2p_v"].append(p2p_v)
@@ -105,6 +166,19 @@ class TwoWayTransformerObserver(TwoWayTransformer):
             TwoWayTransformerObserver.attention_score["p2i_k"].append(p2i_k)
             TwoWayTransformerObserver.attention_score["p2i_v"].append(p2i_v)
 
+            # Pre-projection activations
+            TwoWayTransformerObserver.attention_score["p2p_q_pre"].append(p2p_q_pre)
+            TwoWayTransformerObserver.attention_score["p2p_k_pre"].append(p2p_k_pre)
+            TwoWayTransformerObserver.attention_score["p2p_v_pre"].append(p2p_v_pre)
+
+            TwoWayTransformerObserver.attention_score["i2p_q_pre"].append(i2p_q_pre)
+            TwoWayTransformerObserver.attention_score["i2p_k_pre"].append(i2p_k_pre)
+            TwoWayTransformerObserver.attention_score["i2p_v_pre"].append(i2p_v_pre)
+
+            TwoWayTransformerObserver.attention_score["p2i_q_pre"].append(p2i_q_pre)
+            TwoWayTransformerObserver.attention_score["p2i_k_pre"].append(p2i_k_pre)
+            TwoWayTransformerObserver.attention_score["p2i_v_pre"].append(p2i_v_pre)
+
             TwoWayTransformerObserver.attention_score["p2p_attn"].append(p2p_attn)
             TwoWayTransformerObserver.attention_score["i2p_attn"].append(i2p_attn)
             TwoWayTransformerObserver.attention_score["p2i_attn"].append(p2i_attn)
@@ -112,24 +186,63 @@ class TwoWayTransformerObserver(TwoWayTransformer):
         # Apply the final attenion layer from the points to the image
         q = queries + point_embedding
         k = keys + image_pe
-        attn_out, final_attn, final_q, final_k, final_v = (
+        attn_out, final_attn, final_q, final_k, final_v, final_q_pre, final_k_pre, final_v_pre = (
             self.final_attn_token_to_image(q=q, k=k, v=keys)
         )
-        print(final_k.shape)
         TwoWayTransformerObserver.attention_score["final_attn"] = final_attn
         TwoWayTransformerObserver.attention_score["final_q"] = final_q
         TwoWayTransformerObserver.attention_score["final_k"] = final_k
         TwoWayTransformerObserver.attention_score["final_v"] = final_v
+        TwoWayTransformerObserver.attention_score["final_q_pre"] = final_q_pre
+        TwoWayTransformerObserver.attention_score["final_k_pre"] = final_k_pre
+        TwoWayTransformerObserver.attention_score["final_v_pre"] = final_v_pre
         queries = queries + attn_out
         queries = self.norm_final_attn(queries)
 
         return queries, keys
 
+    @staticmethod
+    def extract_weights(model):
+        """Extract QKV weights from all attention layers once."""
+        weights = {}
+        for layer_idx, layer in enumerate(model.mask_decoder.transformer.layers):
+            # Self-attention weights
+            weights[f"p2p_q_w_layer{layer_idx}"] = layer.self_attn.q_proj.weight.data
+            weights[f"p2p_k_w_layer{layer_idx}"] = layer.self_attn.k_proj.weight.data
+            weights[f"p2p_v_w_layer{layer_idx}"] = layer.self_attn.v_proj.weight.data
+
+            # Cross-attention (token to image) weights
+            weights[f"p2i_q_w_layer{layer_idx}"] = layer.cross_attn_token_to_image.q_proj.weight.data
+            weights[f"p2i_k_w_layer{layer_idx}"] = layer.cross_attn_token_to_image.k_proj.weight.data
+            weights[f"p2i_v_w_layer{layer_idx}"] = layer.cross_attn_token_to_image.v_proj.weight.data
+
+            # Cross-attention (image to token) weights
+            weights[f"i2p_q_w_layer{layer_idx}"] = layer.cross_attn_image_to_token.q_proj.weight.data
+            weights[f"i2p_k_w_layer{layer_idx}"] = layer.cross_attn_image_to_token.k_proj.weight.data
+            weights[f"i2p_v_w_layer{layer_idx}"] = layer.cross_attn_image_to_token.v_proj.weight.data
+
+        # Final attention layer weights
+        final_attn = model.mask_decoder.transformer.final_attn_token_to_image
+        weights["final_q_w"] = final_attn.q_proj.weight.data
+        weights["final_k_w"] = final_attn.k_proj.weight.data
+        weights["final_v_w"] = final_attn.v_proj.weight.data
+
+        TwoWayTransformerObserver.weights = weights
+        return weights
+
     def clear_dict():
         TwoWayTransformerObserver.attention_score = defaultdict(list)
+        TwoWayTransformerObserver.weights = {}
 
 
 class TwoWayAttentionBlockObserver(TwoWayAttentionBlock):
+    """
+    Observer wrapper for TwoWayAttentionBlock that captures attention metrics.
+
+    Extends TwoWayAttentionBlock to return attention scores and intermediate
+    values for debugging and analysis purposes.
+    """
+
     attention_dict = {}
 
     def forward(
@@ -141,12 +254,12 @@ class TwoWayAttentionBlockObserver(TwoWayAttentionBlock):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self attention block
         if self.skip_first_layer_pe:
-            queries, p2p_attn, p2p_q, p2p_k, p2p_v = self.self_attn(
+            queries, p2p_attn, p2p_q, p2p_k, p2p_v, p2p_q_pre, p2p_k_pre, p2p_v_pre = self.self_attn(
                 q=queries, k=queries, v=queries
             )
         else:
             q = queries + query_pe
-            attn_out, p2p_attn, p2p_q, p2p_k, p2p_v = self.self_attn(
+            attn_out, p2p_attn, p2p_q, p2p_k, p2p_v, p2p_q_pre, p2p_k_pre, p2p_v_pre = self.self_attn(
                 q=q, k=q, v=queries
             )
             queries = queries + attn_out
@@ -155,7 +268,7 @@ class TwoWayAttentionBlockObserver(TwoWayAttentionBlock):
         # Cross attention block, tokens attending to image embedding
         q = queries + query_pe
         k = keys + key_pe
-        attn_out, p2i_attn, p2i_q, p2i_k, p2i_v = self.cross_attn_token_to_image(
+        attn_out, p2i_attn, p2i_q, p2i_k, p2i_v, p2i_q_pre, p2i_k_pre, p2i_v_pre = self.cross_attn_token_to_image(
             q=q, k=k, v=keys
         )
         queries = queries + attn_out
@@ -169,7 +282,7 @@ class TwoWayAttentionBlockObserver(TwoWayAttentionBlock):
         # Cross attention block, image embedding attending to tokens
         q = queries + query_pe
         k = keys + key_pe
-        attn_out, i2p_attn, i2p_q, i2p_k, i2p_v = self.cross_attn_image_to_token(
+        attn_out, i2p_attn, i2p_q, i2p_k, i2p_v, i2p_q_pre, i2p_k_pre, i2p_v_pre = self.cross_attn_image_to_token(
             q=k, k=q, v=queries
         )
         keys = keys + attn_out
@@ -182,29 +295,44 @@ class TwoWayAttentionBlockObserver(TwoWayAttentionBlock):
             p2p_q,
             p2p_k,
             p2p_v,
+            p2p_q_pre,
+            p2p_k_pre,
+            p2p_v_pre,
             p2i_attn,
             p2i_q,
             p2i_k,
             p2i_v,
+            p2i_q_pre,
+            p2i_k_pre,
+            p2i_v_pre,
             i2p_attn,
             i2p_q,
             i2p_k,
             i2p_v,
+            i2p_q_pre,
+            i2p_k_pre,
+            i2p_v_pre,
         )
 
 
 class AttentionObserver(Attention):
     """
-    An attention layer that allows for downscaling the size of the embedding
-    after projection to queries, keys, and values.
-    """
+    Attention layer with quantization support and activation tracking.
 
-    # def set_processor(self, processor:ProcessStrategy):
-    # self.processor = processor
+    This class extends the standard Attention layer to support:
+    - Quantization of activations
+    - Optional processing strategies for Q, K, V
+    - Tracking and returning attention scores
+    """
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Store pre-projection activations
+        q_pre = q
+        k_pre = k
+        v_pre = v
+
         # Input projections
         q = self.q_proj(q)
         k = self.k_proj(k)
@@ -224,11 +352,10 @@ class AttentionObserver(Attention):
             q = self._recombine_heads(q)
             k = self._recombine_heads(k)
             v = self._recombine_heads(v)
-        else:
-            q = quantize_activation_per_token_absmax(q, n_bits=self.n_bits)
-            k = quantize_activation_per_token_absmax(k, n_bits=self.n_bits)
+            # q = quantize_activation_per_token_absmax(q, n_bits=self.n_bits)
+            # k = quantize_activation_per_token_absmax(k, n_bits=self.n_bits)
 
-        # v =  quantize_activation_per_token_absmax(v, n_bits=self.n_bits)
+        v = quantize_activation_per_token_absmax(v, n_bits=self.n_bits)
 
         # Separate into heads
         q = self._separate_heads(q, self.num_heads)
@@ -241,17 +368,141 @@ class AttentionObserver(Attention):
         attn = attn / math.sqrt(c_per_head)
         attn = torch.softmax(attn, dim=-1)
 
-        # Get output
-        out = attn @ v
-        out = self._recombine_heads(out)
-        out = self.out_proj(out)
+        # Apply attention to values and project output
+        output = attn @ v
+        output = self._recombine_heads(output)
+        output = self.out_proj(output)
 
-        return out, attn, q, k, v
+        return output, attn, q, k, v, q_pre, k_pre, v_pre
+
+
+# ============================================================================
+# Quantization Functions
+# ============================================================================
+
+
+def replace_linear_with_target_and_quantize(
+    module,
+    target_class,
+    n_bit_w,
+    n_bit_ac,
+    module_name_to_exclude,
+    weight_quant="per_channel",
+    act_quant="per_token",
+    quantize_output=False,
+    group_size=None,
+    quantize_weight=True,
+    k_preserve=None,
+):
+    """
+    Replace linear layers in attention modules with quantized versions.
+
+    Args:
+        module: Module to process
+        target_class: Target quantized linear class
+        n_bit_w: Weight quantization bits
+        n_bit_ac: Activation quantization bits
+        module_name_to_exclude: List of module names to skip
+        weight_quant: Weight quantization strategy
+        act_quant: Activation quantization strategy
+        quantize_output: Whether to quantize output
+        group_size: Group size for quantization
+        quantize_weight: Whether to quantize weights
+        k_preserve: Number of channels to preserve in selective quantization
+    """
+
+    def _process_module_recursive(current_module, current_path=""):
+        """Recursively process modules and match with parent names in statistics."""
+
+        for name, child in current_module.named_children():
+            # Build full path including parent names
+            full_path = f"{current_path}.{name}" if current_path else name
+
+            if isinstance(child, Attention) and ('cross' in name or 'final' in name):
+                # Get order statistics using full path
+                order = None
+                topk = None
+
+                has_processor_stat = (
+                    hasattr(child, 'processor') and
+                    child.processor is not None and
+                    hasattr(child.processor, 'stat')
+                )
+
+                if has_processor_stat and weight_quant == 'selective_channel':
+                    # Match statistics using full path
+                    stat_data = None
+                    for stat_key in child.processor.stat.keys():
+                        if stat_key in full_path or full_path in stat_key:
+                            stat_data = child.processor.stat[stat_key]
+                            print(f"Matched statistics: {stat_key} -> {full_path}")
+                            break
+
+                    if stat_data and 'order' in stat_data:
+                        order = stat_data['order']
+                        if k_preserve is not None and k_preserve > 0:
+                            # Select top-k most important channels
+                            topk = list(range(min(k_preserve, order.size(-1))))
+                        print(f"Found order statistics for {full_path}, order shape: {order.shape}, topk={topk}")
+
+                # Process linear layers within this attention module
+                for linear_name, linear_module in child.named_children():
+                    if isinstance(linear_module, nn.Linear) and linear_name not in module_name_to_exclude:
+
+                        # Determine weight quantization method
+                        actual_weight_quant = weight_quant
+                        actual_order = None
+                        actual_topk = None
+
+                        if weight_quant == 'selective_channel' and order is not None:
+                            actual_weight_quant = 'selective_channel'
+                            # Apply selective quantization to Q/K projections in cross-attention
+                            if ('cross' in name or 'final' in name) and ('k_proj' in linear_name or 'q_proj' in linear_name):
+                                actual_order = order
+                                actual_topk = topk
+                                print(f"Applying selective quantization to {full_path}.{linear_name}")
+
+                        print(f"Processing module: {name}.{linear_name}")
+
+                        new_module = target_class.from_float(
+                            linear_module,
+                            n_bits_w=n_bit_w,
+                            n_bits_ac=n_bit_ac,
+                            weight_quant=actual_weight_quant,
+                            act_quant=act_quant,
+                            quantize_output=quantize_output,
+                            group_size=group_size,
+                            quantize_weight=quantize_weight,
+                            order=actual_order,
+                            topk=actual_topk,
+                        )
+                        setattr(child, linear_name, new_module)
+
+            else:
+                # Recursively process nested modules
+                _process_module_recursive(child, full_path)
+
+    # Start recursive processing
+    _process_module_recursive(module)
 
 
 def mask_decoder_monkey_patch(
-    model, processor: ProcessStrategy, n_bits=8, preserve_attn=False
+    model,
+    processor: ProcessStrategy = None,
+    n_bits=8,
+    weight_quant="per_channel",
+    k_preserve=0,
 ):
+    """
+    Apply monkey-patching to SAM mask decoder for quantization and observation.
+
+    Args:
+        model: SAM model to patch
+        processor: Processing strategy for activations
+        n_bits: Number of bits for quantization
+        weight_quant: Weight quantization strategy
+        k_preserve: Number of channels to preserve
+    """
     for name, module in model.named_modules():
         if isinstance(module, Attention):
             module.__class__ = AttentionObserver
@@ -274,341 +525,62 @@ def mask_decoder_monkey_patch(
         "output_upscaling",
         "output_hypernetworks_mlps",
     ]
-    if preserve_attn:
-        rtn_utils.replace_linear_with_target_and_quantize(
-            module=model.mask_decoder,
-            target_class=per_tensor_channel_group.W8A8Linear,
-            n_bit=n_bits,
-            module_name_to_exclude=modules_to_exclude,
-            weight_quant="per_channel",
-            act_quant="per_token",
-            quantize_output=False,
-        )
-
-    else:
-        rtn_utils.replace_linear_with_target_and_quantize(
-            module=model.mask_decoder,
-            target_class=per_tensor_channel_group.W8A8Linear,
-            n_bit=n_bits,
-            module_name_to_exclude=modules_to_exclude,
-            weight_quant="per_channel",
-            act_quant="per_token",
-            quantize_output=False,
-        )
+    replace_linear_with_target_and_quantize(
+        module=model.mask_decoder,
+        target_class=per_tensor_channel_group.W8A8Linear,
+        n_bit_w=n_bits,
+        n_bit_ac=n_bits,
+        module_name_to_exclude=modules_to_exclude,
+        weight_quant=weight_quant,
+        act_quant="per_token",
+        quantize_output=False,
+        k_preserve=k_preserve,
+    )
 
 
-def inference_with_sam_model(
-    sam_model,
-    image: np.ndarray,
-    input_point: Optional[np.ndarray] = None,
-    input_label: Optional[np.ndarray] = None,
-    input_box: Optional[np.ndarray] = None,
-    hq_token_only: bool = False,
-):
-    """
-    Run inference directly with Sam model (not SamPredictor wrapper)
-    """
-    # Make sure the entire model is on a single device
-    device = next(sam_model.parameters()).device
-    sam_model = sam_model.to(device)
-
-    # Prepare image tensor
-    input_image = torch.as_tensor(image).to(device).permute(2, 0, 1).contiguous()
-    original_size = image.shape[:2]
-
-    # Prepare batched input for Sam model
-    batched_input = []
-    dict_input = {"image": input_image, "original_size": original_size}
-
-    # Add prompts if provided
-    if input_point is not None and input_label is not None:
-        point_coords = torch.as_tensor(input_point).to(device)
-        point_labels = torch.as_tensor(input_label).to(device)
-        dict_input["point_coords"] = point_coords
-        dict_input["point_labels"] = point_labels
-
-    if input_box is not None:
-        boxes = torch.as_tensor(input_box).to(device)
-        dict_input["boxes"] = boxes
-
-    batched_input.append(dict_input)
-
-    # Make sure the model is in eval mode
-    sam_model.eval()
-
-    # Force all model parameters to correct device
-    for module in sam_model.modules():
-        for param in module.parameters(recurse=False):
-            param.data = param.data.to(device)
-        for buffer in module.buffers(recurse=False):
-            buffer.data = buffer.data.to(device)
-
-    with torch.no_grad():
-        outputs = sam_model(batched_input, multimask_output=False)
-        if isinstance(outputs, tuple):
-            outputs, interm_embeddings = outputs
-        else:
-            interm_embeddings = None
-
-    # Extract results from outputs
-    if len(outputs) > 0:
-        output = outputs[0]
-        masks = output["masks"].detach().cpu().numpy()
-        scores = output["iou_predictions"].detach().cpu().numpy()
-        logits = output["low_res_logits"].detach().cpu().numpy()
-    else:
-        # Fallback if no outputs
-        h, w = original_size
-        masks = np.zeros((1, h, w), dtype=bool)
-        scores = np.array([0.0])
-        logits = np.zeros((1, 256, 256))
-
-    return masks, scores, logits
 
 
-@torch.inference_mode()
-def inference_image(
-    predictor,
-    image_dir: str = "./input_imgs/example1.png",
-    show_image: bool = False,
-    example_idx: int = 1,  # Which example configuration to use
-):
-    """
-    Run inference on a single image using either SamPredictor or Sam model directly
-    """
-    image = cv2.imread(f"{image_dir}/example{example_idx}.png")
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-    # Configure based on example index
-    if example_idx == 0:
-        input_box = np.array([[4, 13, 1007, 1023]])
-        input_point, input_label = None, None
-        hq_token_only = True
-    elif example_idx == 1:
-        input_box = np.array([[306, 132, 925, 893]])
-        input_point, input_label = None, None
-        hq_token_only = True
-    elif example_idx == 2:
-        input_point = np.array([[495, 518], [217, 140]])
-        input_label = np.ones(input_point.shape[0])
-        input_box = None
-        hq_token_only = True
-    elif example_idx == 3:
-        input_point = np.array([[221, 482], [498, 633], [750, 379]])
-        input_label = np.ones(input_point.shape[0])
-        input_box = None
-        hq_token_only = False
-    elif example_idx == 4:
-        input_box = np.array([[64, 76, 940, 919]])
-        input_point, input_label = None, None
-        hq_token_only = True
-    else:
-        # Default fallback
-        input_box = np.array([[306, 132, 925, 893]])
-        input_point, input_label = None, None
-        hq_token_only = True
-
-    # Check if predictor is SamPredictor or Sam model
-    if isinstance(predictor, SamPredictor):
-        # Use existing SamPredictor logic
-        print(image.shape)
-        predictor.set_image(image)
-
-        try:
-            # Try to predict with hq_token_only parameter
-            masks, scores, logits = predictor.predict(
-                point_coords=input_point,
-                point_labels=input_label,
-                box=input_box,
-                multimask_output=False,
-                hq_token_only=hq_token_only,
-            )
-        except TypeError as e:
-            if "hq_token_only" in str(e):
-                # Fall back to standard prediction without hq_token_only
-                print(
-                    "Warning: hq_token_only parameter not supported, using standard prediction"
-                )
-                masks, scores, logits = predictor.predict(
-                    point_coords=input_point,
-                    point_labels=input_label,
-                    box=input_box,
-                    multimask_output=False,
-                )
-            else:
-                raise e
-
-    else:  # Sam is not None and isinstance(predictor, Sam):
-        # Use direct Sam model inference
-        masks, scores, logits = inference_with_sam_model(
-            sam_model=predictor,
-            image=image,
-            input_point=input_point,
-            input_label=input_label,
-            input_box=input_box,
-            hq_token_only=hq_token_only,
-        )
-    # else:
-    #     raise ValueError(f"Unsupported predictor type: {type(predictor)}")
-
-    if show_image:
-        plt.figure(figsize=(10, 10))
-        plt.imshow(image)
-
-        if len(masks) > 0:
-            show_mask_image(masks[0], plt.gca(), random_color=False)
-
-        if input_box is not None:
-            box = input_box[0]
-            x0, y0 = box[0], box[1]
-            w, h = box[2] - box[0], box[3] - box[1]
-            plt.gca().add_patch(
-                plt.Rectangle(
-                    (x0, y0), w, h, edgecolor="green", facecolor=(0, 0, 0, 0), lw=2
-                )
-            )
-
-        if input_point is not None and input_label is not None:
-            show_points(input_point, input_label, plt.gca())
-
-        plt.title(f"Example {example_idx} - Score: {scores[0]:.3f}")
-        plt.savefig("demo.png")
-        plt.axis("off")
-        plt.show()
-
-    return masks, scores, logits
-
-
-import seaborn as sns
-
-
-def get_activation_boxplot(
-    high_activations: torch.Tensor,
-    low_activations: torch.Tensor,
-    ax,
-    token_wise=False,
-    max_channels=64,
-    offset=0,
-    show_plot=True,
-    diff: torch.Tensor = None,
-):
-    if not token_wise:
-        high_data = to_numpy(
-            high_activations.reshape(-1, high_activations.shape[-1])[
-                :, offset : offset + max_channels
-            ]
-        )
-        low_data = to_numpy(
-            low_activations.reshape(-1, low_activations.shape[-1])[
-                :, offset : offset + max_channels
-            ]
-        )
-        high_channel_names = np.repeat(
-            np.array([f"{i + 1}" for i in range(max_channels)]), high_data.shape[0]
-        )
-        low_channel_names = np.repeat(
-            np.array([f"{i + 1}" for i in range(max_channels)]), low_data.shape[0]
-        )
-        high_data = high_data.flatten(order="F")
-        low_data = low_data.flatten(order="F")
-
-        types = ["high"] * (high_data.shape[0]) + ["low"] * (low_data.shape[0])
-
-        df = pd.DataFrame(
-            {
-                "values": np.concatenate([high_data, low_data]),
-                "channel": np.concatenate([high_channel_names, low_channel_names]),
-                "types": types,
-            }
-        )
-
-        # Create Plotly violin plot
-        sns.violinplot(
-            df, ax=ax, x="channel", y="values", hue="types", split=True, inner="quart"
-        )
-        if diff is not None:
-            diff = to_numpy(diff.squeeze())[offset : offset + max_channels]
-            print(diff.shape)
-            print(len(high_channel_names))
-
-            df = pd.DataFrame(
-                {
-                    "value": diff,
-                    "channel": np.array([f"{i + 1}" for i in range(max_channels)]),
-                }
-            )
-            sns.barplot(df, ax=ax, x="channel", y="value", alpha=0.5)
-
-    else:
-        if len(high_activations.shape) == 3:
-            Bh, Th, Ch = high_activations.shape
-            Bl, Tl, Cl = low_activations.shape
-            high_data = to_numpy(
-                high_activations.permute(1, 0, 2).reshape(Th, Bh, Ch)[
-                    :, :, offset : offset + max_channels
-                ]
-            )
-            low_data = to_numpy(
-                low_activations.permute(1, 0, 2).reshape(Tl, Bl, Cl)[
-                    :, :, offset : offset + max_channels
-                ]
-            )
-        else:
-            Bh, Hh, Th, Ch = high_activations.shape
-            Bl, Hl, Tl, Cl = low_activations.shape
-            high_data = to_numpy(
-                high_activations.permute(2, 0, 1, 3).reshape(Th, Bh, Ch * Hh)[
-                    :, :, offset : offset + max_channels
-                ]
-            )
-            low_data = to_numpy(
-                low_activations.permute(2, 0, 1, 3).reshape(Tl, Bl, Cl * Hl)[
-                    :, :, offset : offset + max_channels
-                ]
-            )
-
-        high_data = high_data.reshape(Th, -1)
-        low_data = low_data.reshape(Tl, -1)
-
-        high_token_names = np.repeat(
-            np.array([f"{i + 1}" for i in range(Th)]), max_channels * Bh
-        )
-        low_token_names = np.repeat(
-            np.array([f"{i + 1}" for i in range(Tl)]), max_channels * Bl
-        )
-
-        high_data = high_data.flatten(order="C")
-        low_data = low_data.flatten(order="C")
-
-        types = ["high"] * (Th * max_channels * Bh) + ["low"] * (Tl * max_channels * Bl)
-
-        df = pd.DataFrame(
-            {
-                "values": np.concatenate([high_data, low_data]),
-                "token": np.concatenate([high_token_names, low_token_names]),
-                "types": types,
-            }
-        )
-        sns.set_style("darkgrid")
-
-        sns.violinplot(
-            df, ax=ax, x="types", y="values", hue="types", split=True, inner="quart"
-        )
+# ============================================================================
+# Main Execution
+# ============================================================================
 
 
 if __name__ == "__main__":
+    # Configuration
     model_type = "vit_l"
     num_calib_samples = 8
     checkpoint_path = "./pretrained_checkpoint/sam_hq_vit_l.pth"
+
+    # Initialize model and predictor
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to("cuda")
     predictor = SamPredictor(sam)
-    processor = DoNothingProcessor("base")
 
+    # Setup processor with calibration
     processor = AttnBasedProcessor("attn")
     processor.calibrate(
-        predictor=predictor, modules=(TwoWayTransformer), num_samples=num_calib_samples
+        predictor=predictor,
+        modules=(TwoWayTransformer),
+        num_samples=num_calib_samples,
     )
-    mask_decoder_monkey_patch(predictor.model, processor, n_bits=4)
+
+    # Apply quantization with monkey-patching
+    mask_decoder_monkey_patch(
+        predictor.model,
+        processor,
+        n_bits=4,
+        weight_quant="selective_channel",
+        k_preserve=4,
+    )
+
+    # Extract weights once (before inference)
+    weights = TwoWayTransformerObserver.extract_weights(predictor.model)
+    print(f"Extracted {len(weights)} weight tensors")
+
+    # Run inference
     results = inference_image(
-        predictor, image_dir="./input_imgs/", example_idx=3, show_image=True
+        predictor,
+        image_dir="./input_imgs/",
+        example_idx=3,
+        show_image=True,
     )
