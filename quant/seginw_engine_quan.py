@@ -95,6 +95,7 @@ sys.path.insert(0, rtn_cuda_dir)
 
 from distribution_sam import get_channel_distribution_modify
 import RTN_quantization.utils as rtn_utils
+from RTN_quantization.utils import QuantizationConfig
 from RTN_quantization import per_tensor_channel_group,gptq_utils
 import rotate_sam
 from quantizer import replace_linear_with_int4 ,save_cuda_quantized_model, replace_linear_with_int4_gptq
@@ -207,26 +208,34 @@ class SeginwInferenceStrategy(InferenceStrategy):
             if self.gptq_cuda:
                 replace_linear_with_int4_gptq(self.predictor,quantizer, exclude_modules=modules_to_exclude)
             else:
-                rtn_utils.replace_linear_with_target_and_quantize(module=self.predictor.model,
-                                                            target_class=per_tensor_channel_group.W8A8Linear,
-                                                            n_bit_w=self.n_bits,
-                                                            n_bit_ac=self.args_gptq.ac_bits,
-                                                            module_name_to_exclude=modules_to_exclude,
-                                                            weight_quant=self.weight_quant,    
-                                                            act_quant=self.act_quant,           
-                                                            quantize_output=self.quantize_output,
-                                                            quantize_weight=False) # weight already quantized in gptq
+                config = QuantizationConfig(
+                    n_bits_w=self.n_bits,
+                    n_bits_a=self.args_gptq.ac_bits,
+                    weight_quant=self.weight_quant,
+                    act_quant=self.act_quant,
+                    quantize_output=self.quantize_output,
+                    quantize_weight=False  # weight already quantized in gptq
+                )
+                rtn_utils.replace_linear_with_quantized(
+                    module=self.predictor.model,
+                    config=config,
+                    module_name_to_exclude=modules_to_exclude
+                )
         
         if self.quant_rtn:
             modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
-            rtn_utils.replace_linear_with_target_and_quantize(module=self.predictor.model,
-                                                        target_class=per_tensor_channel_group.W8A8Linear,
-                                                        n_bit_w=self.n_bits,
-                                                        n_bit_ac=self.n_bits,
-                                                        module_name_to_exclude=modules_to_exclude,
-                                                        weight_quant=self.weight_quant,    
-                                                        act_quant=self.act_quant,           
-                                                        quantize_output=self.quantize_output)  
+            config = QuantizationConfig(
+                n_bits_w=self.n_bits,
+                n_bits_a=self.n_bits,
+                weight_quant=self.weight_quant,
+                act_quant=self.act_quant,
+                quantize_output=self.quantize_output
+            )
+            rtn_utils.replace_linear_with_quantized(
+                module=self.predictor.model,
+                config=config,
+                module_name_to_exclude=modules_to_exclude
+            )  
         if self.rtn_cuda:
             modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling","output_hypernetworks_mlps"]
             replace_linear_with_int4(self.predictor.model,  exclude_modules=modules_to_exclude)                

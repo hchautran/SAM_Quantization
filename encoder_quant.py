@@ -21,7 +21,7 @@ from quant_utils import (
 )
 from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
 from RTN_quantization import per_tensor_channel_group
-from RTN_quantization.utils import  replace_linear_with_target_and_quantize
+from RTN_quantization.utils import replace_linear_with_quantized, QuantizationConfig
 from utils import inference_image, to_numpy
 from segment_anything.modeling.image_encoder import (
     window_partition,
@@ -30,33 +30,6 @@ from segment_anything.modeling.image_encoder import (
 
 
 
-# ============================================================================
-# Utility Functions
-# ============================================================================
-
-
-
-def re_cal_attn(q: torch.Tensor, k: torch.Tensor, scale: float) -> torch.Tensor:
-    """
-    Recalculate attention scores from query and key tensors.
-
-    Args:
-        q: Query tensor of shape (B, N_heads, H*W, C_per_head) or (B*N_heads, H*W, C_per_head)
-        k: Key tensor of shape (B, N_heads, H*W, C_per_head) or (B*N_heads, H*W, C_per_head)
-        scale: Scaling factor for attention
-
-    Returns:
-        Attention scores of shape (B, N_heads, H*W, H*W) or (B*N_heads, H*W, H*W)
-    """
-    attn = q @ k.transpose(-2, -1)
-    attn = attn * scale
-    attn = torch.softmax(attn, dim=-1)
-    return attn
-
-
-# ============================================================================
-# Observer Classes
-# ============================================================================
 
 
 class AttentionObserver(Attention):
@@ -147,6 +120,7 @@ class BlockObserver(Block):
     """
 
     attention_dict = {}
+    debug = False
 
     def forward(
         self, x: torch.Tensor
@@ -208,10 +182,11 @@ class ImageEncoderViTObserver(ImageEncoderViT):
             x, attn, q, k, v = blk(x)
 
             # Store attention information
-            # ImageEncoderViTObserver.attention_score[f"block_{idx}_attn"].append(to_numpy(attn))
-            # ImageEncoderViTObserver.attention_score[f"block_{idx}_q"].append(to_numpy(q))
-            # ImageEncoderViTObserver.attention_score[f"block_{idx}_k"].append(to_numpy(k))
-            # ImageEncoderViTObserver.attention_score[f"block_{idx}_v"].append(to_numpy(v))
+            if ImageEncoderViTObserver.debug:
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_attn"].append(to_numpy(attn))
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_q"].append(to_numpy(q))
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_k"].append(to_numpy(k))
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_v"].append(to_numpy(v))
 
             if blk.window_size == 0:
                 interm_embeddings.append(x)
@@ -226,116 +201,13 @@ class ImageEncoderViTObserver(ImageEncoderViT):
         ImageEncoderViTObserver.attention_score = defaultdict(list)
 
 
-# ============================================================================
-# Quantization Functions
-# ============================================================================
-
-
-# def replace_linear_with_target_and_quantize(
-#     module,
-#     target_class,
-#     n_bit_w,
-#     n_bit_ac,
-#     module_name_to_exclude,
-#     weight_quant="per_channel",
-#     act_quant="per_token",
-#     quantize_output=False,
-#     group_size=None,
-#     quantize_weight=True,
-#     k_preserve=None,
-# ):
-#     """
-#     Replace linear layers in attention modules with quantized versions.
-
-#     Args:
-#         module: Module to process
-#         target_class: Target quantized linear class
-#         n_bit_w: Weight quantization bits
-#         n_bit_ac: Activation quantization bits
-#         module_name_to_exclude: List of module names to skip
-#         weight_quant: Weight quantization strategy
-#         act_quant: Activation quantization strategy
-#         quantize_output: Whether to quantize output
-#         group_size: Group size for quantization
-#         quantize_weight: Whether to quantize weights
-#         k_preserve: Number of channels to preserve in selective quantization
-#     """
-
-#     def _process_module_recursive(current_module, current_path=""):
-#         """Recursively process modules."""
-#         for name, child in current_module.named_children():
-#             # Build full path including parent names
-#             full_path = f"{current_path}.{name}" if current_path else name
-
-#             if isinstance(child, AttentionObserver):
-#                 # Get order statistics if using selective quantization
-#                 order = None
-#                 topk = None
-
-#                 has_processor_stat = (
-#                     hasattr(child, 'processor') and
-#                     child.processor is not None and
-#                     hasattr(child.processor, 'stat')
-#                 )
-
-#                 if has_processor_stat and weight_quant == 'selective_channel':
-#                     stat_data = None
-#                     for stat_key in child.processor.stat.keys():
-#                         if stat_key in full_path or full_path in stat_key:
-#                             stat_data = child.processor.stat[stat_key]
-#                             print(f"Matched statistics: {stat_key} -> {full_path}")
-#                             break
-
-#                     if stat_data and 'order' in stat_data:
-#                         order = stat_data['order']
-#                         if k_preserve is not None and k_preserve > 0:
-#                             topk = list(range(min(k_preserve, order.size(-1))))
-#                         print(f"Found order statistics for {full_path}, order shape: {order.shape}, topk={topk}")
-
-#                 # Process linear layers within attention modules
-#                 for linear_name, linear_module in child.named_children():
-#                     if isinstance(linear_module, nn.Linear) and linear_name not in module_name_to_exclude:
-#                         actual_weight_quant = weight_quant
-#                         actual_order = None
-#                         actual_topk = None
-
-#                         # Apply selective quantization to QKV projection
-#                         if weight_quant == 'selective_channel' and order is not None and linear_name == 'qkv':
-#                             actual_weight_quant = 'selective_channel'
-#                             actual_order = order
-#                             actual_topk = topk
-#                             print(f"Applying selective quantization to {full_path}.{linear_name}")
-
-#                         print(f"Processing module: {full_path}.{linear_name}")
-
-#                         new_module = target_class.from_float(
-#                             linear_module,
-#                             n_bits_w=n_bit_w,
-#                             n_bits_ac=n_bit_ac,
-#                             weight_quant=actual_weight_quant,
-#                             act_quant=act_quant,
-#                             quantize_output=quantize_output,
-#                             group_size=group_size,
-#                             quantize_weight=quantize_weight,
-#                             order=actual_order,
-#                             topk=actual_topk,
-#                         )
-#                         setattr(child, linear_name, new_module)
-
-#             else:
-#                 # Recursively process nested modules
-#                 _process_module_recursive(child, full_path)
-
-#     # Start recursive processing
-#     _process_module_recursive(module)
-
 
 def image_encoder_monkey_patch(
     model,
     processor=None,
     n_bits=8,
     weight_quant="per_channel",
-    k_preserve=0,
+    act_quant="per_token",
 ):
     """
     Apply monkey-patching to SAM image encoder for quantization and observation.
@@ -369,16 +241,17 @@ def image_encoder_monkey_patch(
         "rel_pos_w",
     ]
 
-    replace_linear_with_target_and_quantize(
-        module=model.image_encoder,
-        parent_name="",
-        target_class=per_tensor_channel_group.W8A8Linear,
-        n_bit_w=n_bits,
-        n_bit_ac=n_bits,
-        module_name_to_exclude=modules_to_exclude,
+    config = QuantizationConfig(
+        n_bits_w=n_bits,
+        n_bits_a=n_bits,
         weight_quant=weight_quant,
-        act_quant="per_token",
+        act_quant=act_quant,
         quantize_output=False,
+    )
+    replace_linear_with_quantized(
+        module=model.image_encoder,
+        config=config,
+        module_name_to_exclude=modules_to_exclude,
     )
 
 
@@ -410,8 +283,8 @@ if __name__ == "__main__":
         predictor.model,
         processor=processor,
         n_bits=4,
-        weight_quant="selective_channel",
-        k_preserve=4,
+        weight_quant="per_channel",
+        act_quant="per_token",
     )
 
     # Run inference

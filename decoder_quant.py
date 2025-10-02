@@ -28,6 +28,7 @@ from quant_utils import (
     quantize_activation_per_token_absmax,
 )
 from RTN_quantization import per_tensor_channel_group
+from RTN_quantization.utils import QuantizationConfig
 from utils import inference_image
 
 
@@ -386,15 +387,8 @@ class AttentionObserver(Attention):
 
 def replace_linear_with_target_and_quantize(
     module,
-    target_class,
-    n_bit_w,
-    n_bit_ac,
+    config: QuantizationConfig,
     module_name_to_exclude,
-    weight_quant="per_channel",
-    act_quant="per_token",
-    quantize_output=False,
-    group_size=None,
-    quantize_weight=True,
     k_preserve=None,
 ):
     """
@@ -402,15 +396,8 @@ def replace_linear_with_target_and_quantize(
 
     Args:
         module: Module to process
-        target_class: Target quantized linear class
-        n_bit_w: Weight quantization bits
-        n_bit_ac: Activation quantization bits
+        config: QuantizationConfig object containing all quantization parameters
         module_name_to_exclude: List of module names to skip
-        weight_quant: Weight quantization strategy
-        act_quant: Activation quantization strategy
-        quantize_output: Whether to quantize output
-        group_size: Group size for quantization
-        quantize_weight: Whether to quantize weights
         k_preserve: Number of channels to preserve in selective quantization
     """
 
@@ -432,7 +419,7 @@ def replace_linear_with_target_and_quantize(
                     hasattr(child.processor, 'stat')
                 )
 
-                if has_processor_stat and weight_quant == 'selective_channel':
+                if has_processor_stat and config.weight_quant == 'selective_channel':
                     # Match statistics using full path
                     stat_data = None
                     for stat_key in child.processor.stat.keys():
@@ -453,11 +440,11 @@ def replace_linear_with_target_and_quantize(
                     if isinstance(linear_module, nn.Linear) and linear_name not in module_name_to_exclude:
 
                         # Determine weight quantization method
-                        actual_weight_quant = weight_quant
+                        actual_weight_quant = config.weight_quant
                         actual_order = None
                         actual_topk = None
 
-                        if weight_quant == 'selective_channel' and order is not None:
+                        if config.weight_quant == 'selective_channel' and order is not None:
                             actual_weight_quant = 'selective_channel'
                             # Apply selective quantization to Q/K projections in cross-attention
                             if ('cross' in name or 'final' in name) and ('k_proj' in linear_name or 'q_proj' in linear_name):
@@ -467,17 +454,23 @@ def replace_linear_with_target_and_quantize(
 
                         print(f"Processing module: {name}.{linear_name}")
 
-                        new_module = target_class.from_float(
-                            linear_module,
-                            n_bits_w=n_bit_w,
-                            n_bits_ac=n_bit_ac,
+                        # Create a modified config for this specific layer
+                        layer_config = QuantizationConfig(
+                            n_bits_w=config.n_bits_w,
+                            n_bits_a=config.n_bits_a,
                             weight_quant=actual_weight_quant,
-                            act_quant=act_quant,
-                            quantize_output=quantize_output,
-                            group_size=group_size,
-                            quantize_weight=quantize_weight,
+                            act_quant=config.act_quant,
+                            quantize_output=config.quantize_output,
+                            group_size=config.group_size,
+                            quantize_weight=config.quantize_weight,
                             order=actual_order,
                             topk=actual_topk,
+                        )
+
+                        quantized_class = layer_config.get_w8a8linear_class()
+                        new_module = quantized_class.from_float(
+                            linear_module,
+                            **layer_config.to_kwargs()
                         )
                         setattr(child, linear_name, new_module)
 
@@ -530,15 +523,19 @@ def mask_decoder_monkey_patch(
         "output_upscaling",
         "output_hypernetworks_mlps",
     ]
-    replace_linear_with_target_and_quantize(
-        module=model.mask_decoder,
-        target_class=per_tensor_channel_group.W8A8Linear,
-        n_bit_w=n_bits,
-        n_bit_ac=n_bits,
-        module_name_to_exclude=modules_to_exclude,
+
+    config = QuantizationConfig(
+        n_bits_w=n_bits,
+        n_bits_a=n_bits,
         weight_quant=weight_quant,
         act_quant="per_token",
         quantize_output=False,
+    )
+
+    replace_linear_with_target_and_quantize(
+        module=model.mask_decoder,
+        config=config,
+        module_name_to_exclude=modules_to_exclude,
         k_preserve=k_preserve,
     )
 
