@@ -842,7 +842,7 @@ if __name__ == '__main__':
                         help='Weight quantization method')
     parser.add_argument('--k-preserve', type=int, default=0,
                         help='Number of channels to preserve')
-    parser.add_argument('--num-samples', type=int, default=32,
+    parser.add_argument('--num-samples', type=int, default=400,
                         help='Number of evaluation samples')
     parser.add_argument('--num-calib-samples', type=int, default=16,
                         help='Number of calibration samples')

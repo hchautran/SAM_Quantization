@@ -20,12 +20,9 @@ quantization:
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 8
-<<<<<<< Updated upstream
-  quantize_output: True
-    
-=======
   quantize_output: False
->>>>>>> Stashed changes
+  low_high_density: none
+    
 
 quarot_inf:
   hidden_size_image_en: 1024

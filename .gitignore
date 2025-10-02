@@ -16,6 +16,10 @@ fast-hadamard-transform/
 seginw_output/
 PTQ4SAM/
 decoder_quant_r/
+quant/qgemm/third-party/
+attention_utilsdebug.py
+attention_utilsdebug.ipynb
+decoder_quant.py
 
 # Exclude Python cache files
 __pycache__/

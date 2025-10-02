@@ -245,29 +245,7 @@ class SignProcessor(ProcessStrategy):
 
 
 
-class MyProcessor(ProcessStrategy):
 
-    def __init__(self, strategy_name):
-        super().__init__(strategy_name)
-        self.stat = {} 
-
-    def stat_linear(self, X, Y:torch.Tensor, name, linear_name):
-        # attn_name = name 
-        sign = torch.sign(torch.sign(Y).mean(-2, keepdim=True))
-        if 'k' in linear_name:
-            if name not in self.stat:
-                self.stat[name] =  defaultdict() 
-                self.stat[name][linear_name] = sign
-            else:
-                self.stat[name][linear_name] += sign
-
-
-        
-    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name):
-        # name = module_name_dict[name]
-        Q.mul_(self.stat[name]['k_proj'].sign())
-        K.mul_(self.stat[name]['k_proj'].sign())
-        return Q, K, V
 
 
 class DoNothingProcessor(ProcessStrategy):
@@ -473,7 +451,7 @@ class AttnBasedProcessor(ProcessStrategy):
         # breakpoint()
         # q_backup = Q[:, :, :,topk_indices].detach().clone()
         # k_backup = K[:, :, :,topk_indices].detach().clone()
-        K = K - K.mean(1, keepdim=True)
+        # K = K - K.mean(1, keepdim=True)
         Q =  quantize_activation_per_token_absmax(Q, n_bits=4)
         K =  quantize_activation_per_token_absmax(K, n_bits=4)
         # breakpoint()

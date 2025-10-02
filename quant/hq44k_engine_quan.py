@@ -38,6 +38,7 @@ from quarot import parser_gen
 from distribution_sam import get_channel_distribution_modify
 import RTN_quantization.utils as rtn_utils
 from RTN_quantization import per_tensor_channel_group,gptq_utils
+from RTN_quantization.utils import QuantizationConfig, replace_linear_with_quantized
 import rotate_sam
 from quantizer import replace_linear_with_int4 ,save_cuda_quantized_model, replace_linear_with_int4_gptq
 from torch import nn
@@ -141,6 +142,9 @@ class Hq44kInferenceStrategy(InferenceStrategy):
         self.quantize_decoder = args.quantization.quandecoder
         self.rtn_cuda = args.quantization.rtn_cuda
         self.gptq_cuda = args.quantization.gptq_cuda
+        self.low_high_density =args.quantization.low_high_density
+        self.up_down_RTN = args.quantization.up_down_RTN
+        self.percent = args.quantization.percent
         if self.quant_gptq or self.gptq_cuda:
             self.args_gptq = args.gptq
         if self.rtn_cuda:
@@ -221,15 +225,16 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             if self.gptq_cuda:
                 replace_linear_with_int4_gptq(self.predictor,quantizer, exclude_modules=modules_to_exclude)
             else:
-                rtn_utils.replace_linear_with_target_and_quantize(module=self.predictor,
-                                                            target_class=per_tensor_channel_group.W8A8Linear,
-                                                            n_bit_w=self.n_bits,
-                                                            n_bit_ac=self.args_gptq.ac_bits,
-                                                            module_name_to_exclude=modules_to_exclude,
-                                                            weight_quant=self.weight_quant,    
-                                                            act_quant=self.act_quant,           
-                                                            quantize_output=self.quantize_output,
-                                                            quantize_weight=False) # weight already quantized in gptq
+                # Use new QuantizationConfig API
+                config = QuantizationConfig(
+                    n_bits_w=self.n_bits,
+                    n_bits_a=self.args_gptq.ac_bits,
+                    weight_quant=self.weight_quant,
+                    act_quant=self.act_quant,
+                    quantize_output=self.quantize_output,
+                    quantize_weight=False  # weight already quantized in gptq
+                )
+                replace_linear_with_quantized(self.predictor, config, modules_to_exclude)
             
                 
             if self.quantize_decoder:
@@ -299,15 +304,16 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                 if self.gptq_cuda:
                     replace_linear_with_int4_gptq(self.hq_mask_decoder,quantizer, exclude_modules=modules_to_exclude)
                 else:
-                    rtn_utils.replace_linear_with_target_and_quantize(module=self.hq_mask_decoder,
-                                                            target_class=per_tensor_channel_group.W8A8Linear,
-                                                            n_bit_w=self.n_bits,
-                                                            n_bit_ac=self.args_gptq.ac_bits,
-                                                            module_name_to_exclude=modules_to_exclude,
-                                                            weight_quant=self.weight_quant,    
-                                                            act_quant=self.act_quant,           
-                                                            quantize_output=self.quantize_output,
-                                                            quantize_weight=False) # weight already quantized in gptq
+                    # Use new QuantizationConfig API
+                    config = QuantizationConfig(
+                        n_bits_w=self.n_bits,
+                        n_bits_a=self.args_gptq.ac_bits,
+                        weight_quant=self.weight_quant,
+                        act_quant=self.act_quant,
+                        quantize_output=self.quantize_output,
+                        quantize_weight=False  # weight already quantized in gptq
+                    )
+                    replace_linear_with_quantized(self.hq_mask_decoder, config, modules_to_exclude)
                 
                 del batched_outputs
                 del interm_embeddings_list
@@ -327,24 +333,18 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             # print(f"Memory after cleanup: {torch.cuda.memory_allocated()/1024**2:.2f} MB")
            
         if self.quant_rtn:
-            modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling", "output_hypernetworks_mlps"]
-            rtn_utils.replace_linear_with_target_and_quantize(module=self.predictor,
-                                                        target_class=per_tensor_channel_group.W8A8Linear,
-                                                        n_bit_w=self.n_bits,
-                                                        n_bit_ac=self.n_bits,
-                                                        module_name_to_exclude=modules_to_exclude,
-                                                        weight_quant=self.weight_quant,    
-                                                        act_quant=self.act_quant,           
-                                                        quantize_output=self.quantize_output)
+            modules_to_exclude = []
             if self.quantize_decoder:
-                rtn_utils.replace_linear_with_target_and_quantize(module=self.hq_mask_decoder,
-                                                        target_class=per_tensor_channel_group.W8A8Linear,
-                                                        n_bit_w=self.n_bits,
-                                                        n_bit_ac=self.n_bits,
-                                                        module_name_to_exclude=modules_to_exclude,
-                                                        weight_quant=self.weight_quant,    
-                                                        act_quant=self.act_quant,           
-                                                        quantize_output=self.quantize_output)
+                # Use new QuantizationConfig API
+                config = QuantizationConfig(
+                    n_bits_w=4,
+                    n_bits_a=8,
+                    weight_quant=self.weight_quant,
+                    act_quant=self.act_quant,
+                    quantize_output=self.quantize_output,
+                    up_down_RTN=self.up_down_RTN
+                )
+                replace_linear_with_quantized(self.hq_mask_decoder, config, modules_to_exclude)
         
         if self.rtn_cuda:
             # modules_to_exclude = ["pos_embed", "cls_token", "patch_embed", "neck", "fpn", "mask_tokens", "iou_token", "output_upscaling","output_hypernetworks_mlps"]
@@ -357,11 +357,40 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                 save_cuda_quantized_model(self.predictor, save_dir="./pretrained_checkpoint", model_name="sam_int4_full")
                 if self.quantize_decoder:
                     save_cuda_quantized_model(self.hq_mask_decoder, save_dir="./pretrained_checkpoint", model_name="hq_decoder_int4_full")
-                    
+        if self.low_high_density != "none":
+            modules_to_exclude=["mask_decoder"]
+            quantizehigh_ = self.low_high_density != "low"
+
+            # Use new QuantizationConfig API for predictor
+            config = QuantizationConfig(
+                n_bits_w=4,
+                n_bits_a=4,
+                weight_quant="per_channel",
+                act_quant="low_high_density_activation",
+                quantize_output=False,
+                quantize_weight=True,
+                quantizehigh=quantizehigh_,
+                percent=self.percent
+            )
+            replace_linear_with_quantized(self.predictor, config, modules_to_exclude)
+
+            if self.quantize_decoder:
+                # Use new QuantizationConfig API for decoder
+                config_decoder = QuantizationConfig(
+                    n_bits_w=4,
+                    n_bits_a=4,
+                    weight_quant="per_channel",
+                    act_quant="low_high_density_activation",
+                    quantize_output=self.quantize_output,
+                    quantize_weight=True,
+                    quantizehigh=quantizehigh_,
+                    percent=self.percent
+                )
+                replace_linear_with_quantized(self.hq_mask_decoder, config_decoder, modules_to_exclude)   
         # self.plot_distribution()
             
-        # # print_model_structure(self.predictor, title="Final Structure")
-        # # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
+        # print_model_structure(self.predictor, title="Final Structure")
+        # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
         # exit()
     def plot_distribution(self):
         act = ''
@@ -536,7 +565,10 @@ class Hq44kSamEngine(Engine):
                     "gt_ext": ".png"}
 
         self.train_datasets = [dataset_dis, dataset_thin, dataset_fss, dataset_duts, dataset_duts_te, dataset_ecssd, dataset_msra]
-        self.valid_datasets = [dataset_dis_val, dataset_coift_val, dataset_hrsod_val, dataset_thin_val] 
+        self.valid_datasets = [
+            dataset_dis_val, dataset_coift_val, 
+            # dataset_hrsod_val, dataset_thin_val
+        ] 
 
         
     def train(self, args:dict):
@@ -561,7 +593,7 @@ class Hq44kSamEngine(Engine):
     def evaluate(self, args, model_args ,visualize:bool=False):
         state="hq44k_"
         if model_args.quantization.quanrtn:
-            state +="rtn"
+            state +="rtn_"+model_args.quantization.up_down_RTN
         if model_args.quantization.quansmooth:
             state += "smooth"
         if model_args.quantization.quanro:
@@ -574,6 +606,8 @@ class Hq44kSamEngine(Engine):
             state += "rtncuda"
         if model_args.quantization.gptq_cuda:
             state += "gptqcuda"
+        if model_args.quantization.low_high_density != "none":
+            state+= "lh_"+ model_args.quantization.low_high_density
         logger =setup_logger(args.logging_path,state)
         
         misc.init_distributed_mode(args)
@@ -615,7 +649,6 @@ class Hq44kSamEngine(Engine):
             start = time.time()
             for i,data_val in enumerate(metric_logger.log_every(valid_dataloader, 2)):
                 _, inputs_val, labels_val, _, labels_ori = data_val['imidx'], data_val['image'], data_val['label'], data_val['shape'], data_val['ori_label']
-
                 # prepare image & prompts 
                 if torch.cuda.is_available():
                     inputs_val = inputs_val.cuda()
@@ -1095,13 +1128,176 @@ def save_baseline_results(masks, scores, save_path):
     with open(save_path, 'wb') as f:
         pickle.dump(baseline_data, f)
 # %%
+def reset_everything():
+    """Complete reset between runs"""
+    # 1. Clear all loggers
+    logging.shutdown()
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    logging.Logger.manager.loggerDict.clear()
+
+    # 2. Destroy distributed process group
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
+    # 3. Clear CUDA cache
+    torch.cuda.empty_cache()
+
+    # 4. Force garbage collection
+    import gc
+    gc.collect()
+
 if __name__ == "__main__":
-    model_args = OmegaConf.load('quant/config/hq44k/rtn.yaml')
+    import csv
+    from datetime import datetime
+
+    model_args = OmegaConf.load('./quant/config/hq44k/low_high.yaml')
     args = get_args_parser()
+
+    # Create results directory and CSV file
+    os.makedirs('./output/density_results', exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    csv_filename = f'./output/density_results/results_{timestamp}.csv'
+
+    # Store all results
+    all_results = []
+
+    for token_type in ['low', 'high']:
+        for percent in [50, 60, 70, 80, 100]:
+            print(f"\n{'='*80}")
+            print(f"Testing: token_type={token_type}, percent={percent}%")
+            print(f"{'='*80}")
+
+            model_args.quantization.percent = percent
+            model_args.quantization.low_high_density = token_type
+
+            engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
+            test_stats = engine.evaluate(args, model_args)
+
+            # Add configuration to results
+            result_row = {
+                'token_type': token_type,
+                'percent': percent,
+                **test_stats
+            }
+            all_results.append(result_row)
+
+            print(f"\nResults: {test_stats}")
+
+            # Cleanup
+            del engine
+            reset_everything()
+
+    # Write results to CSV
+    if all_results:
+        # Get all unique keys from all results
+        fieldnames = ['token_type', 'percent'] + [k for k in all_results[0].keys() if k not in ['token_type', 'percent']]
+
+        with open(csv_filename, 'w', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(all_results)
+
+        print(f"\n{'='*80}")
+        print(f"Results saved to: {csv_filename}")
+        print(f"{'='*80}")
+
+        # Print summary table
+        print("\nRESULTS SUMMARY:")
+        print(f"{'Token Type':<12} {'Percent':<10} {'IoU Metrics'}")
+        print('-'*80)
+        for result in all_results:
+            iou_metrics = {k: v for k, v in result.items() if 'iou' in k.lower() and k != 'total_time'}
+            iou_str = ', '.join([f"{k}={v:.4f}" for k, v in iou_metrics.items()])
+            print(f"{result['token_type']:<12} {result['percent']:<10} {iou_str}")
+
+    exit()
+    # model_args.quantization.up_down_RTN= "RTN"
+    test_stats_list = []
+    randomsnum=100
     
-    engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
-    # engine.evaluate(args,model_args)
-    engine.visual_eval(args,model_args)
+    original_seed = args.seed
+    for i in range(randomsnum):
+        print(f"\n=== Running iteration {i+1}/{randomsnum} ===")
+
+        # Reset everything except for the first run
+        args.seed = original_seed + i
+        if i > 0:
+            reset_everything()
+        engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
+        test_stats=engine.evaluate(args,model_args)
+        test_stats_list.append(test_stats)
+        
+        del engine
+        # calculate the average and standard deviation of the results
+        if i % 20 == 0:
+            if len(test_stats_list) > 1:
+                # Extract metric names (excluding 'total_time')
+                metric_names = [key for key in test_stats_list[0].keys() if key != 'total_time']
+
+                # Calculate statistics for each metric
+                stats_summary = {}
+                for metric in metric_names:
+                    values = [test_stats[metric] for test_stats in test_stats_list]
+                    values_array = np.array(values)
+
+                    mean_val = np.mean(values_array)
+                    std_val = np.std(values_array, ddof=1)  # ddof=1 for sample standard deviation
+                    var_val = np.var(values_array, ddof=1)   # ddof=1 for sample variance
+
+                    stats_summary[metric] = {
+                        'mean': mean_val,
+                        'std': std_val,
+                        'variance': var_val,
+                        'values': values
+                    }
+
+                    state="hq44k_"
+                    if model_args.quantization.quanrtn:
+                        state +="rtn_"+model_args.quantization.up_down_RTN
+                    if model_args.quantization.quansmooth:
+                        state += "smooth"
+                    if model_args.quantization.quanro:
+                        state += "ro"
+                    if model_args.quantization.quandecoder:
+                        state += "dec"
+                    if model_args.quantization.quangptq:
+                        state += "gptq"
+                    if model_args.quantization.rtn_cuda:
+                        state += "rtncuda"
+                    if model_args.quantization.gptq_cuda:
+                        state += "gptqcuda"
+                    if model_args.quantization.low_high_density != "none":
+                        state+= "lh_"+ model_args.quantization.low_high_density
+                    logger =setup_logger(args.logging_path,state)
+                    
+                    # Log the statistics
+                    logger.info(f"{metric}:")
+                    logger.info(f"  Values: {values}")
+                    logger.info(f"  Mean: {mean_val:.6f}")
+                    logger.info(f"  Std Dev: {std_val:.6f}")
+                    logger.info(f"  Variance: {var_val:.6f}")
+
+                # Print summary to console as well
+                print("\n" + "=" * 100)
+                print("STATISTICAL SUMMARY:")
+                print("=" * 100)
+                for metric in metric_names:
+                    stats = stats_summary[metric]
+                    print(f"\n{metric}:")
+                    print(f"  Mean: {stats['mean']:.6f}")
+                    print(f"  Std Dev: {stats['std']:.6f}")
+                    print(f"  Variance: {stats['variance']:.6f}")
+
+                logger.info("\n" + "=" * 100)
+                logger.info("STATISTICAL SUMMARY:")
+                for metric in metric_names:
+                    stats = stats_summary[metric]
+                    logger.info(f"{metric} - Mean: {stats['mean']:.6f}, Std: {stats['std']:.6f}, Var: {stats['variance']:.6f}")
+                logger.info("=" * 100)
+
+
+    # engine.visual_eval(args,model_args)
 
 # %%
 

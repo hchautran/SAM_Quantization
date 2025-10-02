@@ -371,6 +371,7 @@ def image_encoder_monkey_patch(
 
     replace_linear_with_target_and_quantize(
         module=model.image_encoder,
+        parent_name="",
         target_class=per_tensor_channel_group.W8A8Linear,
         n_bit_w=n_bits,
         n_bit_ac=n_bits,
@@ -378,7 +379,6 @@ def image_encoder_monkey_patch(
         weight_quant=weight_quant,
         act_quant="per_token",
         quantize_output=False,
-        k_preserve=k_preserve,
     )
 
 

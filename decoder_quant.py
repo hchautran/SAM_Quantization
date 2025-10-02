@@ -103,6 +103,7 @@ class TwoWayTransformerObserver(TwoWayTransformer):
 
     attention_score = defaultdict(list)
     weights = {}  # Store weights separately, extracted once
+    debug = False
 
     def forward(
         self,
@@ -154,34 +155,35 @@ class TwoWayTransformerObserver(TwoWayTransformer):
             )
 
             # Post-projection activations
-            TwoWayTransformerObserver.attention_score["p2p_q"].append(p2p_q)
-            TwoWayTransformerObserver.attention_score["p2p_k"].append(p2p_k)
-            TwoWayTransformerObserver.attention_score["p2p_v"].append(p2p_v)
+            if TwoWayTransformerObserver.debug:
+                TwoWayTransformerObserver.attention_score["p2p_q"].append(p2p_q)
+                TwoWayTransformerObserver.attention_score["p2p_k"].append(p2p_k)
+                TwoWayTransformerObserver.attention_score["p2p_v"].append(p2p_v)
 
-            TwoWayTransformerObserver.attention_score["i2p_q"].append(i2p_q)
-            TwoWayTransformerObserver.attention_score["i2p_k"].append(i2p_k)
-            TwoWayTransformerObserver.attention_score["i2p_v"].append(i2p_v)
+                TwoWayTransformerObserver.attention_score["i2p_q"].append(i2p_q)
+                TwoWayTransformerObserver.attention_score["i2p_k"].append(i2p_k)
+                TwoWayTransformerObserver.attention_score["i2p_v"].append(i2p_v)
 
-            TwoWayTransformerObserver.attention_score["p2i_q"].append(p2i_q)
-            TwoWayTransformerObserver.attention_score["p2i_k"].append(p2i_k)
-            TwoWayTransformerObserver.attention_score["p2i_v"].append(p2i_v)
+                TwoWayTransformerObserver.attention_score["p2i_q"].append(p2i_q)
+                TwoWayTransformerObserver.attention_score["p2i_k"].append(p2i_k)
+                TwoWayTransformerObserver.attention_score["p2i_v"].append(p2i_v)
 
-            # Pre-projection activations
-            TwoWayTransformerObserver.attention_score["p2p_q_pre"].append(p2p_q_pre)
-            TwoWayTransformerObserver.attention_score["p2p_k_pre"].append(p2p_k_pre)
-            TwoWayTransformerObserver.attention_score["p2p_v_pre"].append(p2p_v_pre)
+                # Pre-projection activations
+                TwoWayTransformerObserver.attention_score["p2p_q_pre"].append(p2p_q_pre)
+                TwoWayTransformerObserver.attention_score["p2p_k_pre"].append(p2p_k_pre)
+                TwoWayTransformerObserver.attention_score["p2p_v_pre"].append(p2p_v_pre)
 
-            TwoWayTransformerObserver.attention_score["i2p_q_pre"].append(i2p_q_pre)
-            TwoWayTransformerObserver.attention_score["i2p_k_pre"].append(i2p_k_pre)
-            TwoWayTransformerObserver.attention_score["i2p_v_pre"].append(i2p_v_pre)
+                TwoWayTransformerObserver.attention_score["i2p_q_pre"].append(i2p_q_pre)
+                TwoWayTransformerObserver.attention_score["i2p_k_pre"].append(i2p_k_pre)
+                TwoWayTransformerObserver.attention_score["i2p_v_pre"].append(i2p_v_pre)
 
-            TwoWayTransformerObserver.attention_score["p2i_q_pre"].append(p2i_q_pre)
-            TwoWayTransformerObserver.attention_score["p2i_k_pre"].append(p2i_k_pre)
-            TwoWayTransformerObserver.attention_score["p2i_v_pre"].append(p2i_v_pre)
+                TwoWayTransformerObserver.attention_score["p2i_q_pre"].append(p2i_q_pre)
+                TwoWayTransformerObserver.attention_score["p2i_k_pre"].append(p2i_k_pre)
+                TwoWayTransformerObserver.attention_score["p2i_v_pre"].append(p2i_v_pre)
 
-            TwoWayTransformerObserver.attention_score["p2p_attn"].append(p2p_attn)
-            TwoWayTransformerObserver.attention_score["i2p_attn"].append(i2p_attn)
-            TwoWayTransformerObserver.attention_score["p2i_attn"].append(p2i_attn)
+                TwoWayTransformerObserver.attention_score["p2p_attn"].append(p2p_attn)
+                TwoWayTransformerObserver.attention_score["i2p_attn"].append(i2p_attn)
+                TwoWayTransformerObserver.attention_score["p2i_attn"].append(p2i_attn)
 
         # Apply the final attenion layer from the points to the image
         q = queries + point_embedding
@@ -189,13 +191,14 @@ class TwoWayTransformerObserver(TwoWayTransformer):
         attn_out, final_attn, final_q, final_k, final_v, final_q_pre, final_k_pre, final_v_pre = (
             self.final_attn_token_to_image(q=q, k=k, v=keys)
         )
-        TwoWayTransformerObserver.attention_score["final_attn"] = final_attn
-        TwoWayTransformerObserver.attention_score["final_q"] = final_q
-        TwoWayTransformerObserver.attention_score["final_k"] = final_k
-        TwoWayTransformerObserver.attention_score["final_v"] = final_v
-        TwoWayTransformerObserver.attention_score["final_q_pre"] = final_q_pre
-        TwoWayTransformerObserver.attention_score["final_k_pre"] = final_k_pre
-        TwoWayTransformerObserver.attention_score["final_v_pre"] = final_v_pre
+        if TwoWayTransformerObserver.debug:
+            TwoWayTransformerObserver.attention_score["final_attn"] = final_attn
+            TwoWayTransformerObserver.attention_score["final_q"] = final_q
+            TwoWayTransformerObserver.attention_score["final_k"] = final_k
+            TwoWayTransformerObserver.attention_score["final_v"] = final_v
+            TwoWayTransformerObserver.attention_score["final_q_pre"] = final_q_pre
+            TwoWayTransformerObserver.attention_score["final_k_pre"] = final_k_pre
+            TwoWayTransformerObserver.attention_score["final_v_pre"] = final_v_pre
         queries = queries + attn_out
         queries = self.norm_final_attn(queries)
 
@@ -492,6 +495,7 @@ def mask_decoder_monkey_patch(
     n_bits=8,
     weight_quant="per_channel",
     k_preserve=0,
+    debug=False,
 ):
     """
     Apply monkey-patching to SAM mask decoder for quantization and observation.
@@ -511,6 +515,7 @@ def mask_decoder_monkey_patch(
             module.n_bits = n_bits
         if isinstance(module, TwoWayAttentionBlock):
             module.__class__ = TwoWayAttentionBlockObserver
+            TwoWayAttentionBlockObserver.debug = debug 
         if isinstance(module, TwoWayTransformer):
             module.__class__ = TwoWayTransformerObserver
 

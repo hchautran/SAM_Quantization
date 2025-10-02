@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from .Smooth import smooth_ln_fcs
 from matplotlib import pyplot as plt
+from dataclasses import dataclass
+from typing import Optional
 
 
 import os
@@ -15,31 +17,207 @@ sam_hq_path = os.path.join(project_root, "sam-hq")
 sys.path.insert(0, sam_hq_path)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-def replace_linear_with_target_and_quantize(module, 
-                               target_class,n_bit_w,n_bit_ac, module_name_to_exclude, 
-                               weight_quant="per_channel", act_quant="per_token", 
-                               quantize_output=False, group_size=None,quantize_weight = True,  k_preserve=0):
-    
+
+# ============================================================================
+# Quantization Configuration
+# ============================================================================
+
+@dataclass
+class QuantizationConfig:
+    """Configuration for quantization parameters.
+
+    This class encapsulates all quantization-related parameters to avoid
+    passing many individual arguments through function calls.
+
+    Attributes:
+        n_bits_w: Number of bits for weight quantization (default: 8)
+        n_bits_a: Number of bits for activation quantization (default: 8)
+        weight_quant: Weight quantization strategy ("per_channel", "per_tensor", "per_group")
+        act_quant: Activation quantization strategy ("per_token", "per_tensor", "per_group", "low_high_density")
+        quantize_output: Whether to quantize output activations (default: False)
+        quantize_weight: Whether to quantize weights (default: True)
+        group_size: Group size for group-based quantization (default: None)
+        order: Channel reordering indices for selective quantization (default: None)
+        topk: Top-k channels to preserve in selective quantization (default: None)
+        quantizehigh: For density-based quantization, whether to quantize high-density tokens (default: True)
+        up_down_RTN: Rounding strategy ("RTN", "up", "down", "random") (default: "RTN")
+        percent: Percentage of channels/tokens to quantize (default: 100)
+    """
+    n_bits_w: int = 8
+    n_bits_a: int = 8
+    weight_quant: str = "per_channel"
+    act_quant: str = "per_token"
+    quantize_output: bool = False
+    quantize_weight: bool = True
+    group_size: Optional[int] = None
+    order: Optional[torch.Tensor] = None
+    topk: Optional[torch.Tensor] = None
+    quantizehigh: bool = True
+    up_down_RTN: str = "RTN"
+    percent: float = 100
+
+    def get_w8a8linear_class(self):
+        """Determine the appropriate W8A8Linear subclass based on configuration.
+
+        Returns:
+            The appropriate W8A8Linear subclass to use
+        """
+        from .per_tensor_channel_group import (
+            W8A8LinearPerChannel,
+            W8A8LinearPerTensor,
+            W8A8LinearPerGroup,
+            W8A8LinearDensityBased,
+            W8A8LinearSelectiveChannel
+        )
+
+        # Selective channel quantization (has order or topk)
+        if self.order is not None or self.topk is not None:
+            return W8A8LinearSelectiveChannel
+
+        # Density-based quantization
+        if self.act_quant == "low_high_density":
+            return W8A8LinearDensityBased
+
+        # Group-based quantization
+        if self.weight_quant == "per_group" or self.act_quant == "per_group":
+            return W8A8LinearPerGroup
+
+        # Per-tensor quantization
+        if self.weight_quant == "per_tensor" and self.act_quant == "per_tensor":
+            return W8A8LinearPerTensor
+
+        # Default: Per-channel weight, per-token activation
+        return W8A8LinearPerChannel
+
+    def to_kwargs(self) -> dict:
+
+        return {
+            'n_bits_w': self.n_bits_w,
+            'n_bits_a': self.n_bits_a,
+            'weight_quant': self.weight_quant,
+            'act_quant': self.act_quant,
+            'quantize_output': self.quantize_output,
+            'group_size': self.group_size,
+            'quantize_weight': self.quantize_weight,
+            'order': self.order,
+            'topk': self.topk,
+            'quantizehigh': self.quantizehigh,
+            'up_down_RTN': self.up_down_RTN,
+            'percent': self.percent
+        }
+
+def replace_linear_with_quantized(
+    module: nn.Module,
+    config: QuantizationConfig,
+    module_name_to_exclude: Optional[list] = None,
+    parent_name: str = ""
+):
+    """Replace linear layers with quantized versions using configuration object.
+
+    This is the recommended API for replacing linear layers with quantized versions.
+    It automatically selects the appropriate W8A8Linear subclass based on the
+    configuration parameters.
+
+    Args:
+        module: The module to traverse
+        config: QuantizationConfig object containing all quantization parameters
+        module_name_to_exclude: List of module names to exclude from quantization
+        parent_name: The hierarchical name of the parent module (used internally)
+
+    Example:
+        >>> config = QuantizationConfig(
+        ...     n_bits_w=4,
+        ...     n_bits_a=8,
+        ...     weight_quant="per_channel",
+        ...     act_quant="per_token"
+        ... )
+        >>> replace_linear_with_quantized(model, config, ["lm_head"])
+    """
+    if module_name_to_exclude is None:
+        module_name_to_exclude = []
+
     for name, child in module.named_children():
+        # Check if this module should be excluded
         if isinstance(child, nn.Linear) and not \
-        any([x == name for x in module_name_to_exclude]):
-            new_module = target_class.from_float(
-                child, 
-                n_bits_w=n_bit_w,
-                n_bits_ac=n_bit_ac,
-                weight_quant=weight_quant, 
-                act_quant=act_quant, 
-                quantize_output=quantize_output,
-                group_size=group_size,
-                quantize_weight = quantize_weight
-            )
-            setattr(module, name, new_module) # replace the module with the new module
-            
+           any([x == name for x in module_name_to_exclude]) and not \
+           any([x in parent_name for x in module_name_to_exclude]):
+
+            # Auto-select appropriate quantization class
+            quantized_class = config.get_w8a8linear_class()
+
+            # Create quantized module
+            new_module = quantized_class.from_float(child, **config.to_kwargs())
+            setattr(module, name, new_module)
+
         else:
-            # Recursively call the function for nested modules
-            replace_linear_with_target_and_quantize(child, 
-                     target_class,n_bit_w,n_bit_ac, module_name_to_exclude, 
-                     weight_quant, act_quant, quantize_output, group_size)
+            # Recursively process child modules
+            name_layer = parent_name + "." + name if parent_name else name
+            replace_linear_with_quantized(
+                child, config, module_name_to_exclude, name_layer
+            )
+
+
+def replace_linear_with_target_and_quantize(
+    module: nn.Module,
+    parent_name: str,
+    target_class,
+    n_bit_w: int,
+    n_bit_ac: int,
+    module_name_to_exclude: list,
+    weight_quant: str = "per_channel",
+    act_quant: str = "per_token",
+    quantize_output: bool = False,
+    group_size: Optional[int] = None,
+    quantize_weight: bool = True,
+    order: Optional[torch.Tensor] = None,
+    topk: Optional[torch.Tensor] = None,
+    quantizehigh: bool = True,
+    up_down_RTN: str = "RTN",
+    percent: float = 100
+):
+    """Legacy function - use replace_linear_with_quantized instead.
+
+    This function is kept for backward compatibility. It wraps the new
+    replace_linear_with_quantized function with a simpler QuantizationConfig-based API.
+
+    Deprecated: Use replace_linear_with_quantized with QuantizationConfig instead.
+
+    Args:
+        module: The module to traverse
+        parent_name: The hierarchical name of the parent module
+        target_class: The quantized linear class (ignored, auto-selected based on config)
+        n_bit_w: Number of bits for weight quantization
+        n_bit_ac: Number of bits for activation quantization
+        module_name_to_exclude: List of module names to exclude from quantization
+        weight_quant: Weight quantization strategy
+        act_quant: Activation quantization strategy
+        quantize_output: Whether to quantize output activations
+        group_size: Group size for group-based quantization
+        quantize_weight: Whether to quantize weights
+        order: Channel reordering for selective quantization
+        topk: Top-k channels to preserve
+        quantizehigh: Whether to quantize high-density tokens
+        up_down_RTN: Rounding strategy
+        percent: Percentage of channels/tokens to quantize
+    """
+    # Create configuration object from parameters
+    config = QuantizationConfig(
+        n_bits_w=n_bit_w,
+        n_bits_a=n_bit_ac,
+        weight_quant=weight_quant,
+        act_quant=act_quant,
+        quantize_output=quantize_output,
+        quantize_weight=quantize_weight,
+        group_size=group_size,
+        order=order,
+        topk=topk,
+        quantizehigh=quantizehigh,
+        up_down_RTN=up_down_RTN,
+        percent=percent
+    )
+
+    # Delegate to the new cleaner function
+    replace_linear_with_quantized(module, config, module_name_to_exclude, parent_name)
 
 
     
