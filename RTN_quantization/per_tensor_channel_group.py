@@ -159,7 +159,7 @@ def quantize_activation_per_token_absmax(t: torch.Tensor, n_bits: int = 8) -> to
     q_max = 2 ** (n_bits - 1) - 1
     scales.clamp_(min=1e-5).div_(q_max)
     t.div_(scales).round_().mul_(scales)
-    return t
+    return t.view(t_shape)
 
 
 @torch.no_grad()
@@ -171,7 +171,7 @@ def quantize_activation_per_tensor_absmax(t: torch.Tensor, n_bits: int = 8) -> t
     q_max = 2 ** (n_bits - 1) - 1
     scales.clamp_(min=1e-5).div_(q_max)
     t.div_(scales).round_().mul_(scales)
-    return t
+    return t.view(t_shape)
 
 
 @torch.no_grad()

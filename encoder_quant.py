@@ -208,6 +208,7 @@ def image_encoder_monkey_patch(
     n_bits=8,
     weight_quant="per_channel",
     act_quant="per_token",
+    debug=False
 ):
     """
     Apply monkey-patching to SAM image encoder for quantization and observation.
@@ -230,6 +231,7 @@ def image_encoder_monkey_patch(
             module.__class__ = BlockObserver
         if isinstance(module, ImageEncoderViT):
             module.__class__ = ImageEncoderViTObserver
+            ImageEncoderViTObserver.debug = debug 
 
     modules_to_exclude = [
         "pos_embed",

@@ -341,6 +341,7 @@ class AttentionObserver(Attention):
         q = self.q_proj(q)
         k = self.k_proj(k)
         v = self.v_proj(v)
+        breakpoint()
 
         # q =   quantize_activation_per_token_absmax(q, n_bits=4)
         # k =   quantize_activation_per_token_absmax(k, n_bits=8)
