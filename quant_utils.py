@@ -236,11 +236,13 @@ class SignProcessor(ProcessStrategy):
 
 
         
-    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name):
+    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name, n_bits):
         sign = self.stat[name]['k_proj'].sign().reshape(-1, 16)[None, None, ...].permute(0,2,1,3)
 
         Q.mul_(sign)
         K.mul_(sign)
+        Q =  quantize_activation_per_token_absmax(Q.permute(0,2,1,3), n_bits=4)
+        K =  quantize_activation_per_token_absmax(K.permute(0,2,1,3), n_bits=4)
         return Q, K, V
 
 
@@ -451,7 +453,7 @@ class AttnBasedProcessor(ProcessStrategy):
         # breakpoint()
         # q_backup = Q[:, :, :,topk_indices].detach().clone()
         # k_backup = K[:, :, :,topk_indices].detach().clone()
-        # K = K - K.mean(1, keepdim=True)
+        K = K - K.mean(1, keepdim=True)
         Q =  quantize_activation_per_token_absmax(Q, n_bits=4)
         K =  quantize_activation_per_token_absmax(K, n_bits=4)
         # breakpoint()
