@@ -395,9 +395,9 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                 raise NotImplementedError("QkT_v for decoder not implemented yet")
         # self.plot_distribution()
             
-        print_model_structure(self.predictor, title="Final Structure")
-        print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
-        exit()
+        # print_model_structure(self.predictor, title="Final Structure")
+        # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
+        # exit()
     def plot_distribution(self):
         act = ''
         if self.quant_rtn:

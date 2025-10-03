@@ -46,14 +46,16 @@ class AttentionQ(Attention):
         return x
 
 def replace_attention_with_quantized(model):
-    
+    device = next(model.parameters()).device
     for i, block in enumerate(model.image_encoder.blocks[:]):
         original_attn = block.attn
         dim = original_attn.qkv.in_features
         num_heads = original_attn.num_heads
         qkv_bias = hasattr(original_attn.qkv, 'bias') and original_attn.qkv.bias is not None
         use_rel_pos = original_attn.use_rel_pos
-        input_size = None
+        h_size = (original_attn.rel_pos_h.shape[0] + 1) // 2
+        w_size = (original_attn.rel_pos_w.shape[0] + 1) // 2
+        input_size = (h_size, w_size)
         custom_attn = AttentionQ(
             dim=dim,
             num_heads=num_heads,
@@ -61,12 +63,12 @@ def replace_attention_with_quantized(model):
             use_rel_pos=use_rel_pos,
             input_size=input_size
         )
-        custom_attn.to(target_device)
+        custom_attn.to(device)
         # Copy weights from original attention
-        custom_attn.qkv.weight.data = original_attn.qkv.weight.data.to(target_device)
-        custom_attn.qkv.bias.data = original_attn.qkv.bias.data.to(target_device)
-        custom_attn.proj.weight.data = original_attn.proj.weight.data.to(target_device)
-        custom_attn.proj.bias.data = original_attn.proj.bias.data.to(target_device)
+        custom_attn.qkv.weight.data = original_attn.qkv.weight.data.to(device)
+        custom_attn.qkv.bias.data = original_attn.qkv.bias.data.to(device)
+        custom_attn.proj.weight.data = original_attn.proj.weight.data.to(device)
+        custom_attn.proj.bias.data = original_attn.proj.bias.data.to(device)
         if use_rel_pos:
             custom_attn.rel_pos_h = original_attn.rel_pos_h
             custom_attn.rel_pos_w = original_attn.rel_pos_w

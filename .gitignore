@@ -6,7 +6,7 @@ sam2/
 segment-anything/
 data/
 hq_ckts/
-# pretrained_checkpoint/
+pretrained_checkpoint/
 quarot/fast-hadamard-transform/
 sam2_ckts/
 demo/
