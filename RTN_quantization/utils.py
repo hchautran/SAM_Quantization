@@ -9,6 +9,8 @@ from typing import Optional
 import os
 import sys
 import numpy as np
+from segment_anything.modeling.image_encoder import Attention
+from per_tensor_channel_group import quantize_activation_low_high_density_activation_index
 # Add the sam-hq directory to Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)  # Go up to SAM_Quantization
@@ -17,6 +19,60 @@ sam_hq_path = os.path.join(project_root, "sam-hq")
 sys.path.insert(0, sam_hq_path)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+class AttentionQ(Attention):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def forward(self, x: torch.Tensor) :
+        B, H, W, _ = x.shape
+        # qkv with shape (3, B, nHead, H * W, C)
+        qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        # q, k, v with shape (B * nHead, H * W, C)
+        q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
+
+        attn = (q * self.scale) @ k.transpose(-2, -1)
+
+        if self.use_rel_pos:
+            attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+        # quantize attn and v
+        
+        attn = attn.softmax(dim=-1)
+        # attn, indicis = quantize_activation_low_high_density_activation_index(attn, n_bits=8, quantizehigh=True, )
+        
+        x = (attn @ v).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = self.proj(x)
+
+        return x
+
+def replace_attention_with_quantized(model):
+    
+    for i, block in enumerate(model.image_encoder.blocks[:]):
+        original_attn = block.attn
+        dim = original_attn.qkv.in_features
+        num_heads = original_attn.num_heads
+        qkv_bias = hasattr(original_attn.qkv, 'bias') and original_attn.qkv.bias is not None
+        use_rel_pos = original_attn.use_rel_pos
+        input_size = None
+        custom_attn = AttentionQ(
+            dim=dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            use_rel_pos=use_rel_pos,
+            input_size=input_size
+        )
+        custom_attn.to(target_device)
+        # Copy weights from original attention
+        custom_attn.qkv.weight.data = original_attn.qkv.weight.data.to(target_device)
+        custom_attn.qkv.bias.data = original_attn.qkv.bias.data.to(target_device)
+        custom_attn.proj.weight.data = original_attn.proj.weight.data.to(target_device)
+        custom_attn.proj.bias.data = original_attn.proj.bias.data.to(target_device)
+        if use_rel_pos:
+            custom_attn.rel_pos_h = original_attn.rel_pos_h
+            custom_attn.rel_pos_w = original_attn.rel_pos_w
+        block.attn = custom_attn
+    import gc
+    gc.collect()
 
 @dataclass
 class QuantizationConfig:

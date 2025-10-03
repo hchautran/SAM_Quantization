@@ -38,7 +38,7 @@ from quarot import parser_gen
 from distribution_sam import get_channel_distribution_modify
 import RTN_quantization.utils as rtn_utils
 from RTN_quantization import per_tensor_channel_group,gptq_utils
-from RTN_quantization.utils import QuantizationConfig, replace_linear_with_quantized
+from RTN_quantization.utils import QuantizationConfig, replace_linear_with_quantized,replace_attention_with_quantized
 import rotate_sam
 from quantizer import replace_linear_with_int4 ,save_cuda_quantized_model, replace_linear_with_int4_gptq
 from torch import nn
@@ -144,7 +144,9 @@ class Hq44kInferenceStrategy(InferenceStrategy):
         self.gptq_cuda = args.quantization.gptq_cuda
         self.low_high_density =args.quantization.low_high_density
         self.up_down_RTN = args.quantization.up_down_RTN
-        self.percent = args.quantization.percent
+        self.qkT_v = args.quantization.qkT_v
+        if self.low_high_density != "none":
+            self.percent = args.quantization.percent
         if self.quant_gptq or self.gptq_cuda:
             self.args_gptq = args.gptq
         if self.rtn_cuda:
@@ -387,11 +389,15 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                     percent=self.percent
                 )
                 replace_linear_with_quantized(self.hq_mask_decoder, config_decoder, modules_to_exclude)   
+        if self.qkT_v:
+            replace_attention_with_quantized(self.predictor)
+            if self.quantize_decoder:
+                raise NotImplementedError("QkT_v for decoder not implemented yet")
         # self.plot_distribution()
             
-        # print_model_structure(self.predictor, title="Final Structure")
-        # print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
-        # exit()
+        print_model_structure(self.predictor, title="Final Structure")
+        print_model_structure(self.hq_mask_decoder, title="Final HQ Mask Decoder Structure")
+        exit()
     def plot_distribution(self):
         act = ''
         if self.quant_rtn:
@@ -608,6 +614,8 @@ class Hq44kSamEngine(Engine):
             state += "gptqcuda"
         if model_args.quantization.low_high_density != "none":
             state+= "lh_"+ model_args.quantization.low_high_density
+        if model_args.quantization.qkT_v:
+            state += "qkTv"
         logger =setup_logger(args.logging_path,state)
         
         misc.init_distributed_mode(args)
@@ -1127,7 +1135,6 @@ def save_baseline_results(masks, scores, save_path):
     }
     with open(save_path, 'wb') as f:
         pickle.dump(baseline_data, f)
-# %%
 def reset_everything():
     """Complete reset between runs"""
     # 1. Clear all loggers
@@ -1146,14 +1153,19 @@ def reset_everything():
     # 4. Force garbage collection
     import gc
     gc.collect()
+# %%
+
 
 if __name__ == "__main__":
     import csv
     from datetime import datetime
 
-    model_args = OmegaConf.load('./quant/config/hq44k/low_high.yaml')
+    model_args = OmegaConf.load('./quant/config/hq44k/qkT_v.yaml')
     args = get_args_parser()
-
+    engine = Hq44kSamEngine(Hq44kInferenceStrategy(model_args))
+    test_stats = engine.evaluate(args, model_args)
+    exit()
+    
     # Create results directory and CSV file
     os.makedirs('./output/density_results', exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

@@ -236,6 +236,52 @@ def quantize_activation_low_high_density_activation(
 
     return output.view(original_shape).to(original_dtype)
 
+@torch.no_grad()
+def quantize_activation_low_high_density_activation_index(
+    t: torch.Tensor,
+    n_bits: int = 8,
+    quantizehigh: bool = True,
+    percent: float = 50,
+    indices : Optional[torch.Tensor] = None
+) -> torch.Tensor:
+    """Quantize activations based on token density (high or low)."""
+    original_shape = t.shape
+    original_dtype = t.dtype
+    #B * nHead, H * W, C  matrix v
+    # B * nHead , H*W , H * W matrix qkT
+    
+    B, H, W, C = t.shape
+    scores = cal_density(t).squeeze(1).reshape(-1)
+    t_2d = t.view(B * H * W, C)
+
+    _, sorted_indices = torch.sort(scores, descending=True)
+    num_to_quantize = int(scores.numel() * (percent / 100.0))
+
+    token_mask = torch.zeros_like(scores, dtype=torch.bool)
+    if not indices:
+        if quantizehigh:
+            print("yoooooooooooooooooo")
+            indices = sorted_indices[:num_to_quantize]
+            token_mask[indices] = True     
+        else:
+            indices = sorted_indices[:num_to_quantize]
+            token_mask[indices] = True
+    else :
+        if quantizehigh:
+            token_mask[indices] = True     
+        else:
+            token_mask[indices] = True
+        
+    output = t_2d.clone()
+    tokens_to_quantize = t_2d[token_mask]
+
+    if tokens_to_quantize.numel() > 0:
+        scales = tokens_to_quantize.abs().max(dim=-1, keepdim=True)[0]
+        q_max = 2 ** (n_bits - 1) - 1
+        scales.clamp_(min=1e-5).div_(q_max)
+        output[token_mask] = (tokens_to_quantize / scales).round() * scales
+
+    return output.view(original_shape).to(original_dtype),indices
 
 # ============================================================================
 # Base W8A8Linear Class
