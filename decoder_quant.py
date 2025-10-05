@@ -341,7 +341,6 @@ class AttentionObserver(Attention):
         q = self.q_proj(q)
         k = self.k_proj(k)
         v = self.v_proj(v)
-        breakpoint()
 
         # q =   quantize_activation_per_token_absmax(q, n_bits=4)
         # k =   quantize_activation_per_token_absmax(k, n_bits=8)
@@ -509,9 +508,9 @@ def mask_decoder_monkey_patch(
             module.n_bits = n_bits
         if isinstance(module, TwoWayAttentionBlock):
             module.__class__ = TwoWayAttentionBlockObserver
-            TwoWayAttentionBlockObserver.debug = debug 
         if isinstance(module, TwoWayTransformer):
             module.__class__ = TwoWayTransformerObserver
+            TwoWayTransformerObserver.debug = debug 
 
     modules_to_exclude = [
         "pos_embed",

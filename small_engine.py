@@ -694,10 +694,10 @@ class Engine:
                 processor=encoder_config.get('processor'),
                 n_bits=encoder_config.get('n_bits', 8),
                 weight_quant=encoder_config.get('weight_quant', 'per_channel'),
-                k_preserve=encoder_config.get('k_preserve', 0),
+                act_quant=encoder_config.get('act_quant', 'per_token'),
             )
             print(f"Encoder quantized: {encoder_config.get('n_bits', 8)}-bit, "
-                  f"{encoder_config.get('weight_quant', 'per_channel')}, k_preserve={encoder_config.get('k_preserve', 0)}")
+                  f"weight: {encoder_config.get('weight_quant', 'per_channel')}", f"activation: {encoder_config.get('act_quant', 'per_token')} ")
 
         if self.quantize_decoder and decoder_config:
             print("Applying decoder quantization...")
@@ -731,11 +731,11 @@ class Engine:
         if self.quantize_encoder:
             print("Setting up encoder processor...")
             encoder_processor = ImageEncoderProcessor('encoder_attn')
-            encoder_processor.calibrate(
-                predictor=predictor,
-                modules=(Block,),
-                num_samples=num_calib_samples
-            )
+            # encoder_processor.calibrate(
+            #     predictor=predictor,
+            #     modules=(Block,),
+            #     num_samples=num_calib_samples
+            # )
             print(f"Encoder processor calibrated on {num_calib_samples} samples")
 
         if self.quantize_decoder:
@@ -837,7 +837,16 @@ if __name__ == '__main__':
                         help='Enable decoder quantization')
     parser.add_argument('--n-bits', type=int, default=4,
                         help='Number of quantization bits')
-    parser.add_argument('--weight-quant', type=str, default='per_channel',
+    parser.add_argument('--en-weight-quant', type=str, default='per_channel',
+                        choices=['per_channel', 'selective_channel'],
+                        help='Weight quantization method')
+    parser.add_argument('--de-weight-quant', type=str, default='per_channel',
+                        choices=['per_channel', 'selective_channel'],
+                        help='Weight quantization method')
+    parser.add_argument('--en-act-quant', type=str, default='per_token',
+                        choices=['per_channel', 'selective_channel'],
+                        help='Weight quantization method')
+    parser.add_argument('--de-act-quant', type=str, default='per_token',
                         choices=['per_channel', 'selective_channel'],
                         help='Weight quantization method')
     parser.add_argument('--k-preserve', type=int, default=0,
@@ -871,14 +880,15 @@ if __name__ == '__main__':
     encoder_config = {
         'processor': encoder_processor,
         'n_bits': args.n_bits,
-        'weight_quant': args.weight_quant,
-        'k_preserve': args.k_preserve
+        'weight_quant': args.en_weight_quant,
+        'act_quant': args.en_act_quant,
     } if encoder_processor else None
 
     decoder_config = {
         'processor': decoder_processor,
         'n_bits': args.n_bits,
-        'weight_quant': args.weight_quant,
+        'weight_quant': args.en_weight_quant,
+        'act_quant': args.de_act_quant,
         'k_preserve': args.k_preserve
     } if decoder_processor else None
 

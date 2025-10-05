@@ -33,14 +33,7 @@ from segment_anything.modeling.image_encoder import (
 
 
 class AttentionObserver(Attention):
-    """
-    Attention layer observer for SAM encoder with quantization support and activation tracking.
 
-    This class extends the standard Attention layer from SAM encoder to support:
-    - Quantization of activations using ImageEncoderProcessor
-    - Tracking and returning attention scores
-    - Compatible with ViT-based image encoder
-    """
 
     attention_score = defaultdict(list)
 
@@ -55,55 +48,59 @@ class AttentionObserver(Attention):
     def forward(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Forward pass with attention tracking and optional quantization.
-
-        Args:
-            x: Input tensor of shape (B, H, W, C)
-
-        Returns:
-            Tuple of (output, attn, q, k, v)
-        """
+  
         B, H, W, C = x.shape
         # qkv with shape (3, B, nHead, H * W, C)
-        qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        # q, k, v with shape (B * nHead, H * W, C_per_head)
-        q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
+        x = x.reshape(B, H*W, C)
+        bias = self.qkv.bias[None, None, ...]
+        x_mean = x.mean(1, keepdim=True)
+        x_hat= (x - x_mean)
+        # qkv     = self.qkv(x)       # shape: (B, H*W, 3*num_heads*dim)
+        qkv_hat = self.qkv(x_hat)
+        qkv_mean = self.qkv(x_mean) - bias
 
-        # Apply processor if available (skip if processor doesn't actually modify tensors)
-        if self.processor is not None and hasattr(self.processor, 'stat') and self.name in self.processor.stat:
-            # Only do expensive reshaping if we actually have calibration stats for this layer
-            # Reshape to per-head format for processor
-            c_per_head = C // self.num_heads
-            breakpoint()
-            q_heads = q.reshape(B, self.num_heads, H * W, c_per_head)
-            k_heads = k.reshape(B, self.num_heads, H * W, c_per_head)
-            v_heads = v.reshape(B, self.num_heads, H * W, c_per_head)
 
-            q_heads, k_heads, v_heads = self.processor.process(
-                q_heads, k_heads, v_heads, self.name, self.n_bits
-            )
+        qkv_hat = qkv_hat.reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        qkv_mean = qkv_mean.reshape(B, 1, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
 
-            # Reshape back
-            q = q_heads.reshape(B * self.num_heads, H * W, c_per_head)
-            k = k_heads.reshape(B * self.num_heads, H * W, c_per_head)
-            v = v_heads.reshape(B * self.num_heads, H * W, c_per_head)
+        q_hat, k_hat, v_hat = qkv_hat.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
+        q_mean, _, v_mean = qkv_mean.reshape(3, B * self.num_heads, 1, -1).unbind(0)
+        if ImageEncoderViTObserver.debug:
+            qkv = qkv.reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
+            # Assert that q_ori = q + q_mean (and similarly for k, v)
+            assert torch.allclose(q, q_hat+q_mean, rtol=1e-4, atol=1e-4), "q_ori != q + q_mean"
+            # assert torch.allclose(k, k_hat+k_mean, rtol=1e-4, atol=1e-4), "k_ori != k + k_mean"
+            assert torch.allclose(v, v_hat+v_mean, rtol=1e-4, atol=1e-4), "v_ori != v + v_mean"
+            attn_ori = (q * self.scale) @ k.transpose(-2, -1)
+
+        # q_hat = q_hat+q_mean
+        # k_hat = k_hat+k_mean
+        
 
         # Compute attention
-        attn = (q * self.scale) @ k.transpose(-2, -1)
+        attn = (q_hat * self.scale) @ k_hat.transpose(-2, -1)
+        attn_mean = (q_mean * self.scale) @ k_hat.transpose(-2, -1)
+        attn = attn + attn_mean
 
         if self.use_rel_pos:
             attn = add_decomposed_rel_pos(
-                attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W)
+                attn, q_hat+q_mean, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W)
             )
+            if ImageEncoderViTObserver.debug:
+                attn_ori = add_decomposed_rel_pos(
+                    attn_ori, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W)
+                )
 
         attn = attn.softmax(dim=-1)
+        if ImageEncoderViTObserver.debug:
+            attn_ori = attn_ori.softmax(dim=-1)
         output = (
-            (attn @ v).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, C)
+            (attn @ (v_hat+v_mean)).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, C)
         )
         output = self.proj(output)
 
-        return output, attn, q, k, v
+        return output, attn, attn_mean, attn_ori, q_hat, k_hat, v_hat, q_mean, v_mean 
 
     @staticmethod
     def clear_dict():
@@ -142,7 +139,8 @@ class BlockObserver(Block):
             H, W = x.shape[1], x.shape[2]
             x, pad_hw = window_partition(x, self.window_size)
 
-        x, attn, q, k, v = self.attn(x)
+        # x, attn, q, k, v = self.attn(x)
+        x, attn, attn_mean, q, k, v, q_mean, v_mean = self.attn(x)
         # Reverse window partition
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, (H, W))
@@ -150,7 +148,7 @@ class BlockObserver(Block):
         x = shortcut + x
         x = x + self.mlp(self.norm2(x))
 
-        return x, attn, q, k, v
+        return  x, attn, attn_mean, q, k, v, q_mean, v_mean
 
 
 class ImageEncoderViTObserver(ImageEncoderViT):
@@ -179,14 +177,19 @@ class ImageEncoderViTObserver(ImageEncoderViT):
 
         interm_embeddings = []
         for idx, blk in enumerate(self.blocks):
-            x, attn, q, k, v = blk(x)
+            if ImageEncoderViTObserver.debug:
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_x"].append(to_numpy(x))
+            x, attn, attn_mean, q, k, v, q_mean, v_mean = blk(x)
 
             # Store attention information
             if ImageEncoderViTObserver.debug:
                 ImageEncoderViTObserver.attention_score[f"block_{idx}_attn"].append(to_numpy(attn))
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_attn_mean"].append(to_numpy(attn_mean))
                 ImageEncoderViTObserver.attention_score[f"block_{idx}_q"].append(to_numpy(q))
                 ImageEncoderViTObserver.attention_score[f"block_{idx}_k"].append(to_numpy(k))
                 ImageEncoderViTObserver.attention_score[f"block_{idx}_v"].append(to_numpy(v))
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_q_mean"].append(to_numpy(q_mean))
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_v_mean"].append(to_numpy(v_mean))
 
             if blk.window_size == 0:
                 interm_embeddings.append(x)
@@ -208,6 +211,7 @@ def image_encoder_monkey_patch(
     n_bits=8,
     weight_quant="per_channel",
     act_quant="per_token",
+    layers=[0,5, 17],
     debug=False
 ):
     """
@@ -221,6 +225,8 @@ def image_encoder_monkey_patch(
         k_preserve: Number of channels to preserve in selective quantization
     """
     # Replace classes with observer versions using monkey patching
+    layer_idx =0
+    ImageEncoderViTObserver.debug = debug 
     for name, module in model.named_modules():
         if isinstance(module, Attention):
             module.__class__ = AttentionObserver
@@ -230,8 +236,9 @@ def image_encoder_monkey_patch(
         if isinstance(module, Block):
             module.__class__ = BlockObserver
         if isinstance(module, ImageEncoderViT):
-            module.__class__ = ImageEncoderViTObserver
-            ImageEncoderViTObserver.debug = debug 
+            if  layer_idx in layers:
+                module.__class__ = ImageEncoderViTObserver
+            layer_idx += 1
 
     modules_to_exclude = [
         "pos_embed",
@@ -243,18 +250,18 @@ def image_encoder_monkey_patch(
         "rel_pos_w",
     ]
 
-    config = QuantizationConfig(
-        n_bits_w=n_bits,
-        n_bits_a=n_bits,
-        weight_quant=weight_quant,
-        act_quant=act_quant,
-        quantize_output=False,
-    )
-    replace_linear_with_quantized(
-        module=model.image_encoder,
-        config=config,
-        module_name_to_exclude=modules_to_exclude,
-    )
+    # config = QuantizationConfig(
+    #     n_bits_w=n_bits,
+    #     n_bits_a=n_bits,
+    #     weight_quant=weight_quant,
+    #     act_quant=act_quant,
+    #     quantize_output=False,
+    # )
+    # replace_linear_with_quantized(
+    #     module=model.image_encoder,
+    #     config=config,
+    #     module_name_to_exclude=modules_to_exclude,
+    # )
 
 
 # ============================================================================
