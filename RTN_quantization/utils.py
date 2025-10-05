@@ -23,6 +23,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 class AttentionQ(Attention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.percent=50
+        self.n_bits_act=4
+        self.n_bit_w= 4
+    def take_values(self, percent, n_bits_act, n_bits_w):
+        self.percent= percent
+        self.n_bits_act= n_bits_act
+        self.n_bits_w= n_bits_w
 
     def forward(self, x: torch.Tensor) :
         B, H, W, _ = x.shape
@@ -34,18 +41,23 @@ class AttentionQ(Attention):
         attn = (q * self.scale) @ k.transpose(-2, -1)
 
         if self.use_rel_pos:
+            from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
             attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
         # quantize attn and v
         
-        attn = attn.softmax(dim=-1)
-        # attn, indicis = quantize_activation_low_high_density_activation_index(attn, n_bits=8, quantizehigh=True, )
-        
+        attn = attn.softmax(dim=-1) # B * nHead, H * W, H * W
+     
+        attn, indices = quantize_activation_low_high_density_activation_index(attn, n_bits=self.n_bits_act,percent=self.percent, quantizehigh=True, )
+        # import ipdb; ipdb.set_trace()
+       
+        v=quantize_activation_low_high_density_activation_index(v, n_bits=self.n_bits_act, percent=self.percent, quantizehigh=True, indices=indices)[0]
+      
         x = (attn @ v).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
         x = self.proj(x)
 
         return x
 
-def replace_attention_with_quantized(model):
+def replace_attention_with_quantized(model, percent=50, n_bits=4):
     device = next(model.parameters()).device
     for i, block in enumerate(model.image_encoder.blocks[:]):
         original_attn = block.attn
@@ -63,6 +75,7 @@ def replace_attention_with_quantized(model):
             use_rel_pos=use_rel_pos,
             input_size=input_size
         )
+        custom_attn.take_values(percent, n_bits, n_bits)
         custom_attn.to(device)
         # Copy weights from original attention
         custom_attn.qkv.weight.data = original_attn.qkv.weight.data.to(device)

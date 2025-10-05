@@ -554,13 +554,13 @@ class Hq44kSamEngine(Engine):
 
         dataset_hrsod_val = {"name": "HRSOD",
                     "im_dir": "./data/thin_object_detection/HRSOD/images",
-                    "gt_dir": "./data/thin_object_detection/HRSOD/masks_max255",
+                    "gt_dir": "./data/thin_object_detection/HRSOD/masks",
                     "im_ext": ".jpg",
                     "gt_ext": ".png"}
 
         dataset_thin_val = {"name": "ThinObject5k-TE",
-                    "im_dir": "./data/thin_object_detection/ThinObject5K/images_test",
-                    "gt_dir": "./data/thin_object_detection/ThinObject5K/masks_test",
+                    "im_dir": "./data/thin_object_detection/ThinObject5K/images",
+                    "gt_dir": "./data/thin_object_detection/ThinObject5K/masks",
                     "im_ext": ".jpg",
                     "gt_ext": ".png"}
 
@@ -573,7 +573,8 @@ class Hq44kSamEngine(Engine):
         self.train_datasets = [dataset_dis, dataset_thin, dataset_fss, dataset_duts, dataset_duts_te, dataset_ecssd, dataset_msra]
         self.valid_datasets = [
             dataset_dis_val, dataset_coift_val, 
-            # dataset_hrsod_val, dataset_thin_val
+            # dataset_hrsod_val,
+            #  dataset_thin_val
         ] 
 
         
@@ -656,6 +657,8 @@ class Hq44kSamEngine(Engine):
             progress_bar = tqdm(total=len(valid_dataloader), desc=f"Validating {self.valid_datasets[k]['name']}")
             start = time.time()
             for i,data_val in enumerate(metric_logger.log_every(valid_dataloader, 2)):
+                if i >5:
+                    break
                 _, inputs_val, labels_val, _, labels_ori = data_val['imidx'], data_val['image'], data_val['label'], data_val['shape'], data_val['ori_label']
                 # prepare image & prompts 
                 if torch.cuda.is_available():
