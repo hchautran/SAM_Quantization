@@ -3,18 +3,18 @@
 
 #!/bin/bash
 
-YAML_FILE="./quant/config/hq44k/centerQ.yaml"
+YAML_FILE="./quant/config/hq44k/quarot.yaml"
 PYTHON_SCRIPT="quant/hq44k_engine_quan.py"
 CUDA_DEVICE=2
-MASTER_PORT=29500
+MASTER_PORT=29502
 
 # Bit combinations to test
-declare -a BIT_COMBINATIONS=("4,4" )
+declare -a BIT_COMBINATIONS=("4,8" "4,6" "3,8")
 
 # Function to update YAML
 update_yaml_bits() {
-    sed -i "s/n_bits: [0-9]*/n_bits: $1/" "$YAML_FILE"
-    sed -i "s/n_bits_mlp: [0-9]*/n_bits_mlp: $2/" "$YAML_FILE"
+    sed -i '/rtn_ro_config:/,/^[^[:space:]]/ s/n_bits: [0-9]*/n_bits: '$1'/' "$YAML_FILE"
+    sed -i '/rtn_ro_config:/,/^[^[:space:]]/ s/n_bits_mlp: [0-9]*/n_bits_mlp: '$2'/' "$YAML_FILE"
 }
 
 # Run experiments

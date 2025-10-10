@@ -1,12 +1,10 @@
 model:
-  model_type: vit_l
-  checkpoint: ./pretrained_checkpoint/sam_vit_l_0b3195.pth
-  seed: 42
-  output: ./output/hq44k/base_l
-  restore_model:  ./pretrained_checkpoint/epoch_11.pth 
-  device: cuda
-
-plot_distribution: True
+    model_type: vit_l
+    checkpoint: ./pretrained_checkpoint/sam_vit_l_0b3195.pth
+    seed: 42
+    output: ./output/hq44k/base_l
+    restore_model: ./pretrained_checkpoint/epoch_11.pth
+    device: cuda
 
 quantization:
   quandecoder: False
@@ -20,14 +18,18 @@ quantization:
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 4
-  n_bits_mlp: 4 #
+  n_bits_mlp: 6
   quantize_output: False
+  checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
+  seed: 42
+  output: ./output/hq44k/base_l
+  restore_model: work_dirs/hq_sam_vit_l/epoch_11.pth
   low_high_density: none
-  qkT_v: True #  use qkT_v in quarot_inf for real, should be the same with with quarot_inf.qkT_v for correct log file
-  channel: False
+  qkT_v: True
+  channel: True
   percent: 100
   up_down_RTN: none
-  centerQ: False
+  centerQ: True
 
 quarot_inf:
   hidden_size_image_en: 1024
@@ -41,25 +43,10 @@ quarot_inf:
   
 rtn_ro_config:
   n_bits: 4
-  n_bits_mlp: 8
+  n_bits_mlp: 6
   act_quant: per_token
   weight_quant: per_channel
   group_size: 64
   quantize_output: False
   quantize_input: True
   qkT_v: True
-gptq:
-  blocksize: 128
-  device: cuda
-  nsamples: 128
-  w_bits: 4
-  ac_bits: 4
-  act_quant: per_token
-  quantize_output: True
-  quantize_input: True
-  group_size: 64
-  w_asym: False
-  w_clip: False
-  w_groupsize: -1
-  percdamp: 0.01
-  act_order: False

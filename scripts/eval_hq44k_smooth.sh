@@ -3,13 +3,13 @@
 
 #!/bin/bash
 
-YAML_FILE="./quant/config/hq44k/centerQ.yaml"
+YAML_FILE="./quant/config/hq44k/smooth.yaml"
 PYTHON_SCRIPT="quant/hq44k_engine_quan.py"
 CUDA_DEVICE=2
 MASTER_PORT=29500
 
 # Bit combinations to test
-declare -a BIT_COMBINATIONS=("4,4" )
+declare -a BIT_COMBINATIONS=("4,4")
 
 # Function to update YAML
 update_yaml_bits() {

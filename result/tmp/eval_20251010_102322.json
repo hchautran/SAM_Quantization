@@ -1,0 +1,1 @@
+{"config": "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/configmmdet/yolo_l-sam-vit-l.py", "metric": {"segm_mAP": 0.349, "segm_mAP_50": 0.576, "segm_mAP_75": 0.364, "segm_mAP_s": 0.207, "segm_mAP_m": 0.391, "segm_mAP_l": 0.475, "segm_mAP_copypaste": "0.349 0.576 0.364 0.207 0.391 0.475"}}

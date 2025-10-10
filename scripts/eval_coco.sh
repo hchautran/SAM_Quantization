@@ -2,11 +2,10 @@
 # CUDA_VISIBLE_DEVICES=5 torchrun --nproc_per_node=1 --master_port=29508 quant/hq44k_engine_quan.py 
 
 #!/bin/bash
-
-YAML_FILE="./quant/config/hq44k/centerQ.yaml"
-PYTHON_SCRIPT="quant/hq44k_engine_quan.py"
-CUDA_DEVICE=2
-MASTER_PORT=29500
+YAML_FILE="./quant/config/coco/base_h.yaml"
+PYTHON_SCRIPT="quant/seginw_engine_quan.py"
+CUDA_DEVICE=1
+MASTER_PORT=29409
 
 # Bit combinations to test
 declare -a BIT_COMBINATIONS=("4,4" )
@@ -15,6 +14,8 @@ declare -a BIT_COMBINATIONS=("4,4" )
 update_yaml_bits() {
     sed -i "s/n_bits: [0-9]*/n_bits: $1/" "$YAML_FILE"
     sed -i "s/n_bits_mlp: [0-9]*/n_bits_mlp: $2/" "$YAML_FILE"
+    sed -i '/rtn_ro_config:/,/^[^[:space:]]/ s/n_bits: [0-9]*/n_bits: '$1'/' "$YAML_FILE"
+    sed -i '/rtn_ro_config:/,/^[^[:space:]]/ s/n_bits_mlp: [0-9]*/n_bits_mlp: '$2'/' "$YAML_FILE"
 }
 
 # Run experiments
@@ -27,6 +28,6 @@ for combination in "${BIT_COMBINATIONS[@]}"; do
     CUDA_VISIBLE_DEVICES=$CUDA_DEVICE torchrun \
         --nproc_per_node=1 \
         --master_port=$MASTER_PORT \
-        $PYTHON_SCRIPT --config $YAML_FILE
+        $PYTHON_SCRIPT 
 
 done

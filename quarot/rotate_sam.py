@@ -64,41 +64,59 @@ def show_res_multi(masks, scores, input_point, input_label, input_box, filename,
     plt.savefig(filename +'.png',bbox_inches='tight',pad_inches=-0.1)
     plt.close()
 
-def rotate_sam(sam_model, args, rtn_ro_config,decoder= False):
+def rotate_sam(sam_model, args, rtn_ro_config,decoder= False , centerQ = False): # if centerQ just rotate the mlp layer (do not rotate attention layer)
     sam_model.eval()
     Q_image_encoder = rotation_utils.get_orthogonal_matrix(args.hidden_size_image_en,args.rotate_mode,device = args.device,seed=args.seed)
     Q_mask_decoder = rotation_utils.get_orthogonal_matrix(args.hidden_size_mask_de,args.rotate_mode,device = args.device,seed=args.seed+1)
     if not decoder:
         # rotation_utils.fuse_layer_norms_sam(sam_model)  
-        rotation_utils.rotate_model(sam_model,Q_image_encoder, Q_mask_decoder , args)  
+        rotation_utils.rotate_model(sam_model,Q_image_encoder, Q_mask_decoder , args,rtn_ro_config, centerQ)  
         utils_q.cleanup_memory(verbos=True)
-        utils_q.add_actquant(sam_model,rtn_ro_config=rtn_ro_config) 
+        utils_q.add_actquant(sam_model,rtn_ro_config=rtn_ro_config, centerQ= centerQ) 
         qlayers = utils_q.find_qlayers(sam_model)
+     
         for name in qlayers:
-            if ("lin2" in name) and  not ("final_attn" in name): 
-                if "mask_decoder" in name:  
-                    intermidiate_size = sam_model.mask_decoder.transformer.layers[0].mlp.lin2.weight.shape[1]
-                elif "image_encoder" in name:
-                    intermidiate_size = sam_model.image_encoder.blocks[0].mlp.lin2.weight.shape[1]
-                had_K, K = hadamard_utils.get_hadK(intermidiate_size)
-                qlayers[name].online_full_had = True
-                qlayers[name].had_K = had_K
-                qlayers[name].K = K
-                qlayers[name].fp32_had = args.fp32_had
-            if 'image_encoder' in name and "proj"  in name:  
-                had_K, K = hadamard_utils.get_hadK(args.num_attention_head_image_en)
-                qlayers[name].online_partial_had = True
-                qlayers[name].had_K = had_K
-                qlayers[name].K = K
-                qlayers[name].had_dim = args.hidden_size_image_en // args.num_attention_head_image_en
-                qlayers[name].fp32_had = args.fp32_had
-            if ('cross_attn' in name or "self_attn" in name) and "out_proj"  in name :  
-                had_K, K = hadamard_utils.get_hadK(args.num_attention_head_mask_de)
-                qlayers[name].online_partial_had = True
-                qlayers[name].had_K = had_K
-                qlayers[name].K = K
-                qlayers[name].had_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
-                qlayers[name].fp32_had = args.fp32_had
+            if not centerQ: 
+                if ("lin2" in name) and  not ("final_attn" in name): 
+                    if "mask_decoder" in name:  
+                        intermidiate_size = sam_model.mask_decoder.transformer.layers[0].mlp.lin2.weight.shape[1]
+                    elif "image_encoder" in name:
+                        intermidiate_size = sam_model.image_encoder.blocks[0].mlp.lin2.weight.shape[1]
+                    had_K, K = hadamard_utils.get_hadK(intermidiate_size)
+                    qlayers[name].online_full_had = True
+                    qlayers[name].had_K = had_K
+                    qlayers[name].K = K
+                    qlayers[name].fp32_had = args.fp32_had
+                if 'image_encoder' in name and "proj"  in name:  
+                    had_K, K = hadamard_utils.get_hadK(args.num_attention_head_image_en)
+                    qlayers[name].online_partial_had = True
+                    qlayers[name].had_K = had_K
+                    qlayers[name].K = K
+                    qlayers[name].had_dim = args.hidden_size_image_en // args.num_attention_head_image_en
+                    qlayers[name].fp32_had = args.fp32_had
+                if ('cross_attn' in name or "self_attn" in name) and "out_proj"  in name :  
+                    had_K, K = hadamard_utils.get_hadK(args.num_attention_head_mask_de)
+                    qlayers[name].online_partial_had = True
+                    qlayers[name].had_K = had_K
+                    qlayers[name].K = K
+                    qlayers[name].had_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
+                    qlayers[name].fp32_had = args.fp32_had
+            elif centerQ :  # only modify the encoder
+                if ("lin2" in name) and  not ("final_attn" in name): 
+                    if "image_encoder" in name:
+                        intermidiate_size = sam_model.image_encoder.blocks[0].mlp.lin2.weight.shape[1]
+                        had_K, K = hadamard_utils.get_hadK(intermidiate_size)
+                        qlayers[name].online_full_had = True
+                        qlayers[name].had_K = had_K
+                        qlayers[name].K = K
+                        qlayers[name].fp32_had = args.fp32_had
+                if 'image_encoder' in name and "proj"  in name:  
+                    had_K, K = hadamard_utils.get_hadK(args.num_attention_head_image_en)
+                    qlayers[name].online_partial_had = True
+                    qlayers[name].had_K = had_K
+                    qlayers[name].K = K
+                    qlayers[name].had_dim = args.hidden_size_image_en // args.num_attention_head_image_en
+                    qlayers[name].fp32_had = args.fp32_had
     else:
         rotation_utils.rotate_decoder(sam_model, Q_mask_decoder, args)  
         utils_q.cleanup_memory(verbos=True)

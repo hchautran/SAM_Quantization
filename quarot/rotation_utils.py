@@ -134,7 +134,7 @@ def get_orthogonal_matrix(size, mode, device,seed):
 
     
 @torch.inference_mode()
-def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
+def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args,centerQ):
     """
     Rotate the weights of the SAM model using the rotation matrix Q.
     
@@ -157,10 +157,11 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
         
         W = block.mlp.lin2
         apply_exact_had_to_linear(W, had_dim=-1, output=False)  # Apply exact (inverse) hadamard
-    
-    for layer in model.mask_decoder.transformer.layers:
-        W= layer.mlp.lin2
-        apply_exact_had_to_linear(W, had_dim=-1, output=False)
+    if not centerQ:
+        
+        for layer in model.mask_decoder.transformer.layers:
+            W= layer.mlp.lin2
+            apply_exact_had_to_linear(W, had_dim=-1, output=False)
    
 
     # rotate qv projections
@@ -199,15 +200,15 @@ def rotate_model_sam(model, Q_image_encoder, Q_mask_decoder,args):
             # k_proj_temp = torch.nn.Linear(embed_dim, embed_dim, bias=False)
             # k_proj_temp.weight.data = qkv_weight[q_end:2 * embed_dim, :].clone()
             # apply_exact_had_to_linear(k_proj_temp, had_dim=-1, output=False)
-
-    head_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
-    for layer in model.mask_decoder.transformer.layers:
-        apply_exact_had_to_linear(layer.self_attn.v_proj, had_dim=head_dim, output=True)
-        apply_exact_had_to_linear(layer.self_attn.out_proj, had_dim=-1, output=False)
-        apply_exact_had_to_linear(layer.cross_attn_token_to_image.v_proj, had_dim=head_dim, output=True)
-        apply_exact_had_to_linear(layer.cross_attn_token_to_image.out_proj, had_dim=-1, output=False)
-        apply_exact_had_to_linear(layer.cross_attn_image_to_token.v_proj, had_dim=head_dim, output=True)
-        apply_exact_had_to_linear(layer.cross_attn_image_to_token.out_proj, had_dim=-1, output=False)
+    if not centerQ:
+        head_dim = args.hidden_size_mask_de // args.num_attention_head_mask_de
+        for layer in model.mask_decoder.transformer.layers:
+            apply_exact_had_to_linear(layer.self_attn.v_proj, had_dim=head_dim, output=True)
+            apply_exact_had_to_linear(layer.self_attn.out_proj, had_dim=-1, output=False)
+            apply_exact_had_to_linear(layer.cross_attn_token_to_image.v_proj, had_dim=head_dim, output=True)
+            apply_exact_had_to_linear(layer.cross_attn_token_to_image.out_proj, had_dim=-1, output=False)
+            apply_exact_had_to_linear(layer.cross_attn_image_to_token.v_proj, had_dim=head_dim, output=True)
+            apply_exact_had_to_linear(layer.cross_attn_image_to_token.out_proj, had_dim=-1, output=False)
 def rotate_decoder(decoder,Q_mask_decoder,args):
     for layer in decoder.transformer.layers:
         W= layer.mlp.lin2
@@ -241,7 +242,7 @@ def matmul_hadU_cuda_had(X, hadK, transpose=False):
         X.shape) 
 
 # @torch.inference_mode()
-def rotate_model(model, Q_image_encoder,Q_mask_decoder, args):
+def rotate_model(model, Q_image_encoder,Q_mask_decoder, args, rtn_ro_config, centerQ= False):
     
     
     target_device = torch.device(args.device)
@@ -402,12 +403,13 @@ def rotate_model(model, Q_image_encoder,Q_mask_decoder, args):
             custom_attn.rel_pos_w = original_attn.rel_pos_w
         
         # Set Q matrix
-        custom_attn._take_Q(Q_image_encoder)
+        custom_attn._take_Q(Q_image_encoder,rtn_ro_config.qkT_v, rtn_ro_config.n_bits)
         custom_mlp._take_Q(Q_image_encoder)
-        block.attn = custom_attn
+        if not centerQ:
+            block.attn = custom_attn
         block.mlp = custom_mlp
     
-    rotate_model_sam(model,Q_image_encoder,Q_mask_decoder,args)
+    rotate_model_sam(model,Q_image_encoder,Q_mask_decoder,args,centerQ)
     # utils.cleanup_memory()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

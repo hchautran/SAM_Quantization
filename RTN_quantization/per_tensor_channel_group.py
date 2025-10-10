@@ -248,56 +248,11 @@ def quantize_activation_low_high_density_activation_index(
     original_shape = t.shape
     original_dtype = t.dtype
 
-    # Determine if input is attention map or value matrix
-    # if len(t.shape) == 3 and t.shape[1] == t.shape[2]:
-    #     # Attention map case: (B*nHead, H*W, H*W)
-    #     B_nHead, HW, HW2 = t.shape
-    #     output = t.clone()
-    #     all_indices = []
 
-    #     # Process each batch/head separately
-    #     for b in range(B_nHead):
-    #         attn_b = t[b]  # (H*W, H*W)
-
-    #         # Calculate density for each channel (column)
-    #         attn_norm = F.normalize(attn_b, p=2, dim=0)
-    #         channel_similarity = torch.mm(attn_norm.t(), attn_norm)
-    #         density_scores = F.elu(channel_similarity - 0.9, alpha=0)
-    #         channel_density = density_scores.mean(dim=0)
-
-    #         # Sort and select indices for this batch/head
-    #         _, sorted_indices = torch.sort(channel_density, descending=True)
-    #         num_to_quantize = int(HW * (percent / 100.0))
-
-    #         if quantizehigh:
-    #             selected_indices = sorted_indices[:num_to_quantize]
-    #         else:
-    #             selected_indices = sorted_indices[-num_to_quantize:]
-
-    #         # Create mask
-    #         mask = torch.zeros(HW, dtype=torch.bool, device=t.device)
-    #         mask[selected_indices] = True
-    #         # import ipdb; ipdb.set_trace()
-    #         # Quantize selected channels
-    #         channels_to_quantize = attn_b[:, mask]
-    #         if channels_to_quantize.numel() > 0:
-    #             scales = channels_to_quantize.abs().max(dim=0, keepdim=True)[0]
-    #             q_max = 2 ** (n_bits - 1) - 1
-    #             scales.clamp_(min=1e-5).div_(q_max)
-    #             output[b, :, mask] = (channels_to_quantize / scales).round() * scales
-
-    #         # Store indices with batch offset
-    #         batch_indices = selected_indices + b * HW
-    #         all_indices.append(batch_indices)
-    #     import ipdb; ipdb.set_trace()
-    #     indices = torch.cat(all_indices)
-    #     return output.to(original_dtype), indices
-    if len(t.shape) == 3 and t.shape[1] == t.shape[2]:
+    if len(t.shape) == 3 and t.shape[1] == t.shape[2]: # Attention matrix case: (B*nHead, HW, HW)
         B_nHead, HW, _ = t.shape
         output = t.clone()
 
-        # Vectorized density calculation for all batches/heads at once
-        # Normalize along dim=1 (rows) for each attention map
         attn_norm = F.normalize(t, p=2, dim=1)
 
         # Compute channel similarity for all batches: (B*nHead, HW, HW)
@@ -306,9 +261,6 @@ def quantize_activation_low_high_density_activation_index(
         # Apply ELU and compute density scores
         density_scores = F.elu(channel_similarity - 0.9, alpha=0)
         channel_density = density_scores.mean(dim=2)  # (B*nHead, HW)
-        
-
-        # Sort indices for each batch/head
         _, sorted_indices = torch.sort(channel_density, dim=1, descending=True)
 
         # Calculate number of channels to quantize
@@ -329,10 +281,9 @@ def quantize_activation_low_high_density_activation_index(
         # First, we need to gather the selected channels
         mask_expanded = mask.unsqueeze(1).expand(-1, HW, -1)  # (B*nHead, HW, HW)
         channels_to_quantize = output[mask_expanded].view(B_nHead, HW, -1)  # (B*nHead, HW, num_to_quantize)
-    
         if channels_to_quantize.numel() > 0:
             # Calculate scales for each selected channel
-            scales = channels_to_quantize.abs().max(dim=1, keepdim=True)[0]  # (B*nHead, 1, num_to_quantize)
+            scales = channels_to_quantize.abs().max(dim=2, keepdim=True)[0]  # (B*nHead, 1, num_to_quantize)
             q_max = 2 ** (n_bits - 1) - 1
             scales.clamp_(min=1e-5).div_(q_max)
 
@@ -341,34 +292,34 @@ def quantize_activation_low_high_density_activation_index(
         
             # Put quantized values back
             output[mask_expanded] = quantized_channels.view(-1)
-            
-        # Create global indices with batch offset
-        batch_offsets = torch.arange(B_nHead, device=t.device).unsqueeze(1) * HW
-        global_indices = selected_indices + batch_offsets
-        indices = global_indices.view(-1)
+        
        
-        return output.to(original_dtype), indices
+        return output.to(original_dtype), selected_indices # selected_indices: (B*nHead, num_to_quantize)
 
     elif len(t.shape) == 3 and indices is not None:
-
         # Value matrix case: (B*nHead, H*W, C)
         B_nHead, HW, C = t.shape
-
-        # Create mask for tokens to quantize
-        token_mask = torch.zeros(B_nHead * HW, dtype=torch.bool, device=t.device)
-        token_mask[indices] = True
-
-
-        t_flat = t.contiguous().view(B_nHead * HW, C)
-        output = t_flat.clone()
-
-        # Quantize selected tokens
-        tokens_to_quantize = t_flat[token_mask]
+        # indices shape of (B*nHead, num_to_quantize)
+        num_to_quantize = indices.shape[1]
+        
+        output = t.clone()
+        
+        # Create batch indices for advanced indexing
+        batch_indices = torch.arange(B_nHead, device=t.device).unsqueeze(1)  # (B*nHead, 1)
+        # import ipdb; ipdb.set_trace()
+        # Extract tokens to quantize using advanced indexing
+        tokens_to_quantize = t[batch_indices, indices]  # (B*nHead, num_to_quantize, C)
         if tokens_to_quantize.numel() > 0:
-            scales = tokens_to_quantize.abs().max(dim=-1, keepdim=True)[0]
+            # Calculate scales across the num_to_quantize dimension (dim=1)
+            scales = tokens_to_quantize.abs().max(dim=1, keepdim=True)[0]  # (B*nHead, 1, C)
             q_max = 2 ** (n_bits - 1) - 1
             scales.clamp_(min=1e-5).div_(q_max)
-            output[token_mask] = (tokens_to_quantize / scales).round() * scales
+            
+            # Quantize
+            quantized_tokens = (tokens_to_quantize / scales).round() * scales
+            
+            # Put quantized values back
+            output[batch_indices, indices] = quantized_tokens
 
         return output.view(original_shape).to(original_dtype), indices
 

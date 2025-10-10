@@ -43,7 +43,7 @@ test_pipeline = [
 ]
 
 dataset_type = 'CocoDataset'
-data_root = '/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/data/coco/'
+data_root = '/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/data_/coco/'
 
 data = dict(
     samples_per_gpu=4,
