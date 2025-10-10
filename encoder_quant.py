@@ -55,7 +55,6 @@ class AttentionObserver(Attention):
         bias = self.qkv.bias[None, None, ...]
         x_mean = x.mean(1, keepdim=True)
         x_hat= (x - x_mean)
-        # qkv     = self.qkv(x)       # shape: (B, H*W, 3*num_heads*dim)
         qkv_hat = self.qkv(x_hat)
         qkv_mean = self.qkv(x_mean) - bias
 
@@ -66,12 +65,14 @@ class AttentionObserver(Attention):
         q_hat, k_hat, v_hat = qkv_hat.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
         q_mean, _, v_mean = qkv_mean.reshape(3, B * self.num_heads, 1, -1).unbind(0)
         if ImageEncoderViTObserver.debug:
+            qkv   = self.qkv(x)       # shape: (B, H*W, 3*num_heads*dim)
             qkv = qkv.reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
             # Assert that q_ori = q + q_mean (and similarly for k, v)
             assert torch.allclose(q, q_hat+q_mean, rtol=1e-4, atol=1e-4), "q_ori != q + q_mean"
             # assert torch.allclose(k, k_hat+k_mean, rtol=1e-4, atol=1e-4), "k_ori != k + k_mean"
             assert torch.allclose(v, v_hat+v_mean, rtol=1e-4, atol=1e-4), "v_ori != v + v_mean"
+            attn_mean = (q_mean * self.scale) @ k_hat.transpose(-2, -1)
             attn_ori = (q * self.scale) @ k.transpose(-2, -1)
 
         # q_hat = q_hat+q_mean
@@ -80,27 +81,33 @@ class AttentionObserver(Attention):
 
         # Compute attention
         attn = (q_hat * self.scale) @ k_hat.transpose(-2, -1)
-        attn_mean = (q_mean * self.scale) @ k_hat.transpose(-2, -1)
-        attn = attn + attn_mean
+        # print('got')
+        # attn = attn + attn_mean
 
         if self.use_rel_pos:
             attn = add_decomposed_rel_pos(
                 attn, q_hat+q_mean, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W)
             )
             if ImageEncoderViTObserver.debug:
+                # attn_ori = add_decomposed_rel_pos(
+                    # attn_ori, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W)
+                # )
                 attn_ori = add_decomposed_rel_pos(
                     attn_ori, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W)
                 )
 
         attn = attn.softmax(dim=-1)
         if ImageEncoderViTObserver.debug:
+            attn_mean= attn_mean.softmax(dim=-1)
             attn_ori = attn_ori.softmax(dim=-1)
         output = (
-            (attn @ (v_hat+v_mean)).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, C)
+            ((attn @ v_hat)+v_mean).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, C)
         )
         output = self.proj(output)
 
-        return output, attn, attn_mean, attn_ori, q_hat, k_hat, v_hat, q_mean, v_mean 
+        if ImageEncoderViTObserver.debug:
+            return output, attn, attn_mean, attn_ori, q_hat, k_hat, v_hat, q_mean, v_mean 
+        return output, attn, None, None, q_hat, k_hat, v_hat, q_mean, v_mean 
 
     @staticmethod
     def clear_dict():
@@ -140,7 +147,7 @@ class BlockObserver(Block):
             x, pad_hw = window_partition(x, self.window_size)
 
         # x, attn, q, k, v = self.attn(x)
-        x, attn, attn_mean, q, k, v, q_mean, v_mean = self.attn(x)
+        x, attn, attn_mean, attn_ori, q_hat, k_hat, v_hat, q_mean, v_mean  = self.attn(x)
         # Reverse window partition
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, (H, W))
@@ -148,7 +155,7 @@ class BlockObserver(Block):
         x = shortcut + x
         x = x + self.mlp(self.norm2(x))
 
-        return  x, attn, attn_mean, q, k, v, q_mean, v_mean
+        return  x, attn, attn_mean, attn_ori, q_hat, k_hat, v_hat, q_mean, v_mean 
 
 
 class ImageEncoderViTObserver(ImageEncoderViT):
@@ -179,15 +186,16 @@ class ImageEncoderViTObserver(ImageEncoderViT):
         for idx, blk in enumerate(self.blocks):
             if ImageEncoderViTObserver.debug:
                 ImageEncoderViTObserver.attention_score[f"block_{idx}_x"].append(to_numpy(x))
-            x, attn, attn_mean, q, k, v, q_mean, v_mean = blk(x)
+            x, attn, attn_mean, attn_ori, q_hat, k_hat, v_hat, q_mean, v_mean  = blk(x)
 
             # Store attention information
             if ImageEncoderViTObserver.debug:
                 ImageEncoderViTObserver.attention_score[f"block_{idx}_attn"].append(to_numpy(attn))
                 ImageEncoderViTObserver.attention_score[f"block_{idx}_attn_mean"].append(to_numpy(attn_mean))
-                ImageEncoderViTObserver.attention_score[f"block_{idx}_q"].append(to_numpy(q))
-                ImageEncoderViTObserver.attention_score[f"block_{idx}_k"].append(to_numpy(k))
-                ImageEncoderViTObserver.attention_score[f"block_{idx}_v"].append(to_numpy(v))
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_attn_ori"].append(to_numpy(attn_ori))
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_q_hat"].append(to_numpy(q_hat))
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_k_hat"].append(to_numpy(k_hat))
+                ImageEncoderViTObserver.attention_score[f"block_{idx}_v_hat"].append(to_numpy(v_hat))
                 ImageEncoderViTObserver.attention_score[f"block_{idx}_q_mean"].append(to_numpy(q_mean))
                 ImageEncoderViTObserver.attention_score[f"block_{idx}_v_mean"].append(to_numpy(v_mean))
 
