@@ -180,7 +180,7 @@ class ActQuantWrapper(torch.nn.Module):
         a pre-forward hook will be registered to rotate the activation before quantization.
     '''
 
-    def __init__(self, module: torch.nn.Linear, act_quant="non",weight_quant ="non", n_bit =8, group_size=None):
+    def __init__(self, module: torch.nn.Linear, act_quant="none",weight_quant ="none", n_bit =8, group_size=None):
         super(ActQuantWrapper, self).__init__()
         assert isinstance(module, torch.nn.Linear)
         self.module = module
@@ -209,13 +209,16 @@ class ActQuantWrapper(torch.nn.Module):
         self.fp32_had = False
         self.quantize_output = False
         self.quantize_input = False
-        
+        self.in_features= module.in_features
+        self.out_features= module.out_features
         if weight_quant == "per_channel":
             self.module.weight.data = quantize_weight_per_channel_absmax(self.module.weight.data, n_bits=self.n_bits)
         elif weight_quant == "per_tensor":  
             self.module.weight.data = quantize_weight_per_tensor_absmax(self.module.weight.data, n_bits=self.n_bits)
         elif weight_quant == "per_group":
             self.module.weight.data = quantize_weight_per_group_absmax_input_features(self.module.weight.data, n_bits=self.n_bits, group_size=group_size)
+        else:
+            pass # No weight quantization
         self.weight = self.module.weight
         self.bias = self.module.bias
         
@@ -271,7 +274,7 @@ class ActQuantWrapper(torch.nn.Module):
 
 
 def add_actquant(module, name='', layers=[torch.nn.Linear,
-                                        ActQuantWrapper],rtn_ro_config=None):
+                                        ActQuantWrapper],rtn_ro_config=None, centerQ= False):
     if rtn_ro_config is None:
         if isinstance(module, ActQuantWrapper):
             return
@@ -300,14 +303,22 @@ def add_actquant(module, name='', layers=[torch.nn.Linear,
     else:
         if isinstance(module, ActQuantWrapper):
             return
-        n_bits = rtn_ro_config.n_bits
-        weight_quant = rtn_ro_config.weight_quant
+        if centerQ and "decoder" in name :
+            return
+        if "mlp" in name:
+            n_bits = rtn_ro_config.n_bits_mlp
+        else:
+            n_bits= rtn_ro_config.n_bits
         act_quant = rtn_ro_config.act_quant
         group_size = rtn_ro_config.group_size
         quantize_output = rtn_ro_config.quantize_output
         quantize_input  = rtn_ro_config.quantize_input
+        weight_quant = rtn_ro_config.weight_quant
         for attr in dir(module):
             tmp = getattr(module, attr)
+            if centerQ and "attn" in name:
+                if type(tmp) in layers and "qkv" in attr:
+                    continue
             if type(tmp) in layers:
                 setattr(module, attr, ActQuantWrapper(
                     tmp, 
@@ -363,7 +374,7 @@ def add_actquant(module, name='', layers=[torch.nn.Linear,
                 setattr(module, attr, torch.nn.ModuleList(replaced))
                 
         for name1, child in module.named_children():
-            add_actquant(child, name + '.' + name1 if name != '' else name1, layers, rtn_ro_config)
+            add_actquant(child, name + '.' + name1 if name != '' else name1, layers, rtn_ro_config,centerQ)
         
 def find_qlayers(module, layers=[torch.nn.Linear,
                                 ActQuantWrapper], name=''):

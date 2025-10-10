@@ -5,20 +5,24 @@ from functools import  partial
 import os
 import logging
 import time
+from typing import Optional
 from train.utils.dataloader import get_im_gt_name_dict, Resize
 from abc import abstractmethod
 from data_utils import OnlineDataset
 from torchvision import transforms
 from segment_anything.modeling.transformer import TwoWayAttentionBlock, TwoWayTransformer, Attention
+from train.segment_anything_training.modeling.image_encoder import Attention as Attention_
+from seginw.segment_anything.modeling.image_encoder import Attention as Attention__
 from torch.utils.data import DataLoader
 from data_utils import OnlineDataset
 from segment_anything import SamPredictor, sam_model_registry
+from seginw.segment_anything import SamPredictor as SamPredictor_
 from matplotlib import pyplot as plt
 from functools import partial
 from accelerate import Accelerator
 import train.utils.misc as misc
 from tqdm.auto import tqdm
-from utils import show_mask_image
+# from utils import show_mask_image
 from collections import defaultdict
 
 
@@ -94,8 +98,8 @@ class ProcessStrategy():
         self.stat = {}
         dataset_dis = {
             "name": "DIS5K-VD",
-            "im_dir": "./data/DIS5K/DIS-VD/im",
-            "gt_dir": "./data/DIS5K/DIS-VD/gt",
+            "im_dir": "./data_/DIS5K/DIS-VD/im",
+            "gt_dir": "./data_/DIS5K/DIS-VD/gt",
             "im_ext": ".jpg",
             "gt_ext": ".png"
         }
@@ -147,7 +151,7 @@ class ProcessStrategy():
 
         # Default: register hooks for decoder attention modules
         for name, component in predictor.model.named_modules():
-            if isinstance(component, Attention):
+            if isinstance(component, Attention) or isinstance(component, Attention_) or isinstance(component, Attention__):
                 for linear_name, m in component.named_modules():
                     if isinstance(m, nn.Linear):
                         linear_hooks.append(
@@ -175,7 +179,7 @@ class ProcessStrategy():
             hq_token_only=False
         )
 
-    def calibrate(self, predictor: SamPredictor, modules, num_samples=32):
+    def calibrate(self, predictor: SamPredictor | SamPredictor_ | None, modules, num_samples=32):
         """
         Calibrate the processor using sample images.
 
@@ -185,8 +189,9 @@ class ProcessStrategy():
             num_samples: Number of calibration samples
         """
         # Register hooks
-        linear_hooks, attn_hooks = self._register_hooks(predictor, modules)
 
+        linear_hooks, attn_hooks = self._register_hooks(predictor, modules)
+  
         logger = setup_logger('./calib_logs', self.strategy_name)
         logger.info(f'______Using: {self.strategy_name}_______')
 
@@ -480,6 +485,23 @@ class ImageEncoderProcessor(ProcessStrategy):
         super().__init__(strategy_name)
         self.stat = {}
 
+    def stat_tensor(self,name, tensor):
+        """Calculate per-channel maximum absolute values"""
+        if tensor is None or not isinstance(tensor, torch.Tensor):
+            return
+        if tensor.dim() < 2:
+            return
+        
+        hidden_dim = tensor.shape[-1]
+        tensor = tensor.view(-1, hidden_dim).abs().detach()
+        current_max = torch.max(tensor, dim=0)[0].float().cpu()
+        
+        if name in self.stat:
+            self.stat[name]["act_scales"] = torch.max(self.stat[name]["act_scales"], current_max)
+        else:
+            self.stat[name] = defaultdict()
+            self.stat[name]['act_scales'] = current_max
+
     def stat_linear(self, X, Y: torch.Tensor, name, linear_name):
         """
         Collect statistics for linear layers (QKV projections).
@@ -490,9 +512,14 @@ class ImageEncoderProcessor(ProcessStrategy):
             name: Module name
             linear_name: Linear layer name (e.g., 'qkv', 'proj')
         """
-        if name not in self.stat:
-            self.stat[name] = defaultdict()
+        # if x is None:
+        #     return
+
+        self.stat_tensor(name, X)
+        # if name not in self.stat:
+            
         self.stat[name][linear_name] = Y
+        self.stat[name]["input"+linear_name] = X
 
     def _separate_heads_encoder(self, qkv: torch.Tensor, num_heads: int):
         """
@@ -563,10 +590,12 @@ class ImageEncoderProcessor(ProcessStrategy):
 
         # Register hooks for image encoder blocks
         for name, component in predictor.model.image_encoder.named_modules():
-            if isinstance(component, Attention):
+        # for name, component in predictor.image_encoder.named_modules():
+            if isinstance(component, Attention) or isinstance(component, Attention_)or isinstance(component, Attention__):
                 # Hook the QKV linear layer
                 for linear_name, m in component.named_modules():
                     if isinstance(m, nn.Linear) and linear_name == 'qkv':
+                        print(f"Registering hook for {name}.{linear_name}")
                         linear_hooks.append(
                             m.register_forward_hook(
                                 partial(stat_linear_hook, name=name, linear_name=linear_name)

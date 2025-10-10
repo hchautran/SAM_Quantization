@@ -18,9 +18,9 @@ quantization:
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 4
-  quantize_output: True
-  checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
-  seed: 42
-  output: ./output/hq44k/base_l
-  restore_model: work_dirs/hq_sam_vit_l/epoch_11.pth
+  n_bits_mlp: 4
+  quantize_output: False
   low_high_density: none
+  qkT_v: False
+  up_down_RTN: none
+  centerQ: False

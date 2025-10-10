@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .Smooth import smooth_ln_fcs
+from Smooth import smooth_ln_fcs
 from matplotlib import pyplot as plt
 from dataclasses import dataclass
 from typing import Optional
@@ -9,6 +9,8 @@ from typing import Optional
 import os
 import sys
 import numpy as np
+from segment_anything.modeling.image_encoder import Attention
+from per_tensor_channel_group import quantize_activation_low_high_density_activation_index, quantize_activation_per_token_absmax, quantize_weight_per_channel_absmax
 # Add the sam-hq directory to Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)  # Go up to SAM_Quantization
@@ -17,6 +19,118 @@ sam_hq_path = os.path.join(project_root, "sam-hq")
 sys.path.insert(0, sam_hq_path)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+class AttentionQ(Attention):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.percent=50
+        self.n_bits_act=4
+        self.n_bits_w= 4
+    def take_values(self, percent, n_bits_act, n_bits_w):
+        self.percent= percent
+        self.n_bits_act= n_bits_act
+        self.n_bits_w= n_bits_w
+
+    def forward(self, x: torch.Tensor) :
+        B, H, W, _ = x.shape
+        # qkv with shape (3, B, nHead, H * W, C)
+        qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        # q, k, v with shape (B * nHead, H * W, C)
+        q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
+
+        attn = (q * self.scale) @ k.transpose(-2, -1)
+
+        if self.use_rel_pos:
+            from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
+            attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+        # quantize attn and v
+        
+        attn = attn.softmax(dim=-1) # B * nHead, H * W, H * W
+     
+        attn, indices = quantize_activation_low_high_density_activation_index(attn, n_bits=self.n_bits_act,percent=self.percent, quantizehigh=True, )
+        # import ipdb; ipdb.set_trace()
+       
+        v=quantize_activation_low_high_density_activation_index(v, n_bits=self.n_bits_act, percent=self.percent, quantizehigh=True, indices=indices)[0]
+      
+        x = (attn @ v).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = self.proj(x)
+
+        return x
+class AttentionQ_token(Attention):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.n_bits_act=4
+
+    def take_values(self,  n_bits_act):
+        self.n_bits_act= n_bits_act
+
+
+    def forward(self, x: torch.Tensor) :
+        B, H, W, _ = x.shape
+        # qkv with shape (3, B, nHead, H * W, C)
+        qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        # q, k, v with shape (B * nHead, H * W, C)
+        q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
+
+        attn = (q * self.scale) @ k.transpose(-2, -1)
+
+        if self.use_rel_pos:
+            from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
+            attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+        # quantize attn and v
+        
+        attn = attn.softmax(dim=-1) # B * nHead, H * W, H * W
+        # import ipdb; ipdb.set_trace()
+   
+        attn = quantize_activation_per_token_absmax(attn, n_bits=self.n_bits_act)
+       
+        v = quantize_weight_per_channel_absmax(v.permute(0, 2, 1), n_bits=self.n_bits_act).permute(0, 2, 1)
+      
+        x = (attn @ v).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = self.proj(x)
+
+        return x
+def replace_attention_with_quantized(model, channel = True ,percent=50, n_bits=4):
+    device = next(model.parameters()).device
+    for i, block in enumerate(model.image_encoder.blocks[:]):
+        original_attn = block.attn
+        dim = original_attn.qkv.in_features
+        num_heads = original_attn.num_heads
+        qkv_bias = hasattr(original_attn.qkv, 'bias') and original_attn.qkv.bias is not None
+        use_rel_pos = original_attn.use_rel_pos
+        h_size = (original_attn.rel_pos_h.shape[0] + 1) // 2
+        w_size = (original_attn.rel_pos_w.shape[0] + 1) // 2
+        input_size = (h_size, w_size)
+        if channel:
+            custom_attn = AttentionQ(
+                dim=dim,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                use_rel_pos=use_rel_pos,
+                input_size=input_size
+            )
+            custom_attn.take_values(percent, n_bits, n_bits)
+        else:
+            custom_attn = AttentionQ_token(
+                dim=dim,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                use_rel_pos=use_rel_pos,
+                input_size=input_size
+            )
+            custom_attn.take_values(n_bits)
+        custom_attn.to(device)
+        # Copy weights from original attention
+        custom_attn.qkv.weight.data = original_attn.qkv.weight.data.to(device)
+        custom_attn.qkv.bias.data = original_attn.qkv.bias.data.to(device)
+        custom_attn.proj.weight.data = original_attn.proj.weight.data.to(device)
+        custom_attn.proj.bias.data = original_attn.proj.bias.data.to(device)
+        if use_rel_pos:
+            custom_attn.rel_pos_h = original_attn.rel_pos_h
+            custom_attn.rel_pos_w = original_attn.rel_pos_w
+        block.attn = custom_attn
+    import gc
+    gc.collect()
 
 @dataclass
 class QuantizationConfig:
@@ -71,7 +185,7 @@ class QuantizationConfig:
             return W8A8LinearSelectiveChannel
 
         # Density-based quantization
-        if self.act_quant == "low_high_density":
+        if self.act_quant == "low_high_density_activation":
             return W8A8LinearDensityBased
 
         # Group-based quantization
@@ -101,6 +215,7 @@ class QuantizationConfig:
             'up_down_RTN': self.up_down_RTN,
             'percent': self.percent
         }
+
 
 def replace_linear_with_quantized(
     module: nn.Module,
@@ -150,7 +265,7 @@ def replace_linear_with_quantized(
     
 
 @torch.no_grad()
-def smooth_sam(model, act_scales, do_smooth_decoder=True, alpha=0.5, num_samples=512):
+def smooth_sam(model, act_scales, do_smooth_decoder=True, alpha=0.5, num_samples=512, do_smooth_attn_encoder= True):
     """
     Apply SmoothQuant to SAM model focusing on image encoder and prompt encoder.
     
@@ -174,13 +289,14 @@ def smooth_sam(model, act_scales, do_smooth_decoder=True, alpha=0.5, num_samples
     if hasattr(model, 'image_encoder') and hasattr(model.image_encoder, 'blocks'):
         for i, block in enumerate(model.image_encoder.blocks):
             block_name = f"image_encoder.blocks.{i}"
-            # Attention smoothing: norm1 -> attn.qkv
-            if hasattr(block, 'norm1') and hasattr(block, 'attn') and hasattr(block.attn, 'qkv'):
-                qkv_name = f"{block_name}.attn.qkv"
-                if qkv_name in act_scales:
-                    qkv_input_scales = act_scales[qkv_name]
-                    smooth_ln_fcs(block.norm1, [block.attn.qkv], qkv_input_scales, alpha)
-                    print(f"Applied attention smoothing to {block_name}")
+            if do_smooth_attn_encoder:
+                # Attention smoothing: norm1 -> attn.qkv
+                if hasattr(block, 'norm1') and hasattr(block, 'attn') and hasattr(block.attn, 'qkv'):
+                    qkv_name = f"{block_name}.attn.qkv"
+                    if qkv_name in act_scales:
+                        qkv_input_scales = act_scales[qkv_name]
+                        smooth_ln_fcs(block.norm1, [block.attn.qkv], qkv_input_scales, alpha)
+                        print(f"Applied attention smoothing to {block_name}")
 
             if hasattr(block, 'norm2') and hasattr(block, 'mlp'):
                 mlp_first_layer = None

@@ -236,6 +236,92 @@ def quantize_activation_low_high_density_activation(
 
     return output.view(original_shape).to(original_dtype)
 
+@torch.no_grad()
+def quantize_activation_low_high_density_activation_index(
+    t: torch.Tensor,
+    n_bits: int = 8,
+    quantizehigh: bool = True,
+    percent: float = 50,
+    indices: Optional[torch.Tensor] = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize activations based on token density (high or low)."""
+    original_shape = t.shape
+    original_dtype = t.dtype
+
+
+    if len(t.shape) == 3 and t.shape[1] == t.shape[2]: # Attention matrix case: (B*nHead, HW, HW)
+        B_nHead, HW, _ = t.shape
+        output = t.clone()
+
+        attn_norm = F.normalize(t, p=2, dim=1)
+
+        # Compute channel similarity for all batches: (B*nHead, HW, HW)
+        channel_similarity = torch.bmm(attn_norm.transpose(1, 2), attn_norm)
+
+        # Apply ELU and compute density scores
+        density_scores = F.elu(channel_similarity - 0.9, alpha=0)
+        channel_density = density_scores.mean(dim=2)  # (B*nHead, HW)
+        _, sorted_indices = torch.sort(channel_density, dim=1, descending=True)
+
+        # Calculate number of channels to quantize
+        num_to_quantize = int(HW * (percent / 100.0))
+        
+        # Create batch indices for gathering
+        batch_indices = torch.arange(B_nHead, device=t.device).unsqueeze(1)
+
+        if quantizehigh:
+            selected_indices = sorted_indices[:, :num_to_quantize]  # (B*nHead, num_to_quantize)
+        else:
+            selected_indices = sorted_indices[:, -num_to_quantize:]  # (B*nHead, num_to_quantize)
+        # Create mask for selected channels
+        mask = torch.zeros(B_nHead, HW, dtype=torch.bool, device=t.device)
+        mask.scatter_(1, selected_indices, True)
+ 
+        # Quantize selected channels for all batches at once
+        # First, we need to gather the selected channels
+        mask_expanded = mask.unsqueeze(1).expand(-1, HW, -1)  # (B*nHead, HW, HW)
+        channels_to_quantize = output[mask_expanded].view(B_nHead, HW, -1)  # (B*nHead, HW, num_to_quantize)
+        if channels_to_quantize.numel() > 0:
+            # Calculate scales for each selected channel
+            scales = channels_to_quantize.abs().max(dim=2, keepdim=True)[0]  # (B*nHead, 1, num_to_quantize)
+            q_max = 2 ** (n_bits - 1) - 1
+            scales.clamp_(min=1e-5).div_(q_max)
+
+            # Quantize
+            quantized_channels = (channels_to_quantize / scales).round() * scales
+        
+            # Put quantized values back
+            output[mask_expanded] = quantized_channels.view(-1)
+        
+       
+        return output.to(original_dtype), selected_indices # selected_indices: (B*nHead, num_to_quantize)
+
+    elif len(t.shape) == 3 and indices is not None:
+        # Value matrix case: (B*nHead, H*W, C)
+        B_nHead, HW, C = t.shape
+        # indices shape of (B*nHead, num_to_quantize)
+        num_to_quantize = indices.shape[1]
+        
+        output = t.clone()
+        
+        # Create batch indices for advanced indexing
+        batch_indices = torch.arange(B_nHead, device=t.device).unsqueeze(1)  # (B*nHead, 1)
+        # import ipdb; ipdb.set_trace()
+        # Extract tokens to quantize using advanced indexing
+        tokens_to_quantize = t[batch_indices, indices]  # (B*nHead, num_to_quantize, C)
+        if tokens_to_quantize.numel() > 0:
+            # Calculate scales across the num_to_quantize dimension (dim=1)
+            scales = tokens_to_quantize.abs().max(dim=1, keepdim=True)[0]  # (B*nHead, 1, C)
+            q_max = 2 ** (n_bits - 1) - 1
+            scales.clamp_(min=1e-5).div_(q_max)
+            
+            # Quantize
+            quantized_tokens = (tokens_to_quantize / scales).round() * scales
+            
+            # Put quantized values back
+            output[batch_indices, indices] = quantized_tokens
+
+        return output.view(original_shape).to(original_dtype), indices
 
 # ============================================================================
 # Base W8A8Linear Class

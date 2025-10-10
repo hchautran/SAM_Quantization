@@ -134,10 +134,14 @@ class CustomAttention(OriginalAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.Q = None
+        self.qkT_v = False
+        self.n_bits_act = 8
         
-    def _take_Q(self, Q: Optional[torch.Tensor] = None):
+    def _take_Q(self, Q: Optional[torch.Tensor] = None,qkT_v: bool = False, n_bits_act: int = 8):
         if Q is not None:
             self.Q = Q
+            self.qkT_v= qkT_v
+            self.n_bits_act= n_bits_act
             
     def forward(self, x: torch.Tensor) :
         
@@ -163,7 +167,10 @@ class CustomAttention(OriginalAttention):
         if self.use_rel_pos:
             from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
             attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
-
+        if self.qkT_v:
+            from per_tensor_channel_group import quantize_activation_per_token_absmax, quantize_weight_per_channel_absmax
+            attn = quantize_activation_per_token_absmax(attn, n_bits=self.n_bits_act)
+            v = quantize_weight_per_channel_absmax(v.permute(0, 2, 1), n_bits=self.n_bits_act).permute(0, 2, 1)
         attn = attn.softmax(dim=-1)
         x = (attn @ v).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
         x = self.proj(x)

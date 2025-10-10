@@ -4,7 +4,7 @@ checkpoint_sam/
 sam-hq/
 sam2/
 segment-anything/
-data/
+data_/
 hq_ckts/
 pretrained_checkpoint/
 quarot/fast-hadamard-transform/
@@ -20,7 +20,7 @@ quant/qgemm/third-party/
 attention_utilsdebug.py
 attention_utilsdebug.ipynb
 decoder_quant.py
-
+pretrained_checkpoint.zip
 # Exclude Python cache files
 __pycache__/
 *.pyc
@@ -46,7 +46,6 @@ Thumbs.db
 *.log
 *.pt
 __pycache__/
-data/
 hq_ckts/
 pretrained_checkpoint/
 *.egg-info

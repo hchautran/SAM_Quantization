@@ -1,14 +1,15 @@
 model:
-  model_type: vit_l
-  checkpoint: ./pretrained_checkpoint/sam_vit_l_0b3195.pth
-  seed: 42
-  output: ./output/hq44k/base_l
-  restore_model:  ./pretrained_checkpoint/epoch_11.pth 
-  device: cuda
+    model_type: vit_l
+    checkpoint: ./pretrained_checkpoint/sam_vit_l_0b3195.pth
+    seed: 42
+    output: ./output/hq44k/base_l
+    restore_model: ./pretrained_checkpoint/epoch_11.pth
+    device: cuda
+
 quantization:
   quandecoder: False
   quanrtn: True
-  low_high_density: none
+  up_down_RTN: none
   quangptq: False
   quansmooth: False
   quanro: False
@@ -20,8 +21,8 @@ quantization:
   n_bits: 4
   n_bits_mlp: 4
   quantize_output: False
-  up_down_RTN: none
+  low_high_density: none
   qkT_v: True
-  channel: False
-  percent: 100
+  channel: True
+  percent: 50
   centerQ: False

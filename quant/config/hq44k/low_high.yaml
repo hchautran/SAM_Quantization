@@ -14,10 +14,15 @@ quantization:
   up_down_RTN: none
   rtn_cuda: False
   gptq_cuda: False
-  low_high_density: low
-  percent: 60 
+  low_high_density: high
+  percent: 100 
   act_scales_file: ./pretrained_checkpoint/sam_vit_lactivation_scales.pt
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 4
+  n_bits_mlp: 4 #
   quantize_output: False
+  centerQ: False
+  qkT_v: False
+  channel: False
+  percent: 100
