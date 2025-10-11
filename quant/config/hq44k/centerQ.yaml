@@ -18,7 +18,7 @@ quantization:
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 4
-  n_bits_mlp: 6
+  n_bits_mlp: 4
   quantize_output: False
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
   seed: 42
@@ -43,7 +43,7 @@ quarot_inf:
   
 rtn_ro_config:
   n_bits: 4
-  n_bits_mlp: 6
+  n_bits_mlp: 4
   act_quant: per_token
   weight_quant: per_channel
   group_size: 64

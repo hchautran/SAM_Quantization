@@ -10,19 +10,21 @@ import torch.nn as nn
 # SAM model imports
 from segment_anything import SamPredictor, sam_model_registry
 from segment_anything.modeling.image_encoder import (
-    Attention,
-    Block,
+    Attention as EncoderAttention,
+    Block as EncoderBlock,
     ImageEncoderViT,
 )
-from seginw.segment_anything.modeling.image_encoder import Attention as Attention__
-from seginw.segment_anything.modeling.image_encoder import Block as Block__
-from seginw.segment_anything.modeling.image_encoder import ImageEncoderViT as ImageEncoderViT__
-from train.segment_anything_training.modeling.image_encoder import Attention as Attention_
-from train.segment_anything_training.modeling.image_encoder import Block as block_
-from train.segment_anything_training.modeling.image_encoder import ImageEncoderViT as ImageEncoderViT_
+# from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention 
+# from seginw.segment_anything.modeling.image_encoder import Block as EncoderBlockTraining 
+# from seginw.segment_anything.modeling.image_encoder import ImageEncoderViT 
+# from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining
+# from train.segment_anything_training.modeling.image_encoder import Block as EncoderBlockTraining 
+# from train.segment_anything_training.modeling.image_encoder import ImageEncoderViT as ImageEncoderViTTraining
 # Local imports
 from quant_utils import (
-    ImageEncoderProcessor,
+    # ImageEncoderProcessor,
+    AttentionProcessor,
+    EncoderRecenterAttentionProcessor,
     quantize_activation_per_token_absmax,
 )
 from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
@@ -37,13 +39,14 @@ from segment_anything.modeling.image_encoder import (
     window_partition,
     window_unpartition,
 )
+from utils import inference_image
 
 def to_numpy(x: torch.Tensor):
     return x.detach().cpu().numpy()
 
 
 
-class AttentionObserver(Attention):
+class AttentionObserver(EncoderAttention):
 
 
     attention_score = defaultdict(list)
@@ -59,6 +62,7 @@ class AttentionObserver(Attention):
         self.qkT_v = False
         self.qkv_w_hat = None
         self.Q= None
+
     def smooth(self,alpha=0.5):
         input_qkv = self.stat['inputqkv'] # shape B , H, W , C  where C= num_heads * dim = 1024
         output_qkv = self.stat['qkv']    # shape B , H, W , 3* num_heads * dim
@@ -121,7 +125,6 @@ class AttentionObserver(Attention):
             assert torch.allclose(q, q_hat+q_mean, rtol=1e-4, atol=1e-4), "q_ori != q + q_mean"
             # assert torch.allclose(k, k_hat+k_mean, rtol=1e-4, atol=1e-4), "k_ori != k + k_mean"
             assert torch.allclose(v, v_hat+v_mean, rtol=1e-4, atol=1e-4), "v_ori != v + v_mean"
-            attn_mean = (q_mean * self.scale) @ k_hat.transpose(-2, -1)
             attn_ori = (q * self.scale) @ k.transpose(-2, -1)
         # q_hat = q_hat+q_mean
         # k_hat = k_hat+k_mean
@@ -129,9 +132,9 @@ class AttentionObserver(Attention):
 
         # Compute attention
       
+        attn_mean = (q_mean * self.scale) @ k_hat.transpose(-2, -1)
         attn = (q_hat * self.scale) @ k_hat.transpose(-2, -1)
-        # print('got')
-        # attn = attn + attn_mean
+        attn = attn + attn_mean
 
         if self.use_rel_pos:
             attn = add_decomposed_rel_pos(
@@ -154,7 +157,7 @@ class AttentionObserver(Attention):
         else:
             v= v_hat+v_mean
         if ImageEncoderViTObserver.debug:
-            attn_mean= attn_mean.softmax(dim=-1)
+            attn_mean = attn_mean.softmax(dim=-1)
             attn_ori = attn_ori.softmax(dim=-1)
         output = (
             (attn @ v).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, C)
@@ -171,7 +174,7 @@ class AttentionObserver(Attention):
         AttentionObserver.attention_score = defaultdict(list)
 
 
-class BlockObserver(Block):
+class BlockObserver(EncoderBlock):
     """
     Observer wrapper for SAM encoder Block (Transformer blocks).
 
@@ -266,6 +269,7 @@ class ImageEncoderViTObserver(ImageEncoderViT):
     def clear_dict():
         """Clear the attention score dictionary."""
         ImageEncoderViTObserver.attention_score = defaultdict(list)
+
 @torch.no_grad()
 def quantize_weight_per_channel_absmax(w: torch.Tensor, n_bits: int = 8) -> torch.Tensor:
     """Quantize weights per output channel using absolute maximum scaling."""
@@ -314,15 +318,11 @@ class nnLinear_qkv_hat(nn.Linear):
         
         # Split weight into Q, K, V matrices
         # out_features = 3 * head_dim * num_heads
-        
-            
-        
         q_weight = self.weight[:self.single_head_features, :]  # Q matrix weights
         k_weight = self.weight[self.single_head_features:2*self.single_head_features, :]  # K matrix weights  
         v_weight = self.weight[2*self.single_head_features:, :]  # V matrix weights
-        
-       
         x_scaled = x / q_scales.view(1, 1, -1)  # Broadcasting across batch and sequence dims
+
         if self.quant_activation == "per_token":
             x_scaled = quantize_activation_per_token_absmax(x_scaled, n_bits=self.n_bits)
         q_output = torch.nn.functional.linear(x_scaled, q_weight)
@@ -342,6 +342,26 @@ class nnLinear_qkv_hat(nn.Linear):
         return output
     
 
+class QuantizedAttention(EncoderAttention):
+    def __init__(self, *args, **kwargs):
+        """Initialize with same arguments as parent Attention class."""
+        super().__init__(*args, **kwargs)
+
+    def set_processor(self, processor:AttentionProcessor, module_name):
+        self.processor = processor
+        self.module_name = module_name 
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.processor.process(x, self, self.module_name)
+
+    @staticmethod
+    def clear_dict():
+        """Clear the attention score dictionary."""
+        AttentionObserver.attention_score = defaultdict(list)
+
+
 def image_encoder_monkey_patch(
     model,
     processor=None,
@@ -351,11 +371,6 @@ def image_encoder_monkey_patch(
     layers=[0,5, 17],
     debug=False,
     device="cuda",
-    path_stat_dict=None,
-    percent=50,
-    qkT_v=False,
-    quarot = False,
-    rot_args=None
 ):
     """
     Apply monkey-patching to SAM image encoder for quantization and observation.
@@ -368,59 +383,13 @@ def image_encoder_monkey_patch(
         k_preserve: Number of channels to preserve in selective quantization
     """
     # Replace classes with observer versions using monkey patching
-    layer_idx =0
     ImageEncoderViTObserver.debug = debug 
-    if quarot:
-        from quarot import rotation_utils
-        Q_image_encoder =rotation_utils.get_orthogonal_matrix(rot_args.hidden_size_image_en,rot_args.rotate_mode,device = rot_args.device,seed=rot_args.seed)
-    if path_stat_dict is not None:
-        # load stat_dict -- which is processor.stat is dictionary  {key: layer name , value : {'inputqkv':..., 'qkv':..., 'act_scales':...} }
-        print("Loading existing statistics from file.")
-        stat_dict = torch.load(path_stat_dict)
-    else:
-        # save stat_dict to the file and exit()
-        stat_path="/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/pretrained_checkpoint/stat_dict.pth"
-        os.makedirs(os.path.dirname(stat_path), exist_ok=True)
-        stat_dict = processor.stat
-        torch.save(stat_dict, stat_path)
-        print(f"Statistics saved to {stat_path}")
-        exit()
-    print("Replacing attention of image_encoder with center Q with quantization that attention ")
+   
     for name, module in model.named_modules():
-        if isinstance(module, Attention) or isinstance(module, Attention_) or isinstance(module, Attention__):
+        if isinstance(module, (EncoderAttention)):
+            module.__class__ = QuantizedAttention
+            module.set_processor(processor, name)
 
-            module.__class__ = AttentionObserver
-            key ='.'.join(name.split('.')[1:])
-            module.stat =   stat_dict[key]  
-            module.n_bits = n_bits
-            module.name = name
-            module.percent = percent
-            module.qkT_v = qkT_v
-            if quarot:
-                module.Q = Q_image_encoder
-            # Create qkv_w_hat manually
-            module.qkv_w_hat = nnLinear_qkv_hat(
-                module.qkv.in_features, 
-                module.qkv.out_features, 
-                bias=module.qkv.bias is not None
-            ).to(device)
-            module.qkv_w_hat.n_bits = n_bits
-            module.qkv_w_hat.weight.data = module.qkv.weight.data.clone().to(device)
-            if module.qkv.bias is not None:
-                module.qkv_w_hat.bias.data = module.qkv.bias.data.clone().to(device)
-            module.smooth()
-            module.qkv_w_hat.quant_activation =act_quant
-            if weight_quant == "per_channel":
-                module.qkv_w_hat.quant_weight = weight_quant
-                module.qkv_w_hat.quantize_weight(n_bits=n_bits)
-        
-            # import ipdb; ipdb.set_trace()
-        if isinstance(module, Block) or isinstance(module, block_) or isinstance(module, Block__):
-            module.__class__ = BlockObserver
-        if isinstance(module, ImageEncoderViT) or isinstance(module, ImageEncoderViT_) or isinstance(module, ImageEncoderViT__):
-            if  layer_idx in layers:
-                module.__class__ = ImageEncoderViTObserver
-            layer_idx += 1
 
     modules_to_exclude = [
         "pos_embed",
@@ -432,18 +401,18 @@ def image_encoder_monkey_patch(
         "rel_pos_w",
     ]
 
-    # config = QuantizationConfig(
-    #     n_bits_w=n_bits,
-    #     n_bits_a=n_bits,
-    #     weight_quant=weight_quant,
-    #     act_quant=act_quant,
-    #     quantize_output=False,
-    # )
-    # replace_linear_with_quantized(
-    #     module=model.image_encoder,
-    #     config=config,
-    #     module_name_to_exclude=modules_to_exclude,
-    # )
+    config = QuantizationConfig(
+        n_bits_w=n_bits,
+        n_bits_a=n_bits,
+        weight_quant=weight_quant,
+        act_quant=act_quant,
+        quantize_output=False,
+    )
+    replace_linear_with_quantized(
+        module=model.image_encoder,
+        config=config,
+        module_name_to_exclude=modules_to_exclude,
+    )
 
 
 # ============================================================================
@@ -462,10 +431,10 @@ if __name__ == "__main__":
     predictor = SamPredictor(sam)
 
     # Setup processor with calibration for image encoder
-    processor = ImageEncoderProcessor("encoder_attn")
+    processor = EncoderRecenterAttentionProcessor("recenter")
     processor.calibrate(
         predictor=predictor,
-        modules=(Block,),
+        modules=(EncoderAttention,),
         num_samples=num_calib_samples,
     )
     # Apply quantization with monkey-patching

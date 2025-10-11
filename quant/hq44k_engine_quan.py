@@ -195,9 +195,9 @@ class Hq44kInferenceStrategy(InferenceStrategy):
 
         
         if self.centerQ:
-            calibrate_= False
+
             from encoder_quant import image_encoder_monkey_patch
-            if calibrate_ :
+            if not os.path.exists('./pretrained_checkpoint/stat_dict.pth'):
                 num_calib_samples=8
                 from quant_utils import ImageEncoderProcessor
                 
@@ -207,7 +207,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                     ImageEncoderViT,
                 )
                 from segment_anything import SamPredictor
-                predictor_ = SamPredictor(self.predictor)
+                predictor_ = SamPredictor(self.predictor.to('cuda'))
                 processor = ImageEncoderProcessor("encoder_attn")
                 processor.calibrate(
                     predictor=predictor_,
@@ -231,12 +231,11 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                 weight_quant="per_channel",
                 act_quant="per_token",
                 device = self.device,
-                path_stat_dict= "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/pretrained_checkpoint/stat_dict.pth",
+                path_stat_dict= "./pretrained_checkpoint/stat_dict.pth",
                 percent = self.percent if self.qkT_v else None,
                 qkT_v = self.qkT_v,
                 quarot= self.quant_ro,
                 rot_args= self.rot_args
-                
             )
             self.predictor.to(self.device)
             if self.qkT_v:
@@ -630,26 +629,26 @@ class Hq44kSamEngine(Engine):
 
         # valid set
         dataset_coift_val = {"name": "COIFT",
-                    "im_dir": "./data_/thin_object_detection/COIFT/images",
-                    "gt_dir": "./data_/thin_object_detection/COIFT/masks",
+                    "im_dir": "./data/thin_object_detection/COIFT/images",
+                    "gt_dir": "./data/thin_object_detection/COIFT/masks",
                     "im_ext": ".jpg",
                     "gt_ext": ".png"}
 
         dataset_hrsod_val = {"name": "HRSOD",
-                    "im_dir": "./data_/thin_object_detection/HRSOD/images",
-                    "gt_dir": "./data_/thin_object_detection/HRSOD/masks",
+                    "im_dir": "./data/thin_object_detection/HRSOD/images",
+                    "gt_dir": "./data/thin_object_detection/HRSOD/masks",
                     "im_ext": ".jpg",
                     "gt_ext": ".png"}
 
         dataset_thin_val = {"name": "ThinObject5k-TE",
-                    "im_dir": "./data_/thin_object_detection/ThinObject5K/images",
-                    "gt_dir": "./data_/thin_object_detection/ThinObject5K/masks",
+                    "im_dir": "./data/thin_object_detection/ThinObject5K/images",
+                    "gt_dir": "./data/thin_object_detection/ThinObject5K/masks",
                     "im_ext": ".jpg",
                     "gt_ext": ".png"}
 
         dataset_dis_val = {"name": "DIS5K-VD",
-                    "im_dir": "./data_/DIS5K/DIS-VD/im",
-                    "gt_dir": "./data_/DIS5K/DIS-VD/gt",
+                    "im_dir": "./data/DIS5K/DIS-VD/im",
+                    "gt_dir": "./data/DIS5K/DIS-VD/gt",
                     "im_ext": ".jpg",
                     "gt_ext": ".png"}
 

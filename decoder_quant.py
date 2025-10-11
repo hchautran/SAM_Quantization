@@ -22,9 +22,7 @@ from segment_anything.modeling.transformer import (
 
 # Local imports
 from quant_utils import (
-    AttnBasedProcessor,
-    DoNothingProcessor,
-    ProcessStrategy,
+    DecoderDoNothingProcessor,
     quantize_activation_per_token_absmax,
 )
 from RTN_quantization import per_tensor_channel_group
@@ -484,7 +482,7 @@ def replace_linear_with_target_and_quantize(
 
 def mask_decoder_monkey_patch(
     model,
-    processor: ProcessStrategy = None,
+    processor=  None,
     n_bits=8,
     weight_quant="per_channel",
     k_preserve=0,
@@ -559,7 +557,7 @@ if __name__ == "__main__":
     predictor = SamPredictor(sam)
 
     # Setup processor with calibration
-    processor = AttnBasedProcessor("attn")
+    processor = DecoderDoNothingProcessor("donothing")
     processor.calibrate(
         predictor=predictor,
         modules=(TwoWayTransformer),

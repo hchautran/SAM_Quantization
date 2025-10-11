@@ -10,9 +10,9 @@ from train.utils.dataloader import get_im_gt_name_dict, Resize
 from abc import abstractmethod
 from data_utils import OnlineDataset
 from torchvision import transforms
-from segment_anything.modeling.transformer import TwoWayAttentionBlock, TwoWayTransformer, Attention
-from train.segment_anything_training.modeling.image_encoder import Attention as Attention_
-from seginw.segment_anything.modeling.image_encoder import Attention as Attention__
+from segment_anything.modeling.transformer import  Attention as  DecoderAttention
+from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining
+from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention
 from torch.utils.data import DataLoader
 from data_utils import OnlineDataset
 from segment_anything import SamPredictor, sam_model_registry
@@ -22,6 +22,7 @@ from functools import partial
 from accelerate import Accelerator
 import train.utils.misc as misc
 from tqdm.auto import tqdm
+from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
 # from utils import show_mask_image
 from collections import defaultdict
 
@@ -90,7 +91,9 @@ def quantize_activation_per_tensor_absmax(t, n_bits=8):
     t.div_(scales).round_().mul_(scales)
     return t
 
-class ProcessStrategy():
+    
+
+class AttentionProcessor():
     def __init__(self, strategy_name:str) -> None:
         self.accelerator = Accelerator()
         self.strategy_name = strategy_name
@@ -98,8 +101,8 @@ class ProcessStrategy():
         self.stat = {}
         dataset_dis = {
             "name": "DIS5K-VD",
-            "im_dir": "./data_/DIS5K/DIS-VD/im",
-            "gt_dir": "./data_/DIS5K/DIS-VD/gt",
+            "im_dir": "./data/DIS5K/DIS-VD/im",
+            "gt_dir": "./data/DIS5K/DIS-VD/gt",
             "im_ext": ".jpg",
             "gt_ext": ".png"
         }
@@ -113,18 +116,16 @@ class ProcessStrategy():
         )
 
     @abstractmethod
-    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor):
+    def process(self, x:torch.Tensor, module_name:str=None):
         pass
 
-
     @abstractmethod
-    def stat_tensor(self, X, Y, name):
+    def stat_linear(self, X, Y, name):
         pass
 
     @abstractmethod
     def stat_attn(self, X, Y, name, n_heads):
         pass
-
 
         
     def _register_hooks(self, predictor, modules):
@@ -151,7 +152,7 @@ class ProcessStrategy():
 
         # Default: register hooks for decoder attention modules
         for name, component in predictor.model.named_modules():
-            if isinstance(component, Attention) or isinstance(component, Attention_) or isinstance(component, Attention__):
+            if isinstance(component, (modules)):
                 for linear_name, m in component.named_modules():
                     if isinstance(m, nn.Linear):
                         linear_hooks.append(
@@ -200,12 +201,9 @@ class ProcessStrategy():
             dataloader = self.accelerator.prepare(self.dataloaders[k])
             print('valid_dataloader len:', len(dataloader))
             progress_bar = tqdm(total=num_samples, desc=f"Calibrating")
-
             for i, data_val in enumerate(dataloader):
                 if i == num_samples:
                     break
-
-                # Run forward pass
                 self._run_forward_pass(predictor, data_val)
                 progress_bar.update(1)
 
@@ -223,7 +221,7 @@ class ProcessStrategy():
 
 
 
-class SignProcessor(ProcessStrategy):
+class DecoderSignProcessor(AttentionProcessor):
 
     def __init__(self, strategy_name):
         super().__init__(strategy_name)
@@ -255,7 +253,7 @@ class SignProcessor(ProcessStrategy):
 
 
 
-class DoNothingProcessor(ProcessStrategy):
+class DecoderDoNothingProcessor(AttentionProcessor):
 
     def __init__(self, strategy_name):
         super().__init__(strategy_name)
@@ -275,7 +273,7 @@ class DoNothingProcessor(ProcessStrategy):
         return Q.permute(0,2,1,3), K.permute(0,2,1,3) ,V
 
 
-class AttnBasedProcessor(ProcessStrategy):
+class DecoderChannelScaleProcessor(AttentionProcessor):
 
     def __init__(self, strategy_name):
         super().__init__(strategy_name)
@@ -351,12 +349,7 @@ class AttnBasedProcessor(ProcessStrategy):
         return Q.permute(0,2,1,3), K.permute(0,2,1,3), V
 
         
-        
-
-
-
-
-class AttnBasedProcessor(ProcessStrategy):
+class DecoderRecenterProcessor(AttentionProcessor):
 
     def __init__(self, strategy_name):
         super().__init__(strategy_name)
@@ -374,22 +367,14 @@ class AttnBasedProcessor(ProcessStrategy):
 
     def stat_attn(self, X, Y:torch.Tensor, name, n_heads):
         if 'final' in name or 'cross' in name:
-            # breakpoint()
-
             q = self.stat[name]['q_proj']
             k = self.stat[name]['k_proj']
             v = self.stat[name]['v_proj']
             sign = torch.sign(torch.sign(k).mean(-2, keepdim=True))
 
-            #cal q_max 
-            # breakpoint()
             k_mean = torch.abs(k).mean(-2)[0]
-
-            #cal k_max 
             q_mean = torch.abs(q).mean(-2)[0]
 
-
-            #cal diff
 
             q = self._separate_heads(q, n_heads)
             k = self._separate_heads(k, n_heads)
@@ -431,41 +416,14 @@ class AttnBasedProcessor(ProcessStrategy):
             
 
     def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name, n_bits):
-        # diff = self.stat[name]['diff']
-        # order = self.stat[name]['order']
-        # sign = torch.sign(self.stat[name]['sign'])[None, ...].reshape(-1, 8, 1,Q.shape[-1]) 
-        
+
         Q = Q.permute(0,2,1,3)
         K = K.permute(0,2,1,3)
 
-        # Q = torch.gather(Q, index=order[None, None,...].expand(Q.shape), dim=-1 )
-        # K = torch.gather(K, index=order[None, None,...].expand(K.shape), dim=-1 )
-
-        
-        # # scales_1= torch.linspace(1.0, 1.0, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
-        # # scales_2 = torch.linspace(1.0, 1.25, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
-        # # scales = torch.cat([scales_1, scales_2], dim=-1)
-        # # breakpoint()
-        # # K.mul_(1/scales)
-        # # Q.mul_(scales)
-        # Q_shape = Q.shape
-        # K_shape = K.shape
-        # breakpoint()
-        # Q = Q.reshape(-1, K_shape[-1])
-        # K = K.reshape(-1, K_shape[-1])
-        # topk_indices = torch.tensor([0,1])
-
-        # breakpoint()
-        # q_backup = Q[:, :, :,topk_indices].detach().clone()
-        # k_backup = K[:, :, :,topk_indices].detach().clone()
         K = K - K.mean(1, keepdim=True)
         Q =  quantize_activation_per_token_absmax(Q, n_bits=4)
         K =  quantize_activation_per_token_absmax(K, n_bits=4)
-        # breakpoint()
-        # Q[:, :, :,topk_indices] = q_backup
-        # K[:, :, :,topk_indices] = k_backup
         return Q.permute(0,2,1,3), K.permute(0,2,1,3), V
-        # return  Q.reshape(Q_shape), K.reshape(K_shape) ,V
 
 
 # ============================================================================
@@ -473,7 +431,7 @@ class AttnBasedProcessor(ProcessStrategy):
 # ============================================================================
 
 
-class ImageEncoderProcessor(ProcessStrategy):
+class EncoderAttentionProcessor(AttentionProcessor):
     """
     Processor for calibrating and processing image encoder attention layers.
 
@@ -481,26 +439,11 @@ class ImageEncoderProcessor(ProcessStrategy):
     in SAM, which has a different architecture than the mask decoder.
     """
 
-    def __init__(self, strategy_name):
+    def __init__(self, strategy_name:str='base'):
         super().__init__(strategy_name)
         self.stat = {}
 
-    def stat_tensor(self,name, tensor):
-        """Calculate per-channel maximum absolute values"""
-        if tensor is None or not isinstance(tensor, torch.Tensor):
-            return
-        if tensor.dim() < 2:
-            return
-        
-        hidden_dim = tensor.shape[-1]
-        tensor = tensor.view(-1, hidden_dim).abs().detach()
-        current_max = torch.max(tensor, dim=0)[0].float().cpu()
-        
-        if name in self.stat:
-            self.stat[name]["act_scales"] = torch.max(self.stat[name]["act_scales"], current_max)
-        else:
-            self.stat[name] = defaultdict()
-            self.stat[name]['act_scales'] = current_max
+
 
     def stat_linear(self, X, Y: torch.Tensor, name, linear_name):
         """
@@ -512,14 +455,12 @@ class ImageEncoderProcessor(ProcessStrategy):
             name: Module name
             linear_name: Linear layer name (e.g., 'qkv', 'proj')
         """
-        # if x is None:
-        #     return
 
-        self.stat_tensor(name, X)
-        # if name not in self.stat:
-            
-        self.stat[name][linear_name] = Y
-        self.stat[name]["input"+linear_name] = X
+        pass 
+
+    def stat_attn(self, X, Y: torch.Tensor, name, n_heads):
+        pass
+
 
     def _separate_heads_encoder(self, qkv: torch.Tensor, num_heads: int):
         """
@@ -537,11 +478,9 @@ class ImageEncoderProcessor(ProcessStrategy):
         q, k, v = qkv[0], qkv[1], qkv[2]
         return q, k, v
 
-    def stat_attn(self, X, Y: torch.Tensor, name, n_heads):
-        pass
 
 
-    def process(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, name, n_bits):
+    def process(self,  x:torch.Tensor, module, module_name:str=None):
         """
         Process Q, K, V tensors with quantization for encoder attention.
 
@@ -555,71 +494,97 @@ class ImageEncoderProcessor(ProcessStrategy):
         Returns:
             Processed Q, K, V tensors
         """
-        # Center K around mean
-        # K = K - K.mean(1, keepdim=True)
+        B, H, W, _ = x.shape
+        # qkv with shape (3, B, nHead, H * W, C)
+        qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+        # q, k, v with shape (B * nHead, H * W, C)
+        q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
 
-        # # Quantize Q and K
-        # Q = quantize_activation_per_token_absmax(Q, n_bits=n_bits)
-        # K = quantize_activation_per_token_absmax(K, n_bits=n_bits)
+        attn = (q * module.scale) @ k.transpose(-2, -1)
 
-        return Q, K, V
+        if module.use_rel_pos:
+            attn = add_decomposed_rel_pos(attn, q, module.rel_pos_h, module.rel_pos_w, (H, W), (H, W))
 
-    def _register_hooks(self, predictor, modules):
+        attn = attn.softmax(dim=-1)
+        x = (attn @ v).view(B, module.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = module.proj(x)
+
+        return x
+
+
+
+
+
+
+class EncoderRecenterAttentionProcessor(AttentionProcessor):
+    """
+    Processor for calibrating and processing image encoder attention layers.
+
+    This processor is designed specifically for the ViT-based image encoder
+    in SAM, which has a different architecture than the mask decoder.
+    """
+
+    def __init__(self, strategy_name):
+        super().__init__(strategy_name='recenterd')
+        self.stat = {}
+
+    def stat_linear(self, X, Y: torch.Tensor, name, linear_name):
+        pass 
+
+    def stat_attn(self, X, Y: torch.Tensor, name, n_heads):
+        pass
+
+    def _separate_heads_encoder(self, qkv: torch.Tensor, num_heads: int):
         """
-        Register hooks specifically for image encoder attention modules.
+        Separate QKV tensor into heads for encoder attention.
 
         Args:
-            predictor: SamPredictor instance
-            modules: Module types to register hooks for
+            qkv: Combined QKV tensor of shape (B, H*W, 3, num_heads, C_per_head)
+            num_heads: Number of attention heads
 
         Returns:
-            Tuple of (linear_hooks, attn_hooks)
+            q, k, v tensors each of shape (B, num_heads, H*W, C_per_head)
         """
-        from segment_anything.modeling.image_encoder import Attention
+        # qkv shape: (B, H*W, 3, num_heads, C_per_head)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, num_heads, H*W, C_per_head)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        return q, k, v
 
-        def stat_linear_hook(module, X, Y: torch.Tensor, name, linear_name):
-            if isinstance(X, tuple):
-                X = X[0]
-            self.stat_linear(X, Y, name, linear_name)
 
-        def stat_attn_hook(module, X, Y: torch.Tensor, name, n_heads):
-            self.stat_attn(X, Y, name, n_heads)
 
-        linear_hooks = []
-        attn_hooks = []
-
-        # Register hooks for image encoder blocks
-        for name, component in predictor.model.image_encoder.named_modules():
-        # for name, component in predictor.image_encoder.named_modules():
-            if isinstance(component, Attention) or isinstance(component, Attention_)or isinstance(component, Attention__):
-                # Hook the QKV linear layer
-                for linear_name, m in component.named_modules():
-                    if isinstance(m, nn.Linear) and linear_name == 'qkv':
-                        print(f"Registering hook for {name}.{linear_name}")
-                        linear_hooks.append(
-                            m.register_forward_hook(
-                                partial(stat_linear_hook, name=name, linear_name=linear_name)
-                            )
-                        )
-                # Hook the attention module
-                attn_hooks.append(
-                    component.register_forward_hook(
-                        partial(stat_attn_hook, name=name, n_heads=component.num_heads)
-                    )
-                )
-
-        return linear_hooks, attn_hooks
-
-    def _run_forward_pass(self, predictor, data_val):
+    def process(self,  x:torch.Tensor, module, module_name:str=None):
         """
-        Run forward pass through the image encoder only (not full prediction).
+        Process Q, K, V tensors with quantization for encoder attention.
 
         Args:
-            predictor: SamPredictor instance
-            data_val: Data batch dictionary
+            Q: Query tensor
+            K: Key tensor
+            V: Value tensor
+            name: Module name
+            n_bits: Number of bits for quantization
+
+        Returns:
+            Processed Q, K, V tensors
         """
-        imgs = data_val['image'].permute(0, 2, 3, 1).cpu().numpy()
-        # This will trigger the image encoder forward pass
-        predictor.set_image(imgs.squeeze())
+        B, H, W, _ = x.shape
+        # qkv with shape (3, B, nHead, H * W, C)
+        x_mean = x.mean(1, keepdim=True).mean(2, keepdim=True)
+        x_hat = x - x_mean
+        qkv_hat = module.qkv(x_hat).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+        qkv_mean= module.qkv(x_mean).reshape(B, 1, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+        # q, k, v with shape (B * nHead, H * W, C)
+        q_hat, k_hat, v_hat = qkv_hat.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
+        q_mean, k_mean, v_mean= qkv_mean.reshape(3, B * module.num_heads, 1, -1).unbind(0)
 
+        attn = (q_hat * module.scale) @ k_hat.transpose(-2, -1)
+        # attn_mean = (q_mean * self.scale) @ k_hat.transpose(-2, -1)
+        # attn = attn + attn_mean 
 
+        if module.use_rel_pos:
+            attn = add_decomposed_rel_pos(attn, q_hat + q_mean, module.rel_pos_h, module.rel_pos_w, (H, W), (H, W))
+
+        attn = attn.softmax(dim=-1)
+        x = ((attn @ v_hat) + v_mean).view(B, module.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = module.proj(x)
+
+        return x

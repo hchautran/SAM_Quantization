@@ -23,6 +23,10 @@ from decoder_quant import mask_decoder_monkey_patch, TwoWayTransformerObserver
 from encoder_quant import image_encoder_monkey_patch, ImageEncoderViTObserver
 from quant_utils import quantize_activation_per_token_absmax
 from profiler import InferenceProfiler, compare_inference_speed
+from quant_utils import DecoderDoNothingProcessor, EncoderRecenterAttentionProcessor, EncoderAttentionProcessor 
+from segment_anything.modeling.transformer import  Attention as  DecoderAttention
+from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining
+from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention
 
 
 
@@ -685,7 +689,6 @@ class Engine:
             encoder_config: Dict with encoder quantization config {processor, n_bits, weight_quant, k_preserve}
             decoder_config: Dict with decoder quantization config {processor, n_bits, weight_quant, k_preserve}
         """
-        from segment_anything.modeling.image_encoder import Block
 
         if self.quantize_encoder and encoder_config:
             print("Applying encoder quantization...")
@@ -711,7 +714,7 @@ class Engine:
             print(f"Decoder quantized: {decoder_config.get('n_bits', 8)}-bit, "
                   f"{decoder_config.get('weight_quant', 'per_channel')}, k_preserve={decoder_config.get('k_preserve', 0)}")
 
-    def setup_and_calibrate_processors(self, predictor, num_calib_samples=32):
+    def setup_and_calibrate_processors(self, predictor, num_calib_samples=32, encoder_processor:EncoderAttentionProcessor=None, decoder_processor:DecoderDoNothingProcessor=None):
         """
         Setup and calibrate processors for encoder and/or decoder.
 
@@ -722,25 +725,20 @@ class Engine:
         Returns:
             Tuple of (encoder_processor, decoder_processor)
         """
-        from quant_utils import ImageEncoderProcessor, AttnBasedProcessor
-        from segment_anything.modeling.image_encoder import Block
-
-        encoder_processor = None
-        decoder_processor = None
 
         if self.quantize_encoder:
             print("Setting up encoder processor...")
-            encoder_processor = ImageEncoderProcessor('encoder_attn')
-            # encoder_processor.calibrate(
-            #     predictor=predictor,
-            #     modules=(Block,),
-            #     num_samples=num_calib_samples
-            # )
+            # encoder_processor = EncoderAttentionProcessor()
+            encoder_processor.calibrate(
+                predictor=predictor,
+                modules=(DecoderAttention, EncoderAttentionTraining, EncoderAttention),
+                num_samples=num_calib_samples
+            )
             print(f"Encoder processor calibrated on {num_calib_samples} samples")
 
         if self.quantize_decoder:
             print("Setting up decoder processor...")
-            decoder_processor = AttnBasedProcessor('decoder_attn')
+            # decoder_processor = DecoderDoNothingProcessor('decoder_attn')
             decoder_processor.calibrate(
                 predictor=predictor,
                 modules=(TwoWayTransformer,),
@@ -873,7 +871,9 @@ if __name__ == '__main__':
     # Setup and calibrate processors
     encoder_processor, decoder_processor = engine.setup_and_calibrate_processors(
         predictor,
-        num_calib_samples=args.num_calib_samples
+        num_calib_samples=args.num_calib_samples,
+        encoder_processor=EncoderAttentionProcessor(),
+        
     )
 
     # Apply quantization
@@ -895,43 +895,9 @@ if __name__ == '__main__':
     engine.apply_quantization(predictor, encoder_config, decoder_config)
 
     # Execute based on mode
-    if args.mode == 'eval':
-        print("\n=== Running Evaluation ===")
-        results = engine.eval_hq44k(predictor=predictor, num_samples=args.num_samples, plot_figures=False)
-        print(f"\nResults: {results}")
-
-    elif args.mode == 'k_preserve':
-        print("\n=== Running k_preserve Experiment ===")
-        experiment_config = {
-            'n_bits': args.n_bits,
-            'weight_quant': args.weight_quant
-        }
-        engine.run_k_preserve_experiment(
-            predictor,
-            k_preserve_values=[0, 2, 4, 8, 16],
-            num_samples=args.num_samples,
-            experiment_config=experiment_config,
-            target=args.target
-        )
-
-    elif args.mode == 'qk_analysis':
-        print("\n=== Running Q/K Quantization Error Analysis ===")
-        qk_results = engine.analyze_qk_quantization_errors(
-            predictor=predictor,
-            num_samples=5,
-            n_bits_range=[4, 6, 8],
-            save_results=True
-        )
-        engine.visualize_qk_errors(qk_results, save_path='./')
-
-    elif args.mode == 'benchmark':
-        print("\n=== Running Benchmark ===")
-        benchmark_results = engine.benchmark_inference(
-            predictor=predictor,
-            num_runs=20,
-            warmup=5
-        )
-
+    print("\n=== Running Evaluation ===")
+    results = engine.eval_hq44k(predictor=predictor, num_samples=args.num_samples, plot_figures=False)
+    print(f"\nResults: {results}")
     print("\n=== Execution Complete ===")
 
 
