@@ -22,10 +22,11 @@ from segment_anything.modeling.transformer import (
 
 # Local imports
 from quant_utils import (
-    AttnBasedProcessor,
-    DoNothingProcessor,
+    AttentionProcessor,
+    EncoderAttentionProcessorSmoothMeanQ,
+    EncoderAttentionProcessorSmooth,
+    EncoderAttentionProcessorHighLow,
     ProcessStrategy,
-    quantize_activation_per_token_absmax,
 )
 from RTN_quantization import per_tensor_channel_group
 from RTN_quantization.utils import QuantizationConfig

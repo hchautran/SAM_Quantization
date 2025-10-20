@@ -146,6 +146,51 @@ def quantize_weight_per_group_absmax_input_features(
     return quantized_w.view(out_features, in_features)
 
 
+def fake_logquantize_per_tensor_affine(x, scale, quant_min, quant_max, tau=2):
+    levels = quant_max - quant_min + 1
+    x = torch.clamp(x,1e-20,None)
+    x_int = round_ste(-1 * (x/scale).log2() * tau)
+    softmax_mask = ((x_int >= levels))
+    x_q = torch.clamp(x_int, 0, levels - 1)
+    X = scale * 2 ** (-1 * x_q / tau )
+    X[softmax_mask] = torch.Tensor([0.0])
+
+    return X
+
+def round_ste(x: torch.Tensor):
+    """
+    Implement Straight-Through Estimator for rounding operation.
+    """
+    return (x.round() - x).detach() + x
+def quantize_weight_log_per_channel(w: torch.Tensor, n_bits: int = 8, tau=2) -> torch.Tensor:
+   
+    """Logarithmic quantization of weights per output channel."""
+    original_dtype = w.dtype
+    
+    quant_min = -2 ** (n_bits - 1)
+    quant_max = 2 ** (n_bits - 1) - 1
+    levels = quant_max - quant_min + 1
+
+    # Calculate scales per channel (same as linear quantization)
+    scales = w.abs().max(dim=-1, keepdim=True)[0]
+    scales.clamp_(min=1e-5)
+    
+    # Apply logarithmic quantization per channel
+    w_clamped = torch.clamp(w.abs(), 1e-20, None)
+    w_int = round_ste(-1 * (w_clamped / scales).log2() * tau)
+    softmax_mask = (w_int >= levels)
+    w_q = torch.clamp(w_int, 0, levels - 1)
+    
+    # Reconstruct quantized values
+    w_quantized = scales * 2 ** (-1 * w_q / tau)
+    w_quantized[softmax_mask] = 0.0
+    
+    # Preserve original signs
+    w_quantized = w_quantized * torch.sign(w)
+    
+    return w_quantized.to(original_dtype)
+
+
 # ============================================================================
 # Activation Quantization Functions (Core Implementation)
 # ============================================================================
@@ -160,7 +205,37 @@ def quantize_activation_per_token_absmax(t: torch.Tensor, n_bits: int = 8) -> to
     scales.clamp_(min=1e-5).div_(q_max)
     t.div_(scales).round_().mul_(scales)
     return t.view(t_shape)
+        
+    
+@torch.no_grad()
+def quantize_activation_log_per_token_absmax(t: torch.Tensor, n_bits: int = 8, tau=2) -> torch.Tensor:
+    """Logarithmic quantization of activations per token using absolute maximum scaling."""
+    original_dtype = t.dtype
+    t_shape = t.shape
+    t = t.contiguous().view(-1, t_shape[-1])
+    
+    quant_min = -2 ** (n_bits - 1)
+    quant_max = 2 ** (n_bits - 1) - 1
+    levels = quant_max - quant_min + 1
 
+    # Calculate scales per token (same as linear quantization)
+    scales = t.abs().max(dim=-1, keepdim=True)[0]
+    scales.clamp_(min=1e-5)
+    
+    # Apply logarithmic quantization per token
+    t_clamped = torch.clamp(t.abs(), 1e-20, None)
+    t_int = round_ste(-1 * (t_clamped / scales).log2() * tau)
+    softmax_mask = (t_int >= levels)
+    t_q = torch.clamp(t_int, 0, levels - 1)
+    
+    # Reconstruct quantized values
+    t_quantized = scales * 2 ** (-1 * t_q / tau)
+    t_quantized[softmax_mask] = 0.0
+    
+    # Preserve original signs
+    t_quantized = t_quantized * torch.sign(t)
+    
+    return t_quantized.view(t_shape).to(original_dtype)
 
 @torch.no_grad()
 def quantize_activation_per_tensor_absmax(t: torch.Tensor, n_bits: int = 8) -> torch.Tensor:
@@ -254,19 +329,13 @@ def quantize_activation_low_high_density_activation_index(
         output = t.clone()
 
         attn_norm = F.normalize(t, p=2, dim=1)
-
-        # Compute channel similarity for all batches: (B*nHead, HW, HW)
-        channel_similarity = torch.bmm(attn_norm.transpose(1, 2), attn_norm)
+        channel_similarity = torch.bmm(attn_norm.transpose(1, 2), attn_norm) #(B*nHead, HW, HW)
 
         # Apply ELU and compute density scores
         density_scores = F.elu(channel_similarity - 0.9, alpha=0)
         channel_density = density_scores.mean(dim=2)  # (B*nHead, HW)
         _, sorted_indices = torch.sort(channel_density, dim=1, descending=True)
-
-        # Calculate number of channels to quantize
         num_to_quantize = int(HW * (percent / 100.0))
-        
-        # Create batch indices for gathering
         batch_indices = torch.arange(B_nHead, device=t.device).unsqueeze(1)
 
         if quantizehigh:
@@ -282,26 +351,20 @@ def quantize_activation_low_high_density_activation_index(
         mask_expanded = mask.unsqueeze(1).expand(-1, HW, -1)  # (B*nHead, HW, HW)
         channels_to_quantize = output[mask_expanded].view(B_nHead, HW, -1)  # (B*nHead, HW, num_to_quantize)
         if channels_to_quantize.numel() > 0:
-            # Calculate scales for each selected channel
             scales = channels_to_quantize.abs().max(dim=2, keepdim=True)[0]  # (B*nHead, 1, num_to_quantize)
             q_max = 2 ** (n_bits - 1) - 1
             scales.clamp_(min=1e-5).div_(q_max)
-
-            # Quantize
             quantized_channels = (channels_to_quantize / scales).round() * scales
-        
-            # Put quantized values back
             output[mask_expanded] = quantized_channels.view(-1)
         
        
         return output.to(original_dtype), selected_indices # selected_indices: (B*nHead, num_to_quantize)
 
-    elif len(t.shape) == 3 and indices is not None:
-        # Value matrix case: (B*nHead, H*W, C)
+    elif len(t.shape) == 3 and indices is not None: # Value matrix case: (B*nHead, H*W, C)
+        
         B_nHead, HW, C = t.shape
         # indices shape of (B*nHead, num_to_quantize)
         num_to_quantize = indices.shape[1]
-        
         output = t.clone()
         
         # Create batch indices for advanced indexing
@@ -464,7 +527,7 @@ class W8A8Linear(nn.Module, ABC):
         order: Optional[torch.Tensor] = None,
         topk: Optional[torch.Tensor] = None,
         quantizehigh: bool = True,
-        up_down_RTN: str = "RTN",
+        up_down_RTN: str = "none",
         percent: float = 100
     ) -> 'W8A8Linear':
         """
@@ -524,6 +587,12 @@ class W8A8Linear(nn.Module, ABC):
                 quantize_high=quantizehigh, percent=percent,
                 quantize_output=quantize_output
             )
+        elif act_quant == "log_per_token":
+            new_module = W8A8LogPerChannel(
+                module.in_features, module.out_features, module.bias is not None,
+                n_bits_w=n_bits_w, n_bits_a=n_bits_a,
+                quantize_output=quantize_output, rounding=up_down_RTN
+            )
         else:
             raise ValueError(f"Invalid act_quant: {act_quant}")
 
@@ -536,7 +605,7 @@ class W8A8Linear(nn.Module, ABC):
             elif weight_quant == "per_channel":
                 if up_down_RTN in ["up", "down", "RTN", "random"]:
                     new_module.weight = quantize_weight_per_channel_random_round_up_down_absmax(
-                        module.weight, n_bits=n_bits_w, state=up_down_RTN, percent=0.75
+                        module.weight, n_bits=n_bits_w, state=up_down_RTN, percent=percent
                     )
                 else:
                     new_module.weight = quantize_weight_per_channel_absmax(
@@ -549,6 +618,10 @@ class W8A8Linear(nn.Module, ABC):
             elif weight_quant == "per_group":
                 new_module.weight = quantize_weight_per_group_absmax_input_features(
                     module.weight, group_size, n_bits=n_bits_w
+                )
+            elif weight_quant =="log_per_channel":
+                new_module.weight = quantize_weight_log_per_channel(
+                    module.weight, n_bits=n_bits_w
                 )
             else:
                 raise ValueError(f"Invalid weight_quant: {weight_quant}")
@@ -727,3 +800,35 @@ class W8A8LinearSelectiveChannel(W8A8Linear):
     def quantize_activation(self, x: torch.Tensor) -> torch.Tensor:
         """Quantize activation using per-token strategy."""
         return quantize_activation_per_token_absmax(x, n_bits=self.n_bits_a)
+
+class W8A8LogPerChannel(W8A8Linear):
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        n_bits_w: int = 8,
+        n_bits_a: int = 8,
+        quantize_output: bool = False,
+        rounding: str = "RTN",
+    ):
+        """
+        Initialize per-channel W8A8Linear.
+
+        Args:
+            in_features: Number of input features
+            out_features: Number of output features
+            bias: Whether to include bias
+            n_bits_w: Number of weight quantization bits
+            n_bits_a: Number of activation quantization bits
+            quantize_output: Whether to quantize output
+            rounding: Rounding strategy ("up", "down", "RTN", "random")
+        """
+        super().__init__(in_features, out_features, bias, n_bits_w, n_bits_a, quantize_output)
+        self.rounding = rounding
+        self.act_quant_name = "log_per_token"
+
+    def quantize_activation(self, x: torch.Tensor) -> torch.Tensor:
+        """Quantize activation using per-token strategy."""
+        return quantize_activation_log_per_token_absmax(x, n_bits=self.n_bits_a)

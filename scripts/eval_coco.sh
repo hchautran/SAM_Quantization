@@ -2,7 +2,7 @@
 # CUDA_VISIBLE_DEVICES=5 torchrun --nproc_per_node=1 --master_port=29508 quant/hq44k_engine_quan.py 
 
 #!/bin/bash
-YAML_FILE="./quant/config/coco/base_h.yaml"
+YAML_FILE="./quant/config/coco/centerQ.yaml"
 PYTHON_SCRIPT="quant/seginw_engine_quan.py"
 CUDA_DEVICE=1
 MASTER_PORT=29409

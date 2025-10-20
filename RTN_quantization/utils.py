@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from Smooth import smooth_ln_fcs
+from .Smooth import smooth_ln_fcs
 from matplotlib import pyplot as plt
 from dataclasses import dataclass
 from typing import Optional
@@ -10,7 +10,7 @@ import os
 import sys
 import numpy as np
 from segment_anything.modeling.image_encoder import Attention
-from per_tensor_channel_group import quantize_activation_low_high_density_activation_index, quantize_activation_per_token_absmax, quantize_weight_per_channel_absmax
+from .per_tensor_channel_group import quantize_activation_low_high_density_activation_index, quantize_activation_per_token_absmax, quantize_weight_per_channel_absmax
 # Add the sam-hq directory to Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)  # Go up to SAM_Quantization
@@ -163,7 +163,7 @@ class QuantizationConfig:
     order: Optional[torch.Tensor] = None
     topk: Optional[torch.Tensor] = None
     quantizehigh: bool = True
-    up_down_RTN: str = "RTN"
+    up_down_RTN: str = "none"
     percent: float = 100
 
     def get_w8a8linear_class(self):

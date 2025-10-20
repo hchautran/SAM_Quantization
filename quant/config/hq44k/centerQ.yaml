@@ -18,7 +18,7 @@ quantization:
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 4
-  n_bits_mlp: 6
+  n_bits_mlp: 4
   quantize_output: False
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
   seed: 42
@@ -26,10 +26,11 @@ quantization:
   restore_model: work_dirs/hq_sam_vit_l/epoch_11.pth
   low_high_density: none
   qkT_v: True
+  logqkT_v: True
   channel: True
-  percent: 100
+  percent: 50
   up_down_RTN: none
-  centerQ: True
+  centerQ: False
 
 quarot_inf:
   hidden_size_image_en: 1024
@@ -37,16 +38,15 @@ quarot_inf:
   hidden_size_mask_de: 256
   num_attention_head_mask_de: 32
   fp32_had: False #Apply Hadamard rotation in FP32 (default: False)
-  device: cuda:0
+  device: cuda
   seed: 42
   rotate_mode: hadamard
   
 rtn_ro_config:
   n_bits: 4
-  n_bits_mlp: 6
+  n_bits_mlp: 4
   act_quant: per_token
   weight_quant: per_channel
   group_size: 64
   quantize_output: False
   quantize_input: True
-  qkT_v: True

@@ -11,6 +11,7 @@ from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm.auto import tqdm
+from omegaconf import OmegaConf
 
 from train.utils.dataloader import get_im_gt_name_dict, Resize
 from data_utils import OnlineDataset
@@ -20,9 +21,13 @@ from segment_anything import SamPredictor, sam_model_registry
 import train.utils.misc as misc
 from utils import show_mask_image
 from decoder_quant import mask_decoder_monkey_patch, TwoWayTransformerObserver
-from encoder_quant import image_encoder_monkey_patch, ImageEncoderViTObserver
-from quant_utils import quantize_activation_per_token_absmax
+from encoder_quant import image_encoder_monkey_patch
+from quant_utils import quantize_activation_per_token_absmax, get_encoder_processor
 from profiler import InferenceProfiler, compare_inference_speed
+from quant_utils import DecoderDoNothingProcessor, EncoderRecenterAttentionProcessor, EncoderAttentionProcessor 
+from segment_anything.modeling.transformer import  Attention as  DecoderAttention
+from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining
+from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention
 
 
 
@@ -103,6 +108,7 @@ class Evaluator:
     def eval_hq44k(self, predictor: SamPredictor, num_samples=None, plot_figures=False):
         """Evaluate model on HQ44k dataset"""
         test_stats = {}
+
         for k in range(len(self.dataloaders)):
             dataloader = self.accelerator.prepare(self.dataloaders[k])
             print('valid_dataloader len:', len(dataloader))
@@ -676,7 +682,7 @@ class Engine:
         # Encoder-specific components (initialized on demand)
         self.encoder_qk_analyzer = None
 
-    def apply_quantization(self, predictor, encoder_config=None, decoder_config=None):
+    def apply_quantization(self, predictor, encoder_config=None, decoder_config=None,args_yaml= None):
         """
         Apply quantization to encoder and/or decoder based on configuration.
 
@@ -685,7 +691,6 @@ class Engine:
             encoder_config: Dict with encoder quantization config {processor, n_bits, weight_quant, k_preserve}
             decoder_config: Dict with decoder quantization config {processor, n_bits, weight_quant, k_preserve}
         """
-        from segment_anything.modeling.image_encoder import Block
 
         if self.quantize_encoder and encoder_config:
             print("Applying encoder quantization...")
@@ -695,6 +700,7 @@ class Engine:
                 n_bits=encoder_config.get('n_bits', 8),
                 weight_quant=encoder_config.get('weight_quant', 'per_channel'),
                 act_quant=encoder_config.get('act_quant', 'per_token'),
+                args_yaml= args_yaml,
             )
             print(f"Encoder quantized: {encoder_config.get('n_bits', 8)}-bit, "
                   f"weight: {encoder_config.get('weight_quant', 'per_channel')}", f"activation: {encoder_config.get('act_quant', 'per_token')} ")
@@ -707,11 +713,12 @@ class Engine:
                 n_bits=decoder_config.get('n_bits', 8),
                 weight_quant=decoder_config.get('weight_quant', 'per_channel'),
                 k_preserve=decoder_config.get('k_preserve', 0),
+                args_yaml= args_yaml
             )
             print(f"Decoder quantized: {decoder_config.get('n_bits', 8)}-bit, "
                   f"{decoder_config.get('weight_quant', 'per_channel')}, k_preserve={decoder_config.get('k_preserve', 0)}")
 
-    def setup_and_calibrate_processors(self, predictor, num_calib_samples=32):
+    def setup_and_calibrate_processors(self, predictor, num_calib_samples=32, encoder_processor:EncoderAttentionProcessor=None, decoder_processor:DecoderDoNothingProcessor=None,args_yaml=None):
         """
         Setup and calibrate processors for encoder and/or decoder.
 
@@ -722,25 +729,28 @@ class Engine:
         Returns:
             Tuple of (encoder_processor, decoder_processor)
         """
-        from quant_utils import ImageEncoderProcessor, AttnBasedProcessor
-        from segment_anything.modeling.image_encoder import Block
-
-        encoder_processor = None
-        decoder_processor = None
 
         if self.quantize_encoder:
             print("Setting up encoder processor...")
-            encoder_processor = ImageEncoderProcessor('encoder_attn')
-            # encoder_processor.calibrate(
-            #     predictor=predictor,
-            #     modules=(Block,),
-            #     num_samples=num_calib_samples
-            # )
+            # encoder_processor = EncoderAttentionProcessor()
+            encoder_processor.calibrate(
+                predictor=predictor,
+                modules=(DecoderAttention, EncoderAttentionTraining, EncoderAttention),
+                num_samples=num_calib_samples
+            )
+            encoder_processor._take_Q(args_yaml)
+            if args_yaml.quantization.quansmooth :
+                encoder_processor.smooth_model(predictor,args_yaml.quantization.act_scales_file, args_yaml.quantization.centerQ)
+            elif args_yaml.quantization.quanro:
+                encoder_processor.quarot_model(predictor,args_yaml.quarot_inf, args_yaml.rtn_ro_config, centerQ=True)
+                
+            
             print(f"Encoder processor calibrated on {num_calib_samples} samples")
+        
 
         if self.quantize_decoder:
             print("Setting up decoder processor...")
-            decoder_processor = AttnBasedProcessor('decoder_attn')
+            # decoder_processor = DecoderDoNothingProcessor('decoder_attn')
             decoder_processor.calibrate(
                 predictor=predictor,
                 modules=(TwoWayTransformer,),
@@ -823,7 +833,53 @@ class Engine:
 
         return results
 
+def override_args(args, args_yaml):
+    """
+    Override the parameters in args_yaml with the corresponding parameters from args.
 
+    Args:
+        args: Parsed command-line arguments.
+        args_yaml: YAML configuration loaded as a dictionary or OmegaConf object.
+
+    Returns:
+        Updated args_yaml with overridden parameters.
+    """
+    # Map command-line arguments to YAML keys
+    override_mapping = {
+        'n_bits': 'quantization.n_bits',
+        'n_bits_mlp': 'quantization.n_bits_mlp',
+        'smooth': 'quantization.quansmooth',
+        'quarot': 'quantization.quanro',
+        'quantize_encoder': 'quantization.quanrtn',
+        'en_weight_quant': 'quantization.weight_quant',
+        'en_act_quant': 'quantization.act_quant',
+        'centerQ': 'quantization.centerQ',
+    }
+    # Check if rtn_ro_config exists and extend override_mapping
+    if hasattr(args_yaml, 'rtn_ro_config') and args_yaml.rtn_ro_config:
+        override_mapping.update({
+            'n_bits': 'rtn_ro_config.n_bits',
+            'n_bits_mlp': 'rtn_ro_config.n_bits_mlp',
+        })
+
+    # Override parameters
+    for arg_key, yaml_key in override_mapping.items():
+        if hasattr(args, arg_key) and getattr(args, arg_key) is not None:
+            value = getattr(args, arg_key)
+            # Update nested keys in args_yaml
+            keys = yaml_key.split('.')
+            target = args_yaml
+            for key in keys[:-1]:
+                target = target[key]
+            target[keys[-1]] = value
+
+    return args_yaml
+def print_model_structure(model, title="Model Structure"):
+    print(f"\n{title}")
+    print("=" * len(title))
+    for name, module in model.named_modules():
+        print(f"{name}: {module.__class__.__name__}")
+    print("=" * len(title))
 if __name__ == '__main__':
     import argparse
 
@@ -836,6 +892,8 @@ if __name__ == '__main__':
     parser.add_argument('--quantize-decoder', action='store_true', 
                         help='Enable decoder quantization')
     parser.add_argument('--n-bits', type=int, default=4,
+                        help='Number of quantization bits')
+    parser.add_argument('--n-bits-mlp', type=int, default=4,
                         help='Number of quantization bits')
     parser.add_argument('--en-weight-quant', type=str, default='per_channel',
                         choices=['per_channel', 'selective_channel'],
@@ -858,8 +916,14 @@ if __name__ == '__main__':
     parser.add_argument('--target', type=str, default='decoder',
                         choices=['decoder', 'encoder', 'both'],
                         help='Target for k_preserve experiments')
-
+    parser.add_argument("--smooth", action='store_true', default=False, help="Smooth model")
+    parser.add_argument('--quarot', action='store_true', default=False, help='Use quantization rotation')
+    parser.add_argument("--config-file", type=str, default=None,)
+    
     args = parser.parse_args()
+    args_yaml = OmegaConf.load(args.config_file)
+    # overide args_yaml with args
+    args_yaml = override_args(args, args_yaml)
 
     # Initialize model
     model_type = 'vit_l'
@@ -871,10 +935,14 @@ if __name__ == '__main__':
     engine = Engine('hq44k', quantize_encoder=args.quantize_encoder, quantize_decoder=args.quantize_decoder)
 
     # Setup and calibrate processors
+    processor= get_encoder_processor("COMPENSATE")
     encoder_processor, decoder_processor = engine.setup_and_calibrate_processors(
         predictor,
-        num_calib_samples=args.num_calib_samples
+        num_calib_samples=args.num_calib_samples,
+        encoder_processor=processor, 
+        args_yaml= args_yaml,
     )
+    
 
     # Apply quantization
     encoder_config = {
@@ -892,46 +960,10 @@ if __name__ == '__main__':
         'k_preserve': args.k_preserve
     } if decoder_processor else None
 
-    engine.apply_quantization(predictor, encoder_config, decoder_config)
-
+    engine.apply_quantization(predictor, encoder_config, decoder_config,args_yaml)
+    print_model_structure(predictor.model,"Final structure ")
     # Execute based on mode
-    if args.mode == 'eval':
-        print("\n=== Running Evaluation ===")
-        results = engine.eval_hq44k(predictor=predictor, num_samples=args.num_samples, plot_figures=False)
-        print(f"\nResults: {results}")
-
-    elif args.mode == 'k_preserve':
-        print("\n=== Running k_preserve Experiment ===")
-        experiment_config = {
-            'n_bits': args.n_bits,
-            'weight_quant': args.weight_quant
-        }
-        engine.run_k_preserve_experiment(
-            predictor,
-            k_preserve_values=[0, 2, 4, 8, 16],
-            num_samples=args.num_samples,
-            experiment_config=experiment_config,
-            target=args.target
-        )
-
-    elif args.mode == 'qk_analysis':
-        print("\n=== Running Q/K Quantization Error Analysis ===")
-        qk_results = engine.analyze_qk_quantization_errors(
-            predictor=predictor,
-            num_samples=5,
-            n_bits_range=[4, 6, 8],
-            save_results=True
-        )
-        engine.visualize_qk_errors(qk_results, save_path='./')
-
-    elif args.mode == 'benchmark':
-        print("\n=== Running Benchmark ===")
-        benchmark_results = engine.benchmark_inference(
-            predictor=predictor,
-            num_runs=20,
-            warmup=5
-        )
-
+    print("\n=== Running Evaluation ===")
+    results = engine.eval_hq44k(predictor=predictor, num_samples=args.num_samples, plot_figures=False)
+    print(f"\nResults: {results}")
     print("\n=== Execution Complete ===")
-
-
