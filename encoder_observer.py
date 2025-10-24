@@ -350,22 +350,20 @@ class AttentionObserver_compensate(EncoderAttention):
 
         attn = attn.softmax(dim=-1)
         
-        attn_qha , indicies = quantize_activation_per_highblock_abmax(attn, n_bits=4, percent=0.5, block_size= 1 )
-        O_qha = find_O_qha(qattn=attn_qha, v=v, indices = indicies, n_bits=4, block_size=1)
+        # attn_qha , indicies = quantize_activation_per_highblock_abmax(attn, n_bits=4, percent=0.5, block_size= 1 )
+        # O_qha = find_O_qha(qattn=attn_qha, v=v, indices = indicies, n_bits=4, block_size=1)
+        O_qha= None
         O = attn @ v
         
         
-        x = (O_qha).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = (O).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
         
-        # calculate the full quantized O
-        attn = quantize_activation_per_token_absmax(attn, n_bits=4)
-        v = quantize_weight_per_channel_absmax(v.permute(0, 2, 1), n_bits=4).permute(0, 2, 1)
-        O_qfull = attn @ v
+
         
         
         x = self.proj(x)
 
-        return x, attn , O , O_qha, O_qfull
+        return x, attn , O 
 
 class BlockObserver_compensate(EncoderBlock):
     def __init__(self, *args, **kwargs):
@@ -380,7 +378,7 @@ class BlockObserver_compensate(EncoderBlock):
             H, W = x.shape[1], x.shape[2]
             x, pad_hw = window_partition(x, self.window_size)
 
-        x , attn , O , O_qha, O_qfull= self.attn(x)
+        x , attn , O = self.attn(x)
         # Reverse window partition
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, (H, W))
@@ -388,7 +386,7 @@ class BlockObserver_compensate(EncoderBlock):
         x = shortcut + x
         x = x + self.mlp(self.norm2(x))
 
-        return x , attn , O , O_qha, O_qfull
+        return x , attn , O 
 class ImageEncoderViTObserver_compensate(ImageEncoderViT):
     attention_score = defaultdict(list)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -398,12 +396,12 @@ class ImageEncoderViTObserver_compensate(ImageEncoderViT):
 
         interm_embeddings=[]
         for idx,blk in enumerate(self.blocks):
-            x , attn , O , O_qha, O_qfull= blk(x)
+            x , attn , O = blk(x)
             ImageEncoderViTObserver.attention_score[f"block_{idx}_x"].append(to_numpy(x))
             ImageEncoderViTObserver.attention_score[f"block_{idx}_attn"].append(to_numpy(attn))
-            ImageEncoderViTObserver.attention_score[f"block_{idx}_O"].append(to_numpy(O))
-            ImageEncoderViTObserver.attention_score[f"block_{idx}_O_qha"].append(to_numpy(O_qha))
-            ImageEncoderViTObserver.attention_score[f"block_{idx}_O_qfull"].append(to_numpy(O_qfull))
+            # ImageEncoderViTObserver.attention_score[f"block_{idx}_O"].append(to_numpy(O))
+            # ImageEncoderViTObserver.attention_score[f"block_{idx}_O_qha"].append(to_numpy(O_qha))
+            # ImageEncoderViTObserver.attention_score[f"block_{idx}_O_qfull"].append(to_numpy(O_qfull))
             
             if blk.window_size == 0:
                 interm_embeddings.append(x)
@@ -441,7 +439,7 @@ def image_encoder_monkey_patch(
     for name, module in model.named_modules():
         if isinstance(module, (EncoderAttention)):
             module.__class__ = AttentionObserver_compensate
-            # module.set_processor(processor, name)
+            module.set_processor(processor, name)
       
         if isinstance(module, EncoderBlock) :
             module.__class__ = BlockObserver_compensate

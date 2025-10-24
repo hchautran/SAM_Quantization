@@ -9,6 +9,7 @@ model:
 quantization:
   quandecoder: False
   quanrtn: False
+  up_down_RTN: none
   quangptq: False
   quansmooth: False
   quanro: False
@@ -19,8 +20,13 @@ quantization:
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 4
+  n_bits_mlp: 4
   quantize_output: True
   low_high_density: none
+  qkT_v: False
+  channel: False
+  percent: 100
+  centerQ: False
 gptq:
   blocksize: 128
   device: cuda

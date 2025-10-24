@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 from functools import  partial
+import numpy as np
 import os
 import logging
 import time
@@ -272,7 +273,8 @@ class AttentionProcessor():
     def stat_attn(self, X, Y, name, n_heads):
         pass
 
-        
+    def _take_Q(self,yaml_config):
+        pass
     def _register_hooks(self, predictor, modules):
         """
         Register forward hooks for calibration. Override in subclasses for custom behavior.
@@ -378,206 +380,6 @@ class AttentionProcessor():
 
 
 
-
-class DecoderSignProcessor(AttentionProcessor):
-
-    def __init__(self, strategy_name):
-        super().__init__(strategy_name)
-        self.stat = {} 
-
-    def stat_linear(self, X, Y:torch.Tensor, name, linear_name):
-        # attn_name = name 
-        sign = torch.sign(torch.sign(Y).mean(-2, keepdim=True))
-        if 'k' in linear_name:
-            if name not in self.stat:
-                self.stat[name] =  defaultdict() 
-                self.stat[name][linear_name] = sign
-            else:
-                self.stat[name][linear_name] += sign
-
-
-        
-    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name, n_bits):
-        sign = self.stat[name]['k_proj'].sign().reshape(-1, 16)[None, None, ...].permute(0,2,1,3)
-
-        Q.mul_(sign)
-        K.mul_(sign)
-        Q =  quantize_activation_per_token_absmax(Q.permute(0,2,1,3), n_bits=4)
-        K =  quantize_activation_per_token_absmax(K.permute(0,2,1,3), n_bits=4)
-        return Q, K, V
-
-
-class DecoderDoNothingProcessor(AttentionProcessor):
-
-    def __init__(self, strategy_name):
-        super().__init__(strategy_name)
-        self.stat = {} 
-
-    def stat_linear(self, X, Y:torch.Tensor, name, linear_name):
-        pass
-
-    def stat_attn(self, X, Y:torch.Tensor, name, linear_name):
-        pass
-
-    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name, n_bits):
-        # breakpoint()
-        Q =  quantize_activation_per_token_absmax(Q.permute(0,2,1,3), n_bits=4)
-        K =  quantize_activation_per_token_absmax(K.permute(0,2,1,3), n_bits=4)
-        
-        return Q.permute(0,2,1,3), K.permute(0,2,1,3) ,V
-
-
-class DecoderChannelScaleProcessor(AttentionProcessor):
-
-    def __init__(self, strategy_name):
-        super().__init__(strategy_name)
-        self.stat = {} 
-
-    def stat_linear(self, X, Y:torch.Tensor, name, linear_name):
-        if name not in self.stat:
-            self.stat[name] =  defaultdict() 
-        self.stat[name][linear_name] = Y
-
-    def _separate_heads(self, x: torch.Tensor, num_heads: int) -> torch.Tensor:
-        b, n, c = x.shape
-        x = x.reshape(b, n, num_heads, c // num_heads)
-        return x.transpose(1, 2) 
-
-    def stat_attn(self, X, Y:torch.Tensor, name, n_heads):
-        if 'final' in name or 'cross' in name:
-            q = self.stat[name]['q_proj']
-            k = self.stat[name]['k_proj']
-            v = self.stat[name]['v_proj']
-            sign = torch.sign(torch.sign(k).mean(-2, keepdim=True))
-
-            q = self._separate_heads(q, n_heads)
-            k = self._separate_heads(k, n_heads)
-            v = self._separate_heads(v, n_heads)
-            
-            # Attention
-            _, _, _, c_per_head = q.shape
-            attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
-            attn = attn / math.sqrt(c_per_head)
-            attn = torch.softmax(attn, dim=-1)
-            attn = attn.mean(1).mean(1) #[B, T]
-            mask = torch.where(attn > attn.mean(-1,keepdim=True),1,0)
-            k_high=k.permute(2,0,1,3)[mask.squeeze().nonzero()].squeeze().reshape(1, -1, q.shape[-1]*n_heads)
-            k_low= k.permute(2,0,1,3)[(1-mask).squeeze().nonzero()].squeeze().reshape(1, -1, q.shape[-1]*n_heads)
-            k_high_mean = k_high.mean(-2)
-            k_low_mean = k_low.mean(-2)
-            diff = torch.abs(k_high_mean  - k_low_mean)
-
-            diff = diff.reshape(n_heads, -1)
-            if 'diff' not in self.stat[name].keys():
-                # self.stat[name]['diff'] = torch.abs(dif.reshape(n_heads, -1))
-                self.stat[name]['diff'] = diff
-                self.stat[name]['sign'] = sign
-            else:
-                self.stat[name]['diff'] += diff
-                self.stat[name]['sign'] += sign 
-
-            self.stat[name]['order'] = torch.argsort(self.stat[name]['diff'], descending=False)
-
-            
-
-    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name):
-        # diff = self.stat[name]['diff']
-        order = self.stat[name]['order']
-        sign = torch.sign(self.stat[name]['sign'])[None, ...].reshape(-1, 8, 1,Q.shape[-1]) 
-        
-        Q = Q.mul_(sign).permute(0,2,1,3)
-        K = K.mul_(sign).permute(0,2,1,3)
-
-        Q = torch.gather(Q, index=order[None, None,...].expand(Q.shape), dim=-1 )
-        K = torch.gather(K, index=order[None, None,...].expand(K.shape), dim=-1 )
-
-        
-        scales_1= torch.linspace(1.0, 1.0, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
-        scales_2 = torch.linspace(1.0, 1.25, steps=Q.shape[-1]//2)[None, None, None,...].to(K.device)
-        scales = torch.cat([scales_1, scales_2], dim=-1)
-
-   
-        # breakpoint()
-        K.mul_(1/scales)
-        Q.mul_(scales)
-        return Q.permute(0,2,1,3), K.permute(0,2,1,3), V
-
-        
-class DecoderRecenterProcessor(AttentionProcessor):
-
-    def __init__(self, strategy_name):
-        super().__init__(strategy_name)
-        self.stat = {} 
-
-    def stat_linear(self, X, Y:torch.Tensor, name, linear_name):
-        if name not in self.stat:
-            self.stat[name] =  defaultdict() 
-        self.stat[name][linear_name] = Y
-
-    def _separate_heads(self, x: torch.Tensor, num_heads: int) -> torch.Tensor:
-        b, n, c = x.shape
-        x = x.reshape(b, n, num_heads, c // num_heads)
-        return x.transpose(1, 2) 
-
-    def stat_attn(self, X, Y:torch.Tensor, name, n_heads):
-        if 'final' in name or 'cross' in name:
-            q = self.stat[name]['q_proj']
-            k = self.stat[name]['k_proj']
-            v = self.stat[name]['v_proj']
-            sign = torch.sign(torch.sign(k).mean(-2, keepdim=True))
-
-            k_mean = torch.abs(k).mean(-2)[0]
-            q_mean = torch.abs(q).mean(-2)[0]
-
-
-            q = self._separate_heads(q, n_heads)
-            k = self._separate_heads(k, n_heads)
-            v = self._separate_heads(v, n_heads)
-            _, _, _, c_per_head = q.shape
-            attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
-            attn = attn / math.sqrt(c_per_head)
-            attn = torch.softmax(attn, dim=-1)
-            attn = attn.mean(1).mean(1) #[B, T]
-            mask = torch.where(attn > attn.mean(-1,keepdim=True),1,0)
-
-
-            k_high=k.permute(2,0,1,3)[mask.squeeze().nonzero()].squeeze().reshape(1, -1, q.shape[-1]*n_heads)
-            k_low= k.permute(2,0,1,3)[(1-mask).squeeze().nonzero()].squeeze().reshape(1, -1, q.shape[-1]*n_heads)
-            k_high_mean = k_high.mean(-2)[0]
-            k_low_mean = k_low.mean(-2)[0]
-            diff = torch.abs(k_high_mean  - k_low_mean)
-            if 'diff' not in self.stat[name].keys():
-                # self.stat[name]['diff'] = torch.abs(dif.reshape(n_heads, -1))
-                self.stat[name]['diff'] = diff  
-                self.stat[name]['sign'] = sign + q_mean
-                self.stat[name]['q'] = q_mean
-                self.stat[name]['k'] = k_mean 
-            else:
-                self.stat[name]['diff'] += diff
-                self.stat[name]['sign'] += (sign  + q_mean)
-                self.stat[name]['q'] += q_mean
-                self.stat[name]['k'] += k_mean 
-
-            # breakpoint()
-            self.stat[name]['order'] = torch.argsort(self.stat[name]['diff'].reshape(n_heads, -1), descending=True)
-            # self.stat[name]['order'] = torch.argsort(self.stat[name]['q'].reshape(n_heads, -1), descending=True)
-            # self.stat[name]['order'] = torch.argsort(self.stat[name]['k'].reshape(n_heads, -1), descending=True)
-            # self.stat[name]['topk_diff'] = torch.topk(self.stat[name]['diff'].reshape(n_heads,-1), largest=True, k=2)[1]
-            # self.stat[name]['topk_q_max'] = torch.topk(self.stat[name]['q'].reshape(n_heads,-1), largest=True, k=2)[1]
-            # self.stat[name]['topk_k_max'] = torch.topk(self.stat[name]['k'].reshape(n_heads,-1), largest=True, k=2)[1]
-            
-
-            
-
-    def process(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, name, n_bits):
-
-        Q = Q.permute(0,2,1,3)
-        K = K.permute(0,2,1,3)
-
-        K = K - K.mean(1, keepdim=True)
-        Q =  quantize_activation_per_token_absmax(Q, n_bits=4)
-        K =  quantize_activation_per_token_absmax(K, n_bits=4)
-        return Q.permute(0,2,1,3), K.permute(0,2,1,3), V
 
 
 # ============================================================================
@@ -737,6 +539,231 @@ class EncoderRecenterAttentionProcessor(AttentionProcessor):
         x = module.proj(x)
 
         return x
+
+@register_encoder_processor("FAKE_PRUNE")
+class FakePruneProcessor(AttentionProcessor):
+    def __init__(self, strategy_name:str='fake_prune'):
+        super().__init__(strategy_name)
+        self.stat = {}
+        # Store all entropy values per position for each head
+        self.entropy_stats = defaultdict(lambda: {"entropy_per_position": []})
+        self.threshold = 5.0
+        self.percent = None
+        self.prunehighentropy = False
+    def _take_Q(self,args):
+        self.threshold = 5.0
+        self.percent =args.quantization.percent_entropy
+        self.prunehighentropy= args.quantization.high_entropy
+    def calculate_entropy(self, attn_head):
+        """Calculate entropy for each position in a single attention head"""
+        # Convert to tensor if needed
+        if isinstance(attn_head, np.ndarray):
+            attn_head = torch.from_numpy(attn_head)
+        
+        # Ensure attention is normalized (should already be after softmax)
+        eps = 1e-12
+        attn_normalized = torch.clamp(attn_head, min=eps)
+        
+        # Calculate entropy for each query position (each row)
+        entropy_per_position = -torch.sum(attn_normalized * torch.log(attn_normalized), dim=-1)
+        
+        return entropy_per_position
+    
+    def _register_hooks(self, predictor, modules):
+        """Register hooks to capture attention patterns during forward pass"""
+        from segment_anything.modeling.image_encoder import Attention
+        
+        def attention_hook(module, input, output, name):
+            """Hook to capture attention patterns after softmax"""
+            # Get input tensor
+            x = input[0] if isinstance(input, tuple) else input
+            B, H, W, _ = x.shape
+            
+            # Recompute attention to get the attention matrix
+            qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
+            
+            attn = (q * module.scale) @ k.transpose(-2, -1)
+            
+            if module.use_rel_pos:
+                attn = add_decomposed_rel_pos(attn, q, module.rel_pos_h, module.rel_pos_w, (H, W), (H, W))
+            
+            attn = attn.softmax(dim=-1)
+            B_nhead, N, _ = attn.shape  # B * num_heads, N, N
+
+            for head_idx in range(B_nhead):
+                
+                attn_head = attn[head_idx]  # Shape: (N, N)
+                
+                # Calculate entropy for each position
+                entropy_per_position = self.calculate_entropy(attn_head)
+                
+                # Accumulate entropy values for this head
+                head_key = f"{name}.head_{head_idx}"
+                self.entropy_stats[head_key]["entropy_per_position"].extend(entropy_per_position.tolist())
+
+        hooks = []
+        
+        # Register hooks for all encoder attention modules
+        for name, component in predictor.model.image_encoder.named_modules():
+            if isinstance(component, modules):
+                print(f"Registering attention hook for {name}")
+                hooks.append(
+                    component.register_forward_hook(
+                        partial(attention_hook, name=name)
+                    )
+                )
+        return hooks, []  # Return (attention_hooks, linear_hooks)
+    
+    def _run_forward_pass(self, predictor, data_val):
+        """Run forward pass through image encoder only"""
+        imgs = data_val['image'].permute(0, 2, 3, 1).cpu().numpy()
+        predictor.set_image(imgs.squeeze())
+    
+    def calibrate(self, predictor, modules, num_samples=32):
+        """
+        Custom calibration that accumulates all entropy values, then calculates final statistics
+        """
+        # Reset entropy statistics - store all entropy values
+        self.entropy_stats = defaultdict(lambda: {"entropy_per_position": []})
+        
+        # Register hooks (only attention hooks needed)
+        attention_hooks, _ = self._register_hooks(predictor, modules)
+        
+        logger = setup_logger('./calib_logs', self.strategy_name)
+        print(f'______Using: {self.strategy_name}_______')
+        print('Collecting entropy values for all attention heads during calibration')
+        # Run calibration - accumulate all entropy values
+        total_processed = 0
+        for k in range(len(self.dataloaders)):
+            dataloader = self.accelerator.prepare(self.dataloaders[k])
+            print(f'Dataloader {k} length:', len(dataloader))
+            progress_bar = tqdm(total=min(num_samples, len(dataloader)), 
+                              desc=f"Collecting entropy data")
+            
+            for i, data_val in enumerate(dataloader):
+                if total_processed >= num_samples:
+                    break
+                
+                # Run forward pass to trigger hooks and accumulate entropy values
+                self._run_forward_pass(predictor, data_val)
+                
+                total_processed += 1
+                progress_bar.update(1)
+                
+                # Log progress for first few samples
+                if total_processed <= 3:
+                    sample_head_key = list(self.entropy_stats.keys())[0] if self.entropy_stats else None
+                    if sample_head_key:
+                        current_length = len(self.entropy_stats[sample_head_key]["entropy_per_position"])
+                        print(f'After sample {total_processed}: {sample_head_key} has {current_length} entropy values')
+            
+            if total_processed >= num_samples:
+                break
+        
+        # Remove hooks
+        for hook in attention_hooks:
+            hook.remove()
+        
+        # Calculate final statistics from all accumulated entropy values
+        print('Calculating final entropy variance and mean from accumulated data...')
+        self.final_entropy_stats = {}
+        if self.percent is  None:
+            for head_key, stats in self.entropy_stats.items():
+                entropy_values = stats["entropy_per_position"]
+                if len(entropy_values) > 0:
+                    # Convert to tensor for calculation
+                    entropy_tensor = torch.tensor(entropy_values)
+                    
+                    # Calculate mean
+                    entropy_mean = torch.mean(entropy_tensor)
+                    
+                    # Parse layer and head index from key format: 'blocks.22.attn.head_233'
+                    parts = head_key.split('.')
+                    layer_name = f"image_encoder.{parts[0]}.{parts[1]}.{parts[2]}"
+                    head_idx = int(parts[3].split('_')[1])  # Extract head number
+                    
+                    # Only store heads whose entropy mean is greater than threshold
+                    if entropy_mean.item() > self.threshold:
+                        if layer_name not in self.final_entropy_stats:
+                            self.final_entropy_stats[layer_name] = []
+                        self.final_entropy_stats[layer_name].append(head_idx)
+        else :
+            # Group entropy stats by layer
+            layer_heads = {}
+            for head_key, stats in self.entropy_stats.items():
+                entropy_values = stats["entropy_per_position"]
+                if len(entropy_values) > 0:
+                    # Convert to tensor and calculate mean
+                    entropy_tensor = torch.tensor(entropy_values)
+                    entropy_mean = torch.mean(entropy_tensor)
+                    
+                    # Parse layer and head index from key format: 'blocks.22.attn.head_233'
+                    parts = head_key.split('.')
+                    layer_name = f"image_encoder.{parts[0]}.{parts[1]}.{parts[2]}"
+                    head_idx = int(parts[3].split('_')[1])
+                    
+                    if layer_name not in layer_heads:
+                        layer_heads[layer_name] = []
+                    layer_heads[layer_name].append((head_idx, entropy_mean.item()))
+         
+            # For each layer, select top percent of heads with highest entropy
+            for layer_name, heads_with_entropy in layer_heads.items():
+                if len(heads_with_entropy) > 0:
+                    # Sort heads by entropy mean in descending order
+                    if self.prunehighentropy:
+                        heads_with_entropy.sort(key=lambda x: x[1], reverse=True)
+                    else :
+                        heads_with_entropy.sort(key=lambda x: x[1])
+                    # Calculate number of heads to select based on percentage
+                    num_heads_to_select = max(1, int(len(heads_with_entropy) * self.percent ))
+
+                    # Select top percent of heads
+                    selected_heads = heads_with_entropy[:num_heads_to_select]
+                    
+                    # Store only the head indices
+                    self.final_entropy_stats[layer_name] = [head_idx for head_idx, _ in selected_heads]
+            
+        # Log sample statistics
+        for layer_name, head_list in list(self.final_entropy_stats.items()):
+            print(f'Layer {layer_name}: {len(head_list)} heads with high entropy: {head_list[:10]}{"..." if len(head_list) > 10 else ""}')
+   
+    
+    def get_entropy_stats(self):
+        """Return the collected entropy statistics"""
+        return getattr(self, 'final_entropy_stats', {})
+    
+    def process(self, x: torch.Tensor, module, module_name: str = None):
+        """Standard attention processing - no modifications for fake pruning"""
+        if not any(num in module_name for num in ["5", "11", "17", "23"]): # modules whose shape is (16, 4096, 4096)
+            list_prune_head= module.processor.final_entropy_stats.get(module_name, [])
+            # list_prune_head= []
+        else:
+            list_prune_head= []
+            # list_prune_head= module.processor.final_entropy_stats.get(module_name, [])
+        
+        B, H, W, _ = x.shape
+        # Standard attention computation
+        qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
+
+        attn = (q * module.scale) @ k.transpose(-2, -1)
+
+        if module.use_rel_pos:
+            attn = add_decomposed_rel_pos(attn, q, module.rel_pos_h, module.rel_pos_w, (H, W), (H, W))
+
+        attn = attn.softmax(dim=-1)
+        B_nhead, N, _ = attn.shape  # B * num_heads, N, N
+
+        if list_prune_head:
+            attn[list_prune_head, :, :] = 1.0 / N
+    
+        x = (attn @ v).view(B, module.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = module.proj(x)
+
+        return x
+    
+
 @register_encoder_processor("SMOOTH_MEAN_Q")
 class EncoderAttentionProcessorSmoothMeanQ(AttentionProcessor):
     """

@@ -288,7 +288,7 @@ class AttentionObserverElementLow(Attention):
         v = quantize_weight_per_channel_absmax(v.permute(0,1, 3, 2), n_bits=4).permute(0, 1,3, 2)
         O_qfull = attn @ v
         
-        out = self._recombine_heads(O)
+        out = self._recombine_heads(O_qha)
         out = self.out_proj(out)
 
         return out, O,  O_qha, O_qfull

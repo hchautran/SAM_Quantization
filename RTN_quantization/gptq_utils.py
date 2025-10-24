@@ -238,12 +238,14 @@ class GPTQ:
 
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
+        import ipdb; ipdb.set_trace()
+        
         H[diag, diag] += damp
         H = torch.linalg.cholesky(H)
         H = torch.cholesky_inverse(H)
         H = torch.linalg.cholesky(H, upper=True)
         Hinv = H
-
+        import ipdb; ipdb.set_trace()
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
             count = i2 - i1
@@ -274,6 +276,7 @@ class GPTQ:
 
                 err1 = (w - q) / d
                 W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                import ipdb; ipdb.set_trace()
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1

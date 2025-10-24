@@ -24,11 +24,12 @@ from decoder_quant import mask_decoder_monkey_patch, TwoWayTransformerObserver
 from encoder_quant import image_encoder_monkey_patch
 from quant_utils import quantize_activation_per_token_absmax, get_encoder_processor
 from profiler import InferenceProfiler, compare_inference_speed
-from quant_utils import DecoderDoNothingProcessor, EncoderRecenterAttentionProcessor, EncoderAttentionProcessor 
+from quant_utils import  EncoderRecenterAttentionProcessor, EncoderAttentionProcessor
+from decoder_processor import  DecoderDoNothingProcessor
+from segment_anything.modeling.image_encoder import Attention as EncoderSamAttention
 from segment_anything.modeling.transformer import  Attention as  DecoderAttention
 from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining
-from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention
-
+from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention 
 
 
 
@@ -712,8 +713,7 @@ class Engine:
                 processor=decoder_config.get('processor'),
                 n_bits=decoder_config.get('n_bits', 8),
                 weight_quant=decoder_config.get('weight_quant', 'per_channel'),
-                k_preserve=decoder_config.get('k_preserve', 0),
-                args_yaml= args_yaml
+                k_preserve=decoder_config.get('k_preserve', 0),  
             )
             print(f"Decoder quantized: {decoder_config.get('n_bits', 8)}-bit, "
                   f"{decoder_config.get('weight_quant', 'per_channel')}, k_preserve={decoder_config.get('k_preserve', 0)}")
@@ -733,12 +733,13 @@ class Engine:
         if self.quantize_encoder:
             print("Setting up encoder processor...")
             # encoder_processor = EncoderAttentionProcessor()
+            encoder_processor._take_Q(args_yaml)
             encoder_processor.calibrate(
                 predictor=predictor,
-                modules=(DecoderAttention, EncoderAttentionTraining, EncoderAttention),
+                modules=(DecoderAttention, EncoderAttentionTraining, EncoderAttention, EncoderSamAttention),
                 num_samples=num_calib_samples
             )
-            encoder_processor._take_Q(args_yaml)
+            
             if args_yaml.quantization.quansmooth :
                 encoder_processor.smooth_model(predictor,args_yaml.quantization.act_scales_file, args_yaml.quantization.centerQ)
             elif args_yaml.quantization.quanro:
@@ -935,11 +936,12 @@ if __name__ == '__main__':
     engine = Engine('hq44k', quantize_encoder=args.quantize_encoder, quantize_decoder=args.quantize_decoder)
 
     # Setup and calibrate processors
-    processor= get_encoder_processor("COMPENSATE")
+    enc_processor= get_encoder_processor("FAKE_PRUNE")
     encoder_processor, decoder_processor = engine.setup_and_calibrate_processors(
         predictor,
         num_calib_samples=args.num_calib_samples,
-        encoder_processor=processor, 
+        encoder_processor=enc_processor, 
+        decoder_processor= DecoderDoNothingProcessor("DO_NOTHING"),
         args_yaml= args_yaml,
     )
     
