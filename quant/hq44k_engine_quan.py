@@ -166,6 +166,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             self.rot_args = args.quarot_inf
         else:
             self.rot_args = None
+
     def build_predictor(self):
         self.hq_mask_decoder = MaskDecoderHQ(self.model_type) 
         self.predictor = sam_model_registry[self.model_type](checkpoint=self.checkpoint)

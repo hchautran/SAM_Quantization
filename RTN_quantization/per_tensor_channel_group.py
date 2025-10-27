@@ -10,7 +10,7 @@ This module provides various quantization strategies including:
 
 Architecture:
 - Strategy pattern for activation and weight quantization
-- W8A8Linear class uses composition with strategy objects
+- WnAnLinear class uses composition with strategy objects
 - Clean separation between quantization algorithms and linear layer logic
 """
 
@@ -499,10 +499,10 @@ class SelectiveChannelWeightQuantization:
 
 
 # ============================================================================
-# Base W8A8Linear Class
+# Base WnAnLinear Class
 # ============================================================================
 
-class W8A8Linear(nn.Module):
+class WnAnLinear(nn.Module):
     """
     W8A8 quantized linear layer using strategy pattern.
 
@@ -523,7 +523,7 @@ class W8A8Linear(nn.Module):
         quantize_output: bool = False,
     ):
         """
-        Initialize W8A8Linear layer with strategies.
+        Initialize WnAnLinear layer with strategies.
 
         Args:
             in_features: Number of input features
@@ -643,9 +643,9 @@ class W8A8Linear(nn.Module):
         quantizehigh: bool = True,
         up_down_RTN: str = "RTN",
         percent: float = 100
-    ) -> 'W8A8Linear':
+    ) -> 'WnAnLinear':
         """
-        Factory method to create W8A8Linear from float linear layer using strategies.
+        Factory method to create WnAnLinear from float linear layer using strategies.
 
         This method creates the appropriate quantization strategies based on parameters
         and applies them to create a quantized linear layer.
@@ -666,7 +666,7 @@ class W8A8Linear(nn.Module):
             percent: Percentage for density-based quantization
 
         Returns:
-            W8A8Linear instance with configured strategies
+            WnAnLinear instance with configured strategies
         """
         assert isinstance(module, torch.nn.Linear)
 
@@ -684,8 +684,8 @@ class W8A8Linear(nn.Module):
         else:
             raise ValueError(f"Invalid act_quant: {act_quant}")
 
-        # Create W8A8Linear module with activation strategy
-        new_module = W8A8Linear(
+        # Create WnAnLinear module with activation strategy
+        new_module = WnAnLinear(
             module.in_features,
             module.out_features,
             module.bias is not None,
@@ -728,10 +728,10 @@ class W8A8Linear(nn.Module):
 # Backward Compatibility Aliases (Legacy Subclasses)
 # ============================================================================
 # These classes are kept for backward compatibility with existing code.
-# New code should use W8A8Linear directly with appropriate strategies.
+# New code should use WnAnLinear directly with appropriate strategies.
 
-class W8A8LinearPerChannel(W8A8Linear):
-    """Legacy class for backward compatibility. Use W8A8Linear with PerTokenActivationQuantization instead."""
+class WnAnLinearPerChannel(WnAnLinear):
+    """Legacy class for backward compatibility. Use WnAnLinear with PerTokenActivationQuantization instead."""
 
     def __init__(
         self,
@@ -751,8 +751,8 @@ class W8A8LinearPerChannel(W8A8Linear):
         self.rounding = rounding
 
 
-class W8A8LinearPerTensor(W8A8Linear):
-    """Legacy class for backward compatibility. Use W8A8Linear with PerTensorActivationQuantization instead."""
+class WnAnLinearPerTensor(WnAnLinear):
+    """Legacy class for backward compatibility. Use WnAnLinear with PerTensorActivationQuantization instead."""
 
     def __init__(
         self,
@@ -770,8 +770,8 @@ class W8A8LinearPerTensor(W8A8Linear):
         )
 
 
-class W8A8LinearPerGroup(W8A8Linear):
-    """Legacy class for backward compatibility. Use W8A8Linear with PerGroupActivationQuantization instead."""
+class WnAnLinearPerGroup(WnAnLinear):
+    """Legacy class for backward compatibility. Use WnAnLinear with PerGroupActivationQuantization instead."""
 
     def __init__(
         self,
@@ -791,8 +791,8 @@ class W8A8LinearPerGroup(W8A8Linear):
         self.group_size = group_size
 
 
-class W8A8LinearDensityBased(W8A8Linear):
-    """Legacy class for backward compatibility. Use W8A8Linear with DensityBasedActivationQuantization instead."""
+class WnAnLinearDensityBased(WnAnLinear):
+    """Legacy class for backward compatibility. Use WnAnLinear with DensityBasedActivationQuantization instead."""
 
     def __init__(
         self,
@@ -817,8 +817,8 @@ class W8A8LinearDensityBased(W8A8Linear):
         self.quantizehigh = quantize_high  # Backward compatibility
 
 
-class W8A8LinearSelectiveChannel(W8A8Linear):
-    """Legacy class for backward compatibility. Use W8A8Linear with SelectiveChannelWeightQuantization instead."""
+class WnAnLinearSelectiveChannel(WnAnLinear):
+    """Legacy class for backward compatibility. Use WnAnLinear with SelectiveChannelWeightQuantization instead."""
 
     def __init__(
         self,

@@ -12,7 +12,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from RTN_quantization.utils import replace_linear_with_quantized, QuantizationConfig
-from RTN_quantization.per_tensor_channel_group import W8A8Linear
+from quant.quant_utils import WnAnLinear
 import quarot.utils as utils_q
 def show_mask(mask, ax, random_color=False):
     if random_color:

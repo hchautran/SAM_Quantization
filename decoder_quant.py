@@ -26,7 +26,7 @@ from quant_utils import (
     quantize_activation_per_token_absmax,
 )
 from RTN_quantization import per_tensor_channel_group
-from RTN_quantization.utils import QuantizationConfig
+from quant.quant_utils import QuantizationConfig
 from utils import inference_image
 
 
