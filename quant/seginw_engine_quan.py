@@ -1279,7 +1279,7 @@ if __name__ == "__main__":
 
     
     # config_file = args_.config if args_.config else './quant/config/coco/centerQ.yaml'
-    config_file = './quant/config/coco/base_h.yaml'
+    config_file = './quant/config/coco/centerQ.yaml'
     args_yaml = OmegaConf.load(config_file)
 
     engine = SeginwSamEngine(SeginwInferenceStrategy(args_yaml))

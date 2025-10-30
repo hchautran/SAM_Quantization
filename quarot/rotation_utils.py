@@ -1,4 +1,5 @@
-import model_utils
+from . import model_utils
+# import model_utils
 import torch
 import typing
 import utils
@@ -6,7 +7,7 @@ import tqdm, math
 import torch.nn as nn
 
 from functools import partial
-from hadamard_utils import random_hadamard_matrix, apply_exact_had_to_linear, is_pow2
+from .hadamard_utils import random_hadamard_matrix, apply_exact_had_to_linear, is_pow2
 from fast_hadamard_transform import hadamard_transform
 
 
@@ -403,10 +404,10 @@ def rotate_model(model, Q_image_encoder,Q_mask_decoder, args, rtn_ro_config, cen
             custom_attn.rel_pos_w = original_attn.rel_pos_w
         
         # Set Q matrix
-        custom_attn._take_Q(Q_image_encoder,rtn_ro_config.qkT_v, rtn_ro_config.n_bits)
+        custom_attn._take_Q(Q_image_encoder)
         custom_mlp._take_Q(Q_image_encoder)
-        if not centerQ:
-            block.attn = custom_attn
+        # if not centerQ:
+        block.attn = custom_attn
         block.mlp = custom_mlp
     
     rotate_model_sam(model,Q_image_encoder,Q_mask_decoder,args,centerQ)

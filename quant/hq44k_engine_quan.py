@@ -194,9 +194,9 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             if self.qkT_v:
                 self.qkT_v= False
 
-        
-        if self.centerQ:
 
+        if self.centerQ:
+            calibrate_= True
             from encoder_quant import image_encoder_monkey_patch
             if not os.path.exists('./pretrained_checkpoint/stat_dict.pth'):
                 num_calib_samples=8

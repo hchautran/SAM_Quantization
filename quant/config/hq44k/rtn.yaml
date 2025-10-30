@@ -25,3 +25,5 @@ quantization:
   channel: False
   percent: 100
   centerQ: False
+  percent_entropy: 0.9
+  high_entropy: True 

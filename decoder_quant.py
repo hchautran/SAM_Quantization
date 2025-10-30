@@ -21,13 +21,22 @@ from segment_anything.modeling.transformer import (
 )
 
 # Local imports
-from quant_utils import (
+from processors.decoder import (
     DecoderDoNothingProcessor,
     quantize_activation_per_token_absmax,
 )
 from RTN_quantization import per_tensor_channel_group
-from quant.quant_utils import QuantizationConfig
+from quant.quant_utils import (
+    QuantizationConfig,
+    # AttentionProcessor,
+    # EncoderAttentionProcessorSmoothMeanQ,
+    # EncoderAttentionProcessorSmooth,
+    # EncoderAttentionProcessorHighLow,
+    # ProcessStrategy,
+)
+from RTN_quantization.utils import replace_linear_with_quantized,QuantizationConfig
 from utils import inference_image
+from processors.decoder_observer import TwoWayTransformerObserverElementLow,TwoWayAttentionBlockObserverElementLow, AttentionObserverElementLow
 
 
 
@@ -498,28 +507,29 @@ def mask_decoder_monkey_patch(
         weight_quant: Weight quantization strategy
         k_preserve: Number of channels to preserve
     """
+    # for name, module in model.named_modules():
+    #     if isinstance(module, Attention):
+    #         module.__class__ = AttentionObserver
+    #         module.processor = processor
+    #         module.name = name
+    #         module.n_bits = n_bits
+    #     if isinstance(module, TwoWayAttentionBlock):
+    #         module.__class__ = TwoWayAttentionBlockObserver
+    #     if isinstance(module, TwoWayTransformer):
+    #         module.__class__ = TwoWayTransformerObserver
+    #         TwoWayTransformerObserver.debug = debug 
     for name, module in model.named_modules():
         if isinstance(module, Attention):
-            module.__class__ = AttentionObserver
-            module.processor = processor
-            module.name = name
-            module.n_bits = n_bits
+            module.__class__ = AttentionObserverElementLow
+            module.high_element = False
         if isinstance(module, TwoWayAttentionBlock):
-            module.__class__ = TwoWayAttentionBlockObserver
+            module.__class__ = TwoWayAttentionBlockObserverElementLow
         if isinstance(module, TwoWayTransformer):
-            module.__class__ = TwoWayTransformerObserver
-            TwoWayTransformerObserver.debug = debug 
+            module.__class__ = TwoWayTransformerObserverElementLow
+            TwoWayTransformerObserverElementLow.debug = debug 
 
     modules_to_exclude = [
-        "pos_embed",
-        "cls_token",
-        "patch_embed",
-        "neck",
-        "fpn",
-        "mask_tokens",
-        "iou_token",
-        "output_upscaling",
-        "output_hypernetworks_mlps",
+        
     ]
 
     config = QuantizationConfig(
@@ -529,13 +539,17 @@ def mask_decoder_monkey_patch(
         act_quant="per_token",
         quantize_output=False,
     )
-
-    replace_linear_with_target_and_quantize(
-        module=model.mask_decoder,
-        config=config,
-        module_name_to_exclude=modules_to_exclude,
-        k_preserve=k_preserve,
-    )
+    replace_linear_with_quantized(
+            module=model.mask_decoder,
+            config=config,
+            module_name_to_exclude=modules_to_exclude,
+        )
+    # replace_linear_with_target_and_quantize(
+    #     module=model.mask_decoder,
+    #     config=config,
+    #     module_name_to_exclude=modules_to_exclude,
+    #     k_preserve=k_preserve,
+    # )
 
 
 

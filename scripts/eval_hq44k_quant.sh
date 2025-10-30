@@ -3,10 +3,10 @@
 
 #!/bin/bash
 
-YAML_FILE="./quant/config/hq44k/centerQ.yaml"
+YAML_FILE="./quant/config/hq44k/gptq_cuda.yaml"
 PYTHON_SCRIPT="quant/hq44k_engine_quan.py"
 CUDA_DEVICE=2
-MASTER_PORT=29500
+MASTER_PORT=29501
 
 # Bit combinations to test
 declare -a BIT_COMBINATIONS=("4,4" )

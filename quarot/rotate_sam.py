@@ -1,7 +1,8 @@
 import torch
-import model_utils
-import rotation_utils
-import hadamard_utils
+# import model_utils
+# import rotation_utils
+# import hadamard_utils
+from . import (model_utils, rotation_utils, hadamard_utils)
 from segment_anything import sam_model_registry, SamPredictor
 import copy
 import os

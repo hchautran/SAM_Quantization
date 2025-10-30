@@ -5,7 +5,7 @@ from matplotlib import pyplot as plt
 import seaborn as sns
 from segment_anything import SamPredictor, sam_model_registry
 import pandas  as pd 
-from typing import Optional
+from typing import Optional, Tuple
 
 def show_points(coords, labels, ax, marker_size=200):
     pos_points = coords[labels==1]
@@ -746,3 +746,111 @@ def plot_weight_activation_comparison(weight,
 
     return fig
 
+@torch.no_grad()
+def quantize_activation_per_highblock_abmax(
+    t: torch.Tensor, 
+    n_bits: int = 8, 
+    block_size: int = 64, 
+    percent: float = 0.5,
+    high =True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    t_shape = t.shape 
+    dim = t_shape[-1]
+    assert dim % block_size == 0, f"Dimension {dim} must be divisible by block_size {block_size}"
+    
+    # Reshape to (num_tokens, dim)
+    t = t.contiguous().view(-1, dim)
+    num_tokens = t.shape[0]
+    num_blocks = dim // block_size
+    num_selected_blocks = int(percent * num_blocks)
+
+    # Calculate scales for all tokens
+    scales = t.abs().max(dim=-1, keepdim=True)[0]
+    q_max = 2 ** (n_bits - 1) - 1
+    scales.clamp_(min=1e-5).div_(q_max)
+    
+    # Reshape to (num_tokens, num_blocks, block_size)
+    t_blocks = t.view(num_tokens, num_blocks, block_size)
+    
+    # Calculate block averages for all tokens: (num_tokens, num_blocks)
+    block_averages = t_blocks.abs().mean(dim=2)
+    
+    # Get top block indices for all tokens
+    if high:
+        _, top_indices = torch.topk(block_averages, num_selected_blocks, dim=1)
+    else:
+        _, top_indices = torch.topk(block_averages, num_selected_blocks, dim=1, largest=False)
+    block_indices = top_indices.sort(dim=1)[0]  
+    
+    # Create selection mask: (num_tokens, num_blocks)
+    selection_mask = torch.zeros(num_tokens, num_blocks, dtype=torch.bool, device=t.device)
+    selection_mask.scatter_(1, block_indices, True)
+    
+    # Expand mask to match block structure: (num_tokens, num_blocks, block_size)
+    block_mask = selection_mask.unsqueeze(-1).expand(-1, -1, block_size)
+    flat_mask = block_mask.reshape(num_tokens, dim)
+    
+    # Apply quantization only to selected blocks
+    t_quantized = t.clone()
+    t_quantized = torch.where(
+        flat_mask,
+        (t / scales).round_() * scales,
+        t_quantized
+    )
+    
+    batch_shape = t_shape[:-1]
+    block_indices = block_indices.view(*batch_shape, num_selected_blocks)
+    # Reshape back to original shape
+    t=t.view(t_shape)
+    # import ipdb; ipdb.set_trace()
+    return t_quantized.view(t_shape), block_indices
+
+def find_O_qha(qattn: torch.Tensor,
+               v: torch.Tensor,
+               indices: torch.Tensor, # (B_nHead, HW,num_selected_blocks)
+               n_bits: int = 8, 
+               block_size: int = 64):
+    attn_shape= qattn.shape
+    if len(attn_shape) ==4:
+        qattn= qattn.squeeze(0)
+        v= v.squeeze(0)
+        indices= indices.squeeze(0)
+    B_nHead,HW,D= qattn.shape
+    B_nHead, D , C = v.shape
+    num_blocks = D // block_size
+    
+    
+    O_qha = torch.zeros(B_nHead, HW, C, dtype=v.dtype, device=v.device) # (B_nHead, HW, C)
+    v= v.permute(0, 2, 1).contiguous() # (B_nHead, C, HW)
+    # Calculate scales for all tokens across all heads
+    scales = v.abs().max(dim=-1, keepdim=True)[0]  # (B_nHead, C, 1)
+    q_max = 2 ** (n_bits - 1) - 1
+    scales.clamp_(min=1e-5).div_(q_max)
+    
+    for i in range(HW):
+        v_quantized= v.clone()
+        attn_= qattn[:,i,:] # each token of shape (B_nHead, HW) have it's own selected blocks - run all tokens in one head then concatinate to O_qha. Run all heads in parallel
+        indice = indices[:, i, :].squeeze()  # (B_nHead, num_selected_blocks)
+        
+        mask= torch.zeros(B_nHead, num_blocks, dtype=torch.bool, device=v.device)
+        mask.scatter_(1, indice, True)
+        block_mask = mask.unsqueeze(-1).expand(-1, -1, block_size)
+        block_mask = block_mask.reshape(B_nHead, D).unsqueeze(-1)  
+        flat_mask = block_mask.expand(-1,-1,C).permute(0,2,1) 
+        
+        v_quantized = torch.where(
+            flat_mask,
+            (v/ scales).round_() * scales,
+            v_quantized
+        )
+        v_quantized=v_quantized.permute(0, 2, 1).contiguous()
+        
+        O_qha[:, i, :] =  torch.bmm(qattn[:,i,:].unsqueeze(1), v_quantized).squeeze(1) # (B_nHead, C)
+       
+    v= v.permute(0, 2, 1).contiguous()
+    # change v to it's original shape
+    if len(attn_shape) ==4:
+        v = v.unsqueeze(0)
+    return O_qha
+        
+        

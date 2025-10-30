@@ -17,7 +17,7 @@ from per_tensor_channel_group import (
     quantize_weight_per_tensor_absmax,
     quantize_weight_per_group_absmax_input_features,
 )
-from hadamard_utils import matmul_hadU_cuda, fast_hadamard_transform
+from .hadamard_utils import matmul_hadU_cuda, fast_hadamard_transform
 from functools import partial 
 import numpy as np
 
