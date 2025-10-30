@@ -31,11 +31,27 @@ where $A_i[n, m]$ represents the attention weight from query position $n$ to key
 
 ### 2.1 Shannon Entropy Definition
 
+We define two variants of entropy computation for attention heads:
+
+#### Variant 1: Per-Position Entropy (HeadPruneProcessor)
+
 For each query position $n$ in head $i$, the attention entropy is:
 
 $$H_i(n) = -\sum_{m=1}^{N} A_i[n, m] \log A_i[n, m]$$
 
 This measures the uncertainty or spread of the attention distribution at position $n$.
+
+#### Variant 2: Global Mean Entropy (PositionalPruneProcessor)
+
+For head $i$, we compute a single entropy value by treating the entire attention matrix as a flattened distribution:
+
+$$H_i^{\text{global}} = -\frac{1}{N^2} \sum_{n=1}^{N} \sum_{m=1}^{N} A_i[n, m] \log A_i[n, m]$$
+
+This is equivalent to:
+
+$$H_i^{\text{global}} = -\mathbb{E}_{(n,m) \sim \text{Uniform}(N^2)}[A_i[n, m] \log A_i[n, m]]$$
+
+This measures the average information content across all attention weights in the head.
 
 ### 2.2 Entropy Properties
 
@@ -47,16 +63,26 @@ This measures the uncertainty or spread of the attention distribution at positio
   - Indicates **diffuse, non-discriminative** attention
   - Example: $A = [0.25, 0.25, 0.25, 0.25]$ → $H = 1.39$
 
-### 2.3 Mean Head Entropy
+### 2.3 Mean Head Entropy Across Samples
 
-To characterize an entire attention head across all positions and samples, we compute:
+To characterize an entire attention head across calibration samples, we compute:
 
-$$\bar{H}_i = \mathbb{E}_{n,s}\left[H_i^{(s)}(n)\right] = \frac{1}{S \cdot N} \sum_{s=1}^{S} \sum_{n=1}^{N} H_i^{(s)}(n)$$
+#### For Per-Position Entropy (HeadPruneProcessor):
+
+$$\bar{H}_i^{\text{pos}} = \frac{1}{S \cdot N} \sum_{s=1}^{S} \sum_{n=1}^{N} H_i^{(s)}(n)$$
 
 where:
 - $s$ indexes calibration samples
 - $S$ is the total number of calibration samples
-- $H_i^{(s)}(n)$ is the entropy at position $n$ for sample $s$ in head $i$
+- $H_i^{(s)}(n)$ is the per-position entropy at position $n$ for sample $s$ in head $i$
+
+#### For Global Mean Entropy (PositionalPruneProcessor):
+
+$$\bar{H}_i^{\text{global}} = \frac{1}{S} \sum_{s=1}^{S} H_i^{\text{global},(s)}$$
+
+where $H_i^{\text{global},(s)}$ is the global mean entropy for sample $s$.
+
+**Important Note**: The name "Positional" in PositionalPruneProcessor refers to indexing heads by their position in the $B \times h$ dimension (where $B$ is batch size), NOT to computing positional/per-position entropy. This processor actually computes a single global entropy value per head.
 
 ## 3. Pruning Strategies
 
@@ -80,7 +106,7 @@ $$\mathcal{P}_{\text{high}}^{(\tau)} = \left\{i \mid \bar{H}_i > \tau\right\}$$
 - Equivalent to removing "confused" heads that attend everywhere equally
 
 **Mathematical Justification**:
-If $A_i \approx \text{Uniform}(N)$, then:
+If $A_i \approx \text{Uniform}(N \times N)$, then:
 
 $$A_i[n, m] \approx \frac{1}{N} \implies \text{Attention}_i \approx \frac{1}{N} \sum_{m=1}^{N} V_i[m] = \bar{V}_i$$
 
@@ -122,39 +148,93 @@ where $p \in (0, 1)$ is the pruning percentage.
 
 ### 4.1 Calibration Phase
 
+We implement two distinct approaches:
+
+#### Algorithm 1: Global Mean Entropy Calibration (PositionalPruneProcessor)
+
 ```
-Algorithm 1: Entropy-Based Head Calibration
 Input: Model M, Calibration dataset D, Number of samples S
-Output: Mean entropy per head {H̄_i}
+Output: Mean entropy per head {H̄_i^global}
 
 1: Initialize: entropy_stats ← {}
 2: for sample s = 1 to S do
 3:     for each attention layer l in M do
 4:         Compute attention matrices A = softmax(QK^T/√d_k)
-5:         for each head i = 1 to h do
-6:             for each position n = 1 to N do
-7:                 H_i^(s)(n) ← -∑_m A[n,m] log A[n,m]
-8:                 entropy_stats[l,i].append(H_i^(s)(n))
-9:             end for
-10:        end for
-11:    end for
-12: end for
-13: for each layer l, head i do
-14:    H̄_i ← mean(entropy_stats[l,i])
-15: end for
-16: return {H̄_i}
+5:         Reshape A to (B×h, N, N) where B is batch size
+6:         for each head index i = 0 to (B×h)-1 do
+7:             A_i ← A[i, :, :]  # Get (N, N) attention matrix
+8:             # Compute global mean entropy
+9:             H_i^global ← -mean(A_i ⊙ log(A_i))  # element-wise
+10:            entropy_stats[l,i].append(H_i^global)
+11:        end for
+12:    end for
+13: end for
+14: for each layer l, head i do
+15:    H̄_i^global ← mean(entropy_stats[l,i])
+16: end for
+17: return {H̄_i^global}
 ```
 
-### 4.2 Pruning Mask Generation
+**Key Difference**: This treats each head's entire attention matrix as a single distribution and computes one scalar entropy value by averaging $-p \log p$ across all $N^2$ elements.
 
-For each layer $l$, generate a binary mask $\mathbf{m}_l \in \{0,1\}^h$:
+#### Algorithm 2: Per-Position Entropy Calibration (HeadPruneProcessor)
+
+```
+Input: Model M, Calibration dataset D, Number of samples S
+Output: Mean entropy per head {H̄_i^pos}
+
+1: Initialize: entropy_stats ← {}
+2: for sample s = 1 to S do
+3:     for each attention layer l in M do
+4:         Compute attention matrices A = softmax(QK^T/√d_k)
+5:         Reshape A to (h, B, N, N)
+6:         for each head index i = 0 to h-1 do
+7:             for batch b = 0 to B-1 do
+8:                 for each position n = 1 to N do
+9:                     # Compute per-position entropy
+10:                    H_i^(b,s)(n) ← -∑_m A_i[b,n,m] log A_i[b,n,m]
+11:                    entropy_stats[l,i].append(mean(H_i^(b,s)))
+12:                end for
+13:            end for
+14:        end for
+15:    end for
+16: end for
+17: for each layer l, head i do
+18:    H̄_i^pos ← mean(entropy_stats[l,i])
+19: end for
+20: return {H̄_i^pos}
+```
+
+**Key Difference**: This computes entropy for each query position's distribution, then averages across all positions.
+
+### 4.2 Indexing Scheme: "Positional" Nomenclature
+
+The term "Positional" in PositionalPruneProcessor is potentially misleading:
+
+- **Does NOT mean**: Computing position-specific entropy (that's HeadPruneProcessor)
+- **Actually means**: Indexing heads by their absolute position in the $B \times h$ flattened dimension
+
+For example, with $B=25$ batch size and $h=16$ heads per layer:
+- Head indices range from 0 to 399
+- Index 0 = batch 0, head 0
+- Index 16 = batch 1, head 0
+- Index 233 = batch 14, head 9
+
+This indexing scheme allows tracking entropy statistics separately for each (batch, head) combination during calibration.
+
+### 4.3 Pruning Mask Generation
+
+For each layer $l$, generate a binary mask $\mathbf{m}_l$:
+
+**PositionalPruneProcessor**: Mask of size $B \times h = 400$ (for typical calibration)
+**HeadPruneProcessor**: Mask of size $h \times 25 = 400$ (aggregated to heads)
 
 $$m_l[i] = \begin{cases}
 1 & \text{if } i \in \mathcal{P}_l \text{ (prune)} \\
 0 & \text{otherwise (keep)}
 \end{cases}$$
 
-### 4.3 Modified Attention Computation
+### 4.4 Modified Attention Computation
 
 During inference, the multi-head attention is modified:
 
@@ -181,17 +261,27 @@ In our implementation, we use mean value replacement to maintain output dimensio
 | Calibration samples | $S$ | 32 | Number of samples for statistics |
 | Pruning strategy | - | High/Low | Which entropy regime to target |
 
-### 5.2 Per-Position vs Averaged Entropy
+### 5.2 Processor Comparison
 
-We implement two variants:
+We implement two distinct processors with different entropy computation methods:
 
-**Variant 1: Positional Entropy** (`PositionalPruneProcessor`)
-$$\bar{H}_i = \frac{1}{S \cdot N} \sum_{s,n} H_i^{(s)}(n)$$
-Captures fine-grained positional attention patterns.
+| Processor | Entropy Formula | Granularity | Index Dimension |
+|-----------|----------------|-------------|-----------------|
+| **PositionalPruneProcessor** | $H = -\text{mean}(A \odot \log A)$ | Global per head | $B \times h = 400$ |
+| **PositionalQuantProcessor** | $H = -\text{sum}(A \odot \log A)$ | Global per head | $B \times h = 400$ |
+| **HeadPruneProcessor** | $H(n) = -\sum_m A[n,m] \log A[n,m]$ | Per-position, then averaged | $h \times 25 = 400$ |
 
-**Variant 2: Mean Entropy** (`HeadPruneProcessor`)
-$$\bar{H}_i = \frac{1}{S} \sum_{s} \left(\frac{1}{N} \sum_{n} H_i^{(s)}(n)\right)$$
-Provides layer-level head characterization.
+**Critical Distinction**:
+- PositionalPrune/Quant: Compute one entropy value per head by flattening the entire $(N,N)$ matrix
+- HeadPrune: Compute $N$ entropy values (one per query position), then average them
+
+The mathematical difference:
+
+$$H^{\text{positional}} = -\frac{1}{N^2}\sum_{n,m} A[n,m] \log A[n,m]$$
+
+$$H^{\text{head}} = \frac{1}{N} \sum_{n=1}^{N} \left(-\sum_{m=1}^{N} A[n,m] \log A[n,m]\right)$$
+
+These are **not equivalent** due to the non-linearity of the logarithm and summation.
 
 ## 6. Theoretical Analysis
 
@@ -203,7 +293,26 @@ $$I(Q; K) \leq H(A)$$
 
 where $I$ is mutual information. High entropy implies high capacity but potentially noisy signal.
 
-### 6.2 Redundancy Hypothesis
+### 6.2 Global vs. Per-Position Entropy
+
+The two entropy measures capture different aspects of attention:
+
+**Global Mean Entropy** ($H^{\text{global}}$):
+- Measures overall uniformity of the attention matrix
+- Sensitive to global attention patterns (e.g., broadcasting to all positions)
+- More aggressive: treats entire matrix as one distribution
+
+**Per-Position Entropy** ($H^{\text{pos}}$):
+- Measures average selectivity across query positions
+- Sensitive to position-specific attention patterns
+- More fine-grained: respects the structure of attention rows
+
+**Relationship**:
+$$H^{\text{global}} \leq H^{\text{pos}} \leq \log N$$
+
+with equality when attention is uniform. The gap between them indicates heterogeneity in attention patterns across positions.
+
+### 6.3 Redundancy Hypothesis
 
 If multiple heads have similar entropy distributions and values, they may be learning redundant features:
 
@@ -211,7 +320,7 @@ $$\text{Redundancy}(i, j) = 1 - \frac{D_{KL}(A_i \| A_j) + D_{KL}(A_j \| A_i)}{2
 
 High-entropy heads tend to have high mutual redundancy.
 
-### 6.3 Compression Trade-off
+### 6.4 Compression Trade-off
 
 Pruning involves a trade-off between model compression and performance:
 
@@ -236,7 +345,7 @@ where:
 
 ### 7.3 Selective Pruning (Layer-Specific)
 
-In SAM's image encoder (ViT-H with 32 layers), early and late layers may benefit from different strategies:
+In SAM's image encoder (ViT-L with 24 layers), early and late layers may benefit from different strategies:
 - **Early layers**: Keep diverse (higher entropy) heads for broad feature extraction
 - **Middle layers**: Prune high-entropy heads for discriminative features
 - **Late layers**: Keep task-specific (potentially low-entropy) heads
@@ -245,14 +354,22 @@ In SAM's image encoder (ViT-H with 32 layers), early and late layers may benefit
 
 ### 8.1 Mask Application
 
-Our implementation uses a boolean mask of size $(B \times h)$ where $B$ is batch size and $h$ is number of heads:
+Our implementation uses a boolean mask where the indexing depends on the processor:
 
+**PositionalPruneProcessor**: Mask indexed by batch × head position
 ```python
+# mask shape: (B*h,) = (400,) for typical calibration
 if prune_mask is not None:
     q_attn = q[~prune_mask, :, :]
     k_attn = k[~prune_mask, :, :]
     v_attn = v[~prune_mask, :, :]
     v_pruned = v[prune_mask, :, :]
+```
+
+**HeadPruneProcessor**: Mask indexed by head × position
+```python
+# mask shape: (h*positions,) = (400,) mapped to heads
+# Positions are aggregated to determine which heads to prune
 ```
 
 ### 8.2 Output Dimension Preservation
@@ -395,7 +512,7 @@ $$r_{\text{eff}} = \exp(H(A)) = \exp\left(-\sum_i p_i \log p_i\right)$$
 - Low entropy → $r_{\text{eff}} \ll N$ → Attention is peaked → High selectivity
 
 **Empirical Distribution**:
-In our experiments, heads with $\bar{H} > 5.0$ exhibit:
+In our experiments, heads with $\bar{H}^{\text{global}} > 0.15$ (for mean entropy) or $\bar{H}^{\text{pos}} > 5.0$ (for per-position entropy) exhibit:
 $$\mathbb{E}[r_{\text{eff}}] \approx 0.87N \quad \text{(attending to 87% of all tokens)}$$
 
 Such heads fail to provide token-specific routing and can be safely pruned.
@@ -410,13 +527,24 @@ quantization:
   high_entropy: true          # true: prune high entropy, false: prune low entropy
 ```
 
+Select processor in code:
+```python
+# Global mean entropy (more aggressive)
+processor = PositionalPruneProcessor()
+
+# Per-position entropy (more conservative)
+processor = HeadPruneProcessor()
+```
+
 ## 11. Conclusion
 
 This work demonstrates that entropy-based attention head pruning provides a principled, information-theoretic approach to compressing Vision Transformers while maintaining or even improving task performance.
 
 ### Key Contributions
 
-1. **Theoretical Framework**: We formalized attention head pruning through Shannon entropy, defining high-entropy heads as exhibiting nearly uniform distributions that contribute minimal discriminative information.
+1. **Theoretical Framework**: We formalized attention head pruning through Shannon entropy, with two distinct computation methods:
+   - **Global mean entropy**: Treats each head's attention matrix as a single distribution
+   - **Per-position entropy**: Computes entropy for each query position, then averages
 
 2. **Empirical Validation**: Experiments on SAM's image encoder validate our hypothesis:
    - High-entropy pruning achieves **+0.85% mIoU improvement** at 30% pruning
@@ -437,6 +565,15 @@ $$f_{\mathcal{P}}(x) = f_{\text{baseline}}(x) + \epsilon_{\text{noise}}(x) - \ep
 
 where removing high-entropy heads eliminates more noise than signal.
 
+### Clarification on Naming
+
+**Important**: The "Positional" in PositionalPruneProcessor is a misnomer:
+- It does **NOT** compute per-position entropy
+- It **DOES** index heads by their position in the batch×heads dimension
+- HeadPruneProcessor actually computes per-position entropy
+
+This naming can be confusing and future versions should clarify this distinction.
+
 ### Limitations and Future Work
 
 1. **Layer-Specific Analysis**: Current approach applies uniform pruning ratios across all layers. Future work should investigate layer-wise adaptive pruning.
@@ -446,6 +583,8 @@ where removing high-entropy heads eliminates more noise than signal.
 3. **Co-Design with Quantization**: Combining entropy-based pruning with quantization-aware training may yield synergistic compression benefits.
 
 4. **Theoretical Gap**: While empirically successful, a rigorous proof of why high-entropy pruning can improve performance remains open.
+
+5. **Entropy Computation Variance**: The two methods (global vs per-position) produce different entropy values and may prune different heads. A systematic comparison is needed.
 
 ### Practical Recommendations
 
@@ -457,7 +596,9 @@ For SAM image encoder deployment:
 
 ### Final Remarks
 
-This work bridges information theory and neural network compression, demonstrating that not all parameters contribute equally to model capacity. By measuring attention entropy, we can identify and eliminate redundant computation without sacrificing—and sometimes improving—task performance. The success of this approach suggests that modern Vision Transformers are significantly over-parameterized, and principled compression methods can unlock efficient deployment without architectural changes.
+This work bridges information theory and neural network compression, demonstrating that not all parameters contribute equally to model capacity. By measuring attention entropy—whether globally or per-position—we can identify and eliminate redundant computation without sacrificing, and sometimes improving, task performance. The success of this approach suggests that modern Vision Transformers are significantly over-parameterized, and principled compression methods can unlock efficient deployment without architectural changes.
+
+The distinction between global and per-position entropy computation provides practitioners with two complementary tools: global entropy for aggressive pruning of broadly diffuse heads, and per-position entropy for more nuanced analysis of attention selectivity patterns.
 
 ## References
 
@@ -470,4 +611,4 @@ This work bridges information theory and neural network compression, demonstrati
 
 **Author**: SAM Quantization Team
 **Date**: 2025-10-29
-**Version**: 1.0
+**Version**: 2.0 (Updated to reflect actual implementation)

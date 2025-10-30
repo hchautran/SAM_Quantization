@@ -1,7 +1,7 @@
 """Encoder processors for SAM quantization."""
 
 from .basic import EncoderAttentionProcessor, EncoderRecenterAttentionProcessor
-from .pruning import PositionalPruneProcessor, HeadPruneProcessor, PositionalQuantProcessor 
+from .entropy import PositionalPruneProcessor, HeadPruneProcessor, PositionalQuantProcessor 
 from .smooth import (
     EncoderAttentionProcessorSmoothMeanQ,
     EncoderAttentionProcessorSmooth,

@@ -894,7 +894,8 @@ if __name__ == '__main__':
     # Setup and calibrate processors
     # enc_processor= get_encoder_processor("HEAD_PRUNE")
     # enc_processor= get_encoder_processor("POSITIONAL_PRUNE")
-    enc_processor= get_encoder_processor("POSITIONAL_QUANT")
+    enc_processor= get_encoder_processor("POSITIONAL_PRUNE")
+    # enc_processor= get_encoder_processor("POSITIONAL_QUANT")
     encoder_processor, decoder_processor = engine.setup_and_calibrate_processors(
         predictor,
         num_calib_samples=args.num_calib_samples,

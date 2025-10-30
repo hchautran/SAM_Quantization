@@ -279,7 +279,7 @@ def main():
                         default=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
                         help='List of percent_entropy values to test')
     parser.add_argument('--processors', type=str, nargs='+',
-                        default=['POSITIONAL_PRUNE', 'POSITIONAL_QUANT', 'HEAD_PRUNE'],
+                        default=['HEAD_PRUNE', 'POSITIONAL_QUANT', 'POSITIONAL_PRUNE'],
                         help='List of processors to benchmark')
 
     # Evaluation parameters

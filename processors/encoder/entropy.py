@@ -12,34 +12,64 @@ from quant_utils import quantize_activation_per_channel_absmax, quantize_activat
 
 
 class PositionalPruneProcessor(AttentionProcessor):
-    """Processor that identifies and prunes attention heads based on entropy."""
+    """
+    Processor that prunes attention heads based on mean entropy of their attention distribution.
+
+    This processor:
+    1. Computes a single mean entropy value for each head by treating the entire attention
+       matrix as a flattened probability distribution
+    2. Tracks entropy across calibration samples for each head position (B*num_heads index)
+    3. Selects heads with highest/lowest entropy (based on percent_entropy) for pruning
+    4. Replaces pruned head outputs with mean of value vectors
+
+    The name "Positional" refers to indexing heads by their position in the batch*num_heads
+    dimension (0-399 for 16 heads * 25 samples, for example), not positional encoding.
+    """
 
     def __init__(self, strategy_name: str = 'PositionalHeadPruneProcessor'):
         super().__init__(strategy_name)
         self.stat = {}
-        # Store all entropy values per position for each head
+        # Store all mean entropy values for each head (indexed by batch*num_heads position)
+        # Key: 'blocks.X.attn.head_Y' where Y is the position in batch*num_heads
+        # Value: list of mean entropy scalars collected across calibration samples
         self.entropy_stats = defaultdict(list)
         self.threshold = 5.0
-        self.percent = 0.5 
-        self.prunehighentropy = True 
+        self.percent = 0.5
+        self.prunehighentropy = True
+        self.prune_global=True
         # Cache for masks to avoid recomputation
         self._mask_cache = {}
 
     def set_params(self, args):
         self.threshold = 5.0
         self.percent = args.quantization.percent_entropy
+        self.prune_global = args.quantization.prune_global
         self.prunehighentropy = args.quantization.high_entropy
+        self.global_percent = args.quantization.percent_entropy_global
 
     def calculate_entropy(self, attn_head):
-        """Calculate entropy for each position in a single attention head"""
+        """
+        Calculate mean entropy of the entire attention matrix.
+
+        Args:
+            attn_head: Attention matrix of shape (N, N) after softmax
+
+        Returns:
+            Scalar mean entropy value: H = -mean(p * log(p)) over all elements
+
+        Note: This treats the entire attention matrix as a single probability
+        distribution by flattening it, then computes the mean of -p*log(p).
+        """
         # Convert to tensor if needed
         if isinstance(attn_head, torch.Tensor) is False:
             attn_head = torch.from_numpy(attn_head)
 
         # Ensure attention is normalized (should already be after softmax)
         eps = 1e-12
+        # Flatten the entire (N, N) attention matrix into a single distribution
         attn_head = torch.clamp(attn_head, min=eps).flatten()
-        entropy  =  -torch.sum(attn_head * torch.log(attn_head)) 
+        # Compute mean entropy over the flattened distribution
+        entropy  =  -torch.sum(attn_head * torch.log(attn_head))
 
         return entropy
 
@@ -68,12 +98,12 @@ class PositionalPruneProcessor(AttentionProcessor):
             for head_idx in range(B_nhead):
                 attn_head = attn[head_idx]  # Shape: (N, N)
 
-                # Calculate entropy for each position
-                entropy_per_position = self.calculate_entropy(attn_head)
+                # Calculate mean entropy for this head's attention matrix
+                mean_entropy = self.calculate_entropy(attn_head)
 
-                # Accumulate entropy values for this head
+                # Accumulate entropy values for this head position
                 head_key = f"{name}.head_{head_idx}"
-                self.entropy_stats[head_key].append(entropy_per_position)
+                self.entropy_stats[head_key].append(mean_entropy)
 
         hooks = []
 
@@ -161,10 +191,11 @@ class PositionalPruneProcessor(AttentionProcessor):
                             self.final_entropy_stats[layer_name] = []
                         self.final_entropy_stats[layer_name].append(head_idx)
 
-                mask = torch.isin(torch.arange(400), torch.tensor(
-                    [head_idx for head_idx, _ in selected_heads]
-                )).to(predictor.device)
-                self.final_entropy_stats[layer_name] = mask
+           
+                    mask = torch.isin(torch.arange(len(heads_with_entropy)), torch.tensor(
+                        [head_idx for head_idx, _ in selected_heads]
+                    )).to(predictor.device)
+                    self.final_entropy_stats[layer_name] = mask
         else:
             # Group entropy stats by layer
             layer_heads = {}
@@ -192,16 +223,21 @@ class PositionalPruneProcessor(AttentionProcessor):
                     else:
                         heads_with_entropy.sort(key=lambda x: x[1])
                     # Calculate number of heads to select based on percentage
-                    num_heads_to_select = max(1, int(len(heads_with_entropy) * self.percent))
+                    if len(heads_with_entropy) < 400:
+                        num_heads_to_select = max(1, int(len(heads_with_entropy) * self.global_percent))
+                    else:
+                        num_heads_to_select = max(1, int(len(heads_with_entropy) * self.percent))
+
 
                     # Select top percent of heads
                     selected_heads = heads_with_entropy[:num_heads_to_select]
-
-                    # Store only the head indices
-                    mask = torch.isin(torch.arange(400), torch.tensor(
+                 
+                    mask = torch.isin(torch.arange(len(heads_with_entropy)), torch.tensor(
                         [head_idx for head_idx, _ in selected_heads]
                     )).to(predictor.device)
                     self.final_entropy_stats[layer_name] = mask
+
+                    # Store only the head indices
 
                     
 
@@ -214,23 +250,23 @@ class PositionalPruneProcessor(AttentionProcessor):
         """Return the collected entropy statistics"""
         return getattr(self, 'final_entropy_stats', {})
 
-
-    
-        
-        
-
     def process(self, x: torch.Tensor, module, module_name: str = None):
         """Standard attention processing with optional head pruning"""
-        if not any(num in module_name for num in ["5", "11", "17", "23"]):  # modules whose shape is (16, 4096, 4096)
-            prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+        if not self.prune_global:
+            if not any(num in module_name for num in ["5", "11", "17", "23"]):  # modules whose shape is (16, 4096, 4096)
+                prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+            else:
+                prune_mask  = None 
         else:
-            prune_mask  = None 
+            prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+            
 
         B, H, W, _ = x.shape
         # Standard attention computation
         qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
         if prune_mask is not None:
+            prune_mask = prune_mask.repeat(q.shape[0]//prune_mask.shape[0])
             q_attn = q[~prune_mask, :, :]
             k_attn = k[~prune_mask, :, :]
             v_attn = v[~prune_mask, :, :]
@@ -265,9 +301,6 @@ class PositionalPruneProcessor(AttentionProcessor):
         return x
 
 
-
-
-
 class HeadPruneProcessor(AttentionProcessor):
     """Processor that identifies and prunes attention heads based on entropy."""
 
@@ -278,6 +311,7 @@ class HeadPruneProcessor(AttentionProcessor):
         self.entropy_stats = defaultdict(list)
         self.threshold = 5.0
         self.percent = 0.5 
+        self.percent_global = 0.5 
         self.prunehighentropy = True 
         # Cache for masks to avoid recomputation
         self._mask_cache = {}
@@ -286,6 +320,8 @@ class HeadPruneProcessor(AttentionProcessor):
         self.threshold = 5.0
         self.percent = args.quantization.percent_entropy
         self.prunehighentropy = args.quantization.high_entropy
+        self.prune_global = args.quantization.prune_global
+        self.percent_global = args.quantization.percent_global
 
     def calculate_entropy(self, attn_head):
         """Calculate entropy for each position in a single attention head"""
@@ -298,8 +334,7 @@ class HeadPruneProcessor(AttentionProcessor):
         attn_normalized = torch.clamp(attn_head, min=eps)
 
         # Calculate entropy for each query position (each row)
-        breakpoint()
-        entropy_per_position = -torch.sum(attn_normalized * torch.log(attn_normalized), dim=-1)
+        entropy_per_position = -torch.mean(attn_normalized * torch.log(attn_normalized), dim=-1)
 
         return entropy_per_position
 
@@ -489,10 +524,10 @@ class HeadPruneProcessor(AttentionProcessor):
         qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
         if prune_mask is not None:
-            q = quantize_activation_per_token_absmax(q[~prune_mask, :, :], n_bits=4)
-            k = quantize_activation_per_token_absmax(k[~prune_mask, :, :], n_bits=4)
-            v = quantize_activation_per_token_absmax(v[~prune_mask, :, :], n_bits=4)
-            v_pruned = quantize_activation_per_token_absmax(v[prune_mask, :, :], n_bits=2)
+            q = q[~prune_mask, :, :]
+            k = k[~prune_mask, :, :]
+            v = v[~prune_mask, :, :]
+            v_pruned = v[prune_mask, :, :]
 
         attn = (q * module.scale) @ k.transpose(-2, -1)
 
@@ -514,37 +549,67 @@ class HeadPruneProcessor(AttentionProcessor):
         return x
 
 
-
-
 class PositionalQuantProcessor(AttentionProcessor):
-    """Processor that identifies and prunes attention heads based on entropy."""
+    """
+    Processor that quantizes attention heads based on global entropy of their attention distribution.
+
+    Similar to PositionalPruneProcessor, but instead of pruning high-entropy heads,
+    this processor:
+    1. Computes a single entropy value for each head by treating the entire attention
+       matrix as a flattened probability distribution (using sum instead of mean)
+    2. Tracks entropy across calibration samples for each head position (B*num_heads index)
+    3. Selects heads with highest/lowest entropy (based on percent_entropy)
+    4. Applies aggressive quantization (2-bit) to selected heads instead of pruning
+
+    The name "Positional" refers to indexing heads by their position in the batch*num_heads
+    dimension (0-399 for 16 heads * 25 samples, for example), not positional encoding.
+    """
 
     def __init__(self, strategy_name: str = 'PositionalHeadPruneProcessor'):
         super().__init__(strategy_name)
         self.stat = {}
-        # Store all entropy values per position for each head
+        # Store all entropy values for each head (indexed by batch*num_heads position)
+        # Key: 'blocks.X.attn.head_Y' where Y is the position in batch*num_heads
+        # Value: list of entropy scalars collected across calibration samples
         self.entropy_stats = defaultdict(list)
         self.threshold = 5.0
-        self.percent = 0.5 
-        self.prunehighentropy = True 
+        self.percent = 0.5
+        self.global_percent = 0.5 
+        self.prune_global = False 
+        self.prunehighentropy = True
         # Cache for masks to avoid recomputation
         self._mask_cache = {}
 
     def set_params(self, args):
         self.threshold = 5.0
         self.percent = args.quantization.percent_entropy
+        self.prune_global = args.quantization.prune_global
+        self.global_percent = args.quantization.percent_entropy_global
         self.prunehighentropy = args.quantization.high_entropy
 
     def calculate_entropy(self, attn_head):
-        """Calculate entropy for each position in a single attention head"""
+        """
+        Calculate global entropy of the entire attention matrix.
+
+        Args:
+            attn_head: Attention matrix of shape (N, N) after softmax
+
+        Returns:
+            Scalar entropy value: H = -sum(p * log(p)) over all elements
+
+        Note: This treats the entire attention matrix as a single probability
+        distribution by flattening it, then computes the sum (not mean) of -p*log(p).
+        """
         # Convert to tensor if needed
         if isinstance(attn_head, torch.Tensor) is False:
             attn_head = torch.from_numpy(attn_head)
 
         # Ensure attention is normalized (should already be after softmax)
         eps = 1e-12
+        # Flatten the entire (N, N) attention matrix into a single distribution
         attn_head = torch.clamp(attn_head, min=eps).flatten()
-        entropy  =  -torch.sum(attn_head * torch.log(attn_head)) 
+        # Compute global entropy over the flattened distribution
+        entropy  =  -torch.mean(attn_head * torch.log(attn_head))
 
         return entropy
 
@@ -573,12 +638,12 @@ class PositionalQuantProcessor(AttentionProcessor):
             for head_idx in range(B_nhead):
                 attn_head = attn[head_idx]  # Shape: (N, N)
 
-                # Calculate entropy for each position
-                entropy_per_position = self.calculate_entropy(attn_head)
+                # Calculate mean entropy for this head's attention matrix
+                mean_entropy = self.calculate_entropy(attn_head)
 
-                # Accumulate entropy values for this head
+                # Accumulate entropy values for this head position
                 head_key = f"{name}.head_{head_idx}"
-                self.entropy_stats[head_key].append(entropy_per_position)
+                self.entropy_stats[head_key].append(mean_entropy)
 
         hooks = []
 
@@ -697,13 +762,16 @@ class PositionalQuantProcessor(AttentionProcessor):
                     else:
                         heads_with_entropy.sort(key=lambda x: x[1])
                     # Calculate number of heads to select based on percentage
-                    num_heads_to_select = max(1, int(len(heads_with_entropy) * self.percent))
+                    if len(heads_with_entropy) < 400:
+                        num_heads_to_select = max(1, int(len(heads_with_entropy) * self.global_percent))
+                    else:
+                        num_heads_to_select = max(1, int(len(heads_with_entropy) * self.percent))
 
                     # Select top percent of heads
                     selected_heads = heads_with_entropy[:num_heads_to_select]
 
                     # Store only the head indices
-                    mask = torch.isin(torch.arange(400), torch.tensor(
+                    mask = torch.isin(torch.arange(len(heads_with_entropy)), torch.tensor(
                         [head_idx for head_idx, _ in selected_heads]
                     )).to(predictor.device)
                     self.final_entropy_stats[layer_name] = mask
@@ -719,19 +787,19 @@ class PositionalQuantProcessor(AttentionProcessor):
         """Return the collected entropy statistics"""
         return getattr(self, 'final_entropy_stats', {})
 
-
-    
-        
-        
-
     def process(self, x: torch.Tensor, module, module_name: str = None):
         """Standard attention processing with optional head pruning"""
-        if not any(num in module_name for num in ["5", "11", "17", "23"]):  # modules whose shape is (16, 4096, 4096)
-            prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+        if not self.prune_global:
+            if not any(num in module_name for num in ["5", "11", "17", "23"]):  # modules whose shape is (16, 4096, 4096)
+                prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+            else:
+                prune_mask  = None 
         else:
-            prune_mask  = None 
+            prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+            
 
         B, H, W, _ = x.shape
+        n_bits = 4 if not prune_mask.shape[0] == 400 else 2
         # Standard attention computation
         qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
@@ -739,9 +807,9 @@ class PositionalQuantProcessor(AttentionProcessor):
             q_attn = q[~prune_mask, :, :]
             k_attn = k[~prune_mask, :, :]
             v_attn = v[~prune_mask, :, :]
-            q_prune= quantize_activation_per_token_absmax(q[prune_mask, :, :],2)
-            k_prune= quantize_activation_per_token_absmax(k[prune_mask, :, :],2)
-            v_pruned = quantize_activation_per_channel_absmax(v[prune_mask, :, :],2)
+            q_prune= quantize_activation_per_token_absmax(q[prune_mask, :, :], n_bits)
+            k_prune= quantize_activation_per_token_absmax(k[prune_mask, :, :], n_bits)
+            v_prune = quantize_activation_per_channel_absmax(v[prune_mask, :, :], n_bits)
         else:
             q_attn = q
             k_attn = k
@@ -758,7 +826,7 @@ class PositionalQuantProcessor(AttentionProcessor):
         if prune_mask is not None:
             x = torch.zeros_like(v).to(v.device)
             attn_prune =  ((q_prune * module.scale) @ k_prune.transpose(-2, -1)).softmax(dim=-1)
-            x_prune = quantize_activation_per_token_absmax(attn_prune, 2) @ v_pruned
+            x_prune = quantize_activation_per_token_absmax(attn_prune, n_bits) @ v_prune
             x[prune_mask] = x_prune 
             x[~prune_mask] = x_attn
         else:
