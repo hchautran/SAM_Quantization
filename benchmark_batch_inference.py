@@ -505,7 +505,7 @@ def main():
               f"{result['miou']:>8.4f}")
 
     print("-" * 80)
-    print(f"\n✓ Best throughput: {max(r['throughput_imgs_per_sec'] for r in results):.2f} imgs/sec "
+    print(f"\n Best throughput: {max(r['throughput_imgs_per_sec'] for r in results):.2f} imgs/sec "
           f"at batch_size={max(results, key=lambda x: x['throughput_imgs_per_sec'])['batch_size']}")
 
 
