@@ -310,18 +310,7 @@ class BatchInferenceBenchmark:
         num_samples: int,
         datasets_config: List[Dict]
     ) -> List[Dict]:
-        """
-        Run benchmark across multiple batch sizes.
-
-        Args:
-            predictor: SamPredictor instance
-            batch_sizes: List of batch sizes to test
-            num_samples: Number of samples per batch size
-            datasets_config: Dataset configuration
-
-        Returns:
-            List of result dictionaries
-        """
+ 
         all_results = []
 
         for batch_size in batch_sizes:

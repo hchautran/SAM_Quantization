@@ -1,11 +1,12 @@
 """
-Visualization script for SAM encoder latency profiling.
+Visualization script for SAM encoder latency profiling with batch inference support.
 
 This script profiles the SAM encoder and creates comprehensive visualizations
-of attention and MLP layer latencies.
+of attention and MLP layer latencies, with support for batch inference.
 
 Usage:
     python visualize_encoder_latency.py --model_type vit_l --checkpoint path/to/checkpoint.pth
+    python visualize_encoder_latency.py --model_type vit_l --checkpoint path/to/checkpoint.pth --batch_size 4
 """
 import argparse
 import numpy as np
@@ -29,25 +30,73 @@ plt.rcParams['figure.figsize'] = (12, 8)
 plt.rcParams['font.size'] = 10
 
 
-def load_sample_image(image_path: str = None):
-    """Load a sample image for profiling."""
+def load_sample_images(image_path: str = None, batch_size: int = 1):
+    """
+    Load sample images for profiling.
+
+    Args:
+        image_path: Path to image file or directory
+        batch_size: Number of images to load/generate
+
+    Returns:
+        List of images (each as numpy array)
+    """
+    images = []
+
     if image_path:
-        image = np.array(Image.open(image_path).convert("RGB"))
-    else:
-        print("No image provided, using synthetic 1024x1024 image")
-        image = np.random.randint(0, 255, (1024, 1024, 3), dtype=np.uint8)
-    return image
+        image_path = Path(image_path)
+
+        # If it's a directory, load multiple images
+        if image_path.is_dir():
+            image_files = list(image_path.glob("*.jpg")) + list(image_path.glob("*.png"))
+            print(f"Found {len(image_files)} images in directory")
+
+            for i in range(min(batch_size, len(image_files))):
+                img = np.array(Image.open(image_files[i]).convert("RGB"))
+                images.append(img)
+
+            # If we need more images, duplicate
+            while len(images) < batch_size:
+                images.append(images[0].copy())
+
+        # If it's a single file, load and duplicate
+        elif image_path.is_file():
+            img = np.array(Image.open(image_path).convert("RGB"))
+            for _ in range(batch_size):
+                images.append(img.copy())
+        else:
+            print(f"Warning: {image_path} not found, using synthetic images")
+            images = None
+
+    # Generate synthetic images if needed
+    if images is None or len(images) == 0:
+        print(f"Using {batch_size} synthetic 1024x1024 images")
+        for _ in range(batch_size):
+            img = np.random.randint(0, 255, (1024, 1024, 3), dtype=np.uint8)
+            images.append(img)
+
+    print(f"Loaded {len(images)} images for batch processing")
+    return images
 
 
 def profile_and_collect_data(
     model_type: str = "vit_b",
     checkpoint: str = None,
     image_path: str = None,
+    batch_size: int = 1,
     num_runs: int = 10,
     device: str = "cuda",
 ):
     """
-    Profile the encoder and collect timing data.
+    Profile the encoder and collect timing data with batch inference support.
+
+    Args:
+        model_type: SAM model variant
+        checkpoint: Path to checkpoint
+        image_path: Path to test image(s)
+        batch_size: Number of images to process in batch
+        num_runs: Number of profiling runs
+        device: Device to use
 
     Returns:
         Tuple of (profiler_stats, results_dict)
@@ -68,29 +117,40 @@ def profile_and_collect_data(
     profiler = ProfilerStats()
     encoder_latency_monkey_patch(predictor.model, profiler, sync_cuda=(device == "cuda"))
 
-    # Load image
-    image = load_sample_image(image_path)
+    # Load images
+    images = load_sample_images(image_path, batch_size)
 
     # Warmup
-    print("Warming up...")
+    print(f"Warming up with batch size {batch_size}...")
     for _ in range(3):
         with torch.no_grad():
-            predictor.set_image(image)
+            for img in images:
+                predictor.set_image(img)
 
     # Profile
-    print(f"Profiling for {num_runs} iterations...")
+    print(f"Profiling for {num_runs} iterations (batch_size={batch_size})...")
     profiler.clear()
-    for _ in range(num_runs):
+
+    for run_idx in range(num_runs):
         with torch.no_grad():
-            predictor.set_image(image)
+            for img in images:
+                predictor.set_image(img)
+
+        if (run_idx + 1) % max(1, num_runs // 5) == 0:
+            print(f"  Completed {run_idx + 1}/{num_runs} runs")
 
     # Analyze
     results = analyze_encoder_breakdown(profiler, print_details=False)
 
+    # Add batch size info to results
+    results['batch_size'] = batch_size
+    results['images_per_run'] = batch_size
+    results['total_images_processed'] = num_runs * batch_size
+
     return profiler, results
 
 
-def plot_per_block_breakdown(profiler: ProfilerStats, output_dir: Path):
+def plot_per_block_breakdown(profiler: ProfilerStats, output_dir: Path, batch_size: int = 1):
     """Create stacked bar chart of per-block attention vs MLP time."""
     df = profiler.get_all_stats()
 
@@ -140,7 +200,10 @@ def plot_per_block_breakdown(profiler: ProfilerStats, output_dir: Path):
 
     ax.set_xlabel('Block Index', fontsize=12, fontweight='bold')
     ax.set_ylabel('Latency (ms)', fontsize=12, fontweight='bold')
-    ax.set_title('Per-Block Latency Breakdown: Attention vs MLP', fontsize=14, fontweight='bold')
+    title = f'Per-Block Latency Breakdown: Attention vs MLP'
+    if batch_size > 1:
+        title += f' (Batch Size: {batch_size})'
+    ax.set_title(title, fontsize=14, fontweight='bold')
     ax.set_xticks(x)
     ax.set_xticklabels([f'{i}' for i in block_indices])
     ax.legend(loc='upper right', fontsize=11)
@@ -178,7 +241,10 @@ def plot_overall_breakdown(profiler: ProfilerStats, results: dict, output_dir: P
         colors=colors, explode=explode, startangle=90,
         textprops={'fontsize': 11, 'fontweight': 'bold'}
     )
-    ax1.set_title('Encoder Component Breakdown', fontsize=14, fontweight='bold')
+    title1 = 'Encoder Component Breakdown'
+    if results.get('batch_size', 1) > 1:
+        title1 += f'\n(Batch Size: {results["batch_size"]})'
+    ax1.set_title(title1, fontsize=14, fontweight='bold')
 
     # Pie chart 2: Transformer blocks only
     block_components = ['Attention', 'MLP']
@@ -201,7 +267,7 @@ def plot_overall_breakdown(profiler: ProfilerStats, results: dict, output_dir: P
     plt.close()
 
 
-def plot_attention_vs_mlp_comparison(profiler: ProfilerStats, output_dir: Path):
+def plot_attention_vs_mlp_comparison(profiler: ProfilerStats, output_dir: Path, batch_size: int = 1):
     """Create comparison plot of attention vs MLP latency per block."""
     df = profiler.get_all_stats()
 
@@ -240,7 +306,10 @@ def plot_attention_vs_mlp_comparison(profiler: ProfilerStats, output_dir: Path):
 
     ax.set_xlabel('Block Index', fontsize=12, fontweight='bold')
     ax.set_ylabel('Latency (ms)', fontsize=12, fontweight='bold')
-    ax.set_title('Attention vs MLP Latency per Block', fontsize=14, fontweight='bold')
+    title = 'Attention vs MLP Latency per Block'
+    if batch_size > 1:
+        title += f' (Batch Size: {batch_size})'
+    ax.set_title(title, fontsize=14, fontweight='bold')
     ax.set_xticks(x)
     ax.set_xticklabels([f'{i}' for i in block_indices])
     ax.legend(fontsize=11)
@@ -429,22 +498,90 @@ def plot_heatmap(profiler: ProfilerStats, output_dir: Path):
     plt.close()
 
 
+def plot_batch_throughput(profiler: ProfilerStats, results: dict, output_dir: Path):
+    """Create throughput visualization for batch processing."""
+    batch_size = results.get('batch_size', 1)
+    if batch_size == 1:
+        return  # Skip if not batching
+
+    df = profiler.get_all_stats()
+
+    # Get total encoder time
+    total_time_per_image = results.get('total_encoder_time', 0) * 1000  # ms
+
+    # Calculate throughput metrics
+    images_per_second = batch_size / (total_time_per_image / 1000)
+    time_per_image = total_time_per_image / batch_size
+
+    # Create figure with metrics
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Plot 1: Throughput bar
+    metrics = ['Time per Image\n(ms)', 'Images per Second', 'Batch Size']
+    values = [time_per_image, images_per_second, batch_size]
+    colors = ['#3498db', '#2ecc71', '#f39c12']
+
+    bars = ax1.bar(metrics, values, color=colors, alpha=0.8)
+    ax1.set_ylabel('Value', fontsize=12, fontweight='bold')
+    ax1.set_title('Batch Processing Throughput Metrics', fontsize=14, fontweight='bold')
+    ax1.grid(axis='y', alpha=0.3)
+
+    # Add value labels on bars
+    for bar, val in zip(bars, values):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height,
+                f'{val:.2f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
+
+    # Plot 2: Comparison - single vs batch
+    single_image_time = total_time_per_image / batch_size  # Approximate
+    batch_total_time = total_time_per_image
+    batch_time_per_image = batch_total_time / batch_size
+
+    scenarios = ['Single Image\n(Sequential)', f'Batch of {batch_size}\n(Per Image)']
+    times = [single_image_time, batch_time_per_image]
+    colors2 = ['#e74c3c', '#2ecc71']
+
+    bars2 = ax2.bar(scenarios, times, color=colors2, alpha=0.8)
+    ax2.set_ylabel('Time per Image (ms)', fontsize=12, fontweight='bold')
+    ax2.set_title('Batch vs Sequential Processing', fontsize=14, fontweight='bold')
+    ax2.grid(axis='y', alpha=0.3)
+
+    # Add value labels and speedup
+    for bar, val in zip(bars2, times):
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2., height,
+                f'{val:.2f}ms', ha='center', va='bottom', fontsize=11, fontweight='bold')
+
+    # Calculate and show speedup
+    speedup = single_image_time / batch_time_per_image if batch_time_per_image > 0 else 1.0
+    ax2.text(0.5, 0.95, f'Speedup: {speedup:.2f}x',
+            transform=ax2.transAxes, fontsize=12, ha='center', va='top',
+            bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
+
+    plt.tight_layout()
+    plt.savefig(output_dir / 'batch_throughput.png', dpi=300, bbox_inches='tight')
+    print(f"Saved: {output_dir / 'batch_throughput.png'}")
+    plt.close()
+
+
 def create_all_visualizations(
     model_type: str = "vit_b",
     checkpoint: str = None,
     image_path: str = None,
     output_dir: str = "./profiling_plots",
+    batch_size: int = 1,
     num_runs: int = 10,
     device: str = "cuda",
 ):
     """
-    Run profiling and create all visualizations.
+    Run profiling and create all visualizations with batch inference support.
 
     Args:
         model_type: SAM model variant
         checkpoint: Path to checkpoint
-        image_path: Path to test image
+        image_path: Path to test image(s) or directory
         output_dir: Directory to save plots
+        batch_size: Number of images to process in batch
         num_runs: Number of profiling runs
         device: Device to use
     """
@@ -453,6 +590,8 @@ def create_all_visualizations(
 
     print("="*80)
     print(f"PROFILING AND VISUALIZING SAM ENCODER - {model_type.upper()}")
+    if batch_size > 1:
+        print(f"BATCH INFERENCE MODE - Batch Size: {batch_size}")
     print("="*80)
 
     # Profile the encoder
@@ -460,6 +599,7 @@ def create_all_visualizations(
         model_type=model_type,
         checkpoint=checkpoint,
         image_path=image_path,
+        batch_size=batch_size,
         num_runs=num_runs,
         device=device,
     )
@@ -469,12 +609,16 @@ def create_all_visualizations(
     print("="*80)
 
     # Create all plots
-    plot_per_block_breakdown(profiler, output_path)
+    plot_per_block_breakdown(profiler, output_path, batch_size)
     plot_overall_breakdown(profiler, results, output_path)
-    plot_attention_vs_mlp_comparison(profiler, output_path)
+    plot_attention_vs_mlp_comparison(profiler, output_path, batch_size)
     plot_latency_distribution(profiler, output_path)
     plot_cumulative_time(profiler, output_path)
     plot_heatmap(profiler, output_path)
+
+    # Add batch throughput plot if batch_size > 1
+    if batch_size > 1:
+        plot_batch_throughput(profiler, results, output_path)
 
     print("\n" + "="*80)
     print(f"ALL VISUALIZATIONS SAVED TO: {output_path}")
@@ -483,6 +627,18 @@ def create_all_visualizations(
     # Print summary
     analyze_encoder_breakdown(profiler, print_details=True)
 
+    # Print batch-specific metrics
+    if batch_size > 1:
+        print("\n" + "="*80)
+        print("BATCH PROCESSING METRICS")
+        print("="*80)
+        total_time = results.get('total_encoder_time', 0)
+        print(f"Batch Size: {batch_size}")
+        print(f"Total Images Processed: {results.get('total_images_processed', 0)}")
+        print(f"Total Time per Batch: {total_time*1000:.2f} ms")
+        print(f"Time per Image: {(total_time*1000)/batch_size:.2f} ms")
+        print(f"Throughput: {batch_size/total_time:.2f} images/sec")
+
     print(f"\nGenerated {len(list(output_path.glob('*.png')))} plots:")
     for plot in sorted(output_path.glob('*.png')):
         print(f"  - {plot.name}")
@@ -490,7 +646,7 @@ def create_all_visualizations(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize SAM encoder latency profiling results"
+        description="Visualize SAM encoder latency profiling results with batch inference support"
     )
     parser.add_argument(
         "--model_type",
@@ -509,13 +665,19 @@ def main():
         "--image",
         type=str,
         default=None,
-        help="Path to test image",
+        help="Path to test image or directory of images",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
         default="./profiling_plots",
         help="Directory to save plots",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=1,
+        help="Number of images to process in batch (default: 1)",
     )
     parser.add_argument(
         "--runs",
@@ -538,6 +700,7 @@ def main():
         checkpoint=args.checkpoint,
         image_path=args.image,
         output_dir=args.output_dir,
+        batch_size=args.batch_size,
         num_runs=args.runs,
         device=args.device,
     )

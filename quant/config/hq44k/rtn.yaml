@@ -26,6 +26,6 @@ quantization:
   percent: 100
   centerQ: False
   percent_entropy: 0.5
-  percent_entropy_global: 0.5
+  percent_entropy_global: 0.7
   high_entropy: True 
   prune_global: True 
