@@ -936,7 +936,7 @@ if __name__ == '__main__':
     engine = Engine('hq44k', quantize_encoder=args.quantize_encoder, quantize_decoder=args.quantize_decoder)
 
     # Setup and calibrate processors
-    enc_processor= get_encoder_processor("FAKE_PRUNE")
+    enc_processor= get_encoder_processor("FAKE_PRUNE_ALL_HEADS_SAME_TOKEN")
     encoder_processor, decoder_processor = engine.setup_and_calibrate_processors(
         predictor,
         num_calib_samples=args.num_calib_samples,

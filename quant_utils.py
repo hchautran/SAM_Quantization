@@ -762,7 +762,303 @@ class FakePruneProcessor(AttentionProcessor):
         x = module.proj(x)
 
         return x
+@register_encoder_processor("FAKE_PRUNE_ALL_HEADS_SAME_TOKEN")
+class FakePruneAllHeadsSameTokenProcessor(FakePruneProcessor):
+    def __init__(self, strategy_name:str='fake_prune_all_heads_same_token'):
+        super().__init__(strategy_name)
+    def _take_Q(self, args):
+        self.threshold = 5.0
+        self.percent = args.quantization.percent_entropy
+        self.prunehighentropy = args.quantization.high_entropy
+    def calibrate(self, predictor, modules, num_samples=32):
+        """
+        Calibrate by collecting entropy scores for all tokens across all heads,
+        then select tokens to prune based on statistics across heads per layer
+        """
+        # Reset token entropy statistics
+        self.entropy_stats = defaultdict(lambda: {"entropy_per_position": []})
+        
+        # Register hooks (only attention hooks needed)
+        attention_hooks, _ = self._register_hooks(predictor, modules)
+        
+        logger = setup_logger('./calib_logs', self.strategy_name)
+        print(f'______Using: {self.strategy_name}_______')
+        print('Collecting entropy values for all attention heads during calibration')
+        # Run calibration - accumulate all entropy values
+        total_processed = 0
+        for k in range(len(self.dataloaders)):
+            dataloader = self.accelerator.prepare(self.dataloaders[k])
+            print(f'Dataloader {k} length:', len(dataloader))
+            progress_bar = tqdm(total=min(num_samples, len(dataloader)), 
+                              desc=f"Collecting entropy data")
+            
+            for i, data_val in enumerate(dataloader):
+                if total_processed >= num_samples:
+                    break
+                
+                # Run forward pass to trigger hooks and accumulate entropy values
+                self._run_forward_pass(predictor, data_val)
+                
+                total_processed += 1
+                progress_bar.update(1)
+                
+                # Log progress for first few samples
+                if total_processed <= 3:
+                    sample_head_key = list(self.entropy_stats.keys())[0] if self.entropy_stats else None
+                    if sample_head_key:
+                        current_length = len(self.entropy_stats[sample_head_key]["entropy_per_position"])
+                        print(f'After sample {total_processed}: {sample_head_key} has {current_length} entropy values')
+                   
+            if total_processed >= num_samples:
+                break
+        
+        # Remove hooks
+        for hook in attention_hooks:
+            hook.remove()
+        
+        # Calculate token statistics and select tokens to prune
+        print('Calculating token-wise statistics across heads for each layer...')
+        self.final_token_prune_stats = {}
+  
+        for layer_name, token_entropy_dict in self.entropy_stats.items():
+            if not token_entropy_dict:
+                continue
+                
+            # Calculate mean entropy for each token position across all heads and samples
+            token_mean_entropies = []
+
+            entropy_value = torch.tensor(token_entropy_dict["entropy_per_position"]).view(total_processed, -1)
+            
+            entropy_value = entropy_value.mean(dim=0)
+            layer_number = layer_name.split('.')[1]
+            if not layer_number in self.final_token_prune_stats:
+                self.final_token_prune_stats[layer_number] = [entropy_value]
+            else:
+                self.final_token_prune_stats[layer_number].append(entropy_value)
     
+        # calculate average over heads of each layer
+    
+        self.final_token_prune_stats = {layer_name: torch.mean(torch.stack(token_indices), dim=0) for layer_name, token_indices in self.final_token_prune_stats.items()}
+      
+        if self.percent is None:
+            # use threshold - select indices where values are greater than threshold
+            for layer_name, token_entropies in self.final_token_prune_stats.items():
+                self.final_token_prune_stats[layer_name] = torch.where(token_entropies > self.threshold)[0].tolist()
+        else:
+            # sort and select top percent - return indexes
+            for layer_name, token_entropies in self.final_token_prune_stats.items():
+                import ipdb; ipdb.set_trace()
+                self.final_token_prune_stats[layer_name] = torch.topk(token_entropies, int(len(token_entropies) * self.percent / 100), largest=False)[1].tolist()
+        import ipdb; ipdb.set_trace()
+    def get_entropy_stats(self):
+        """Return the collected token pruning statistics"""
+        return getattr(self, 'final_token_prune_stats', {})
+    
+    def process(self, x: torch.Tensor, module, module_name: str = None):
+        """Process attention with same token pruning across all heads"""
+        # Get tokens to prune for this module
+        tokens_to_prune = self.final_token_prune_stats.get(module_name, [])
+        
+        B, H, W, _ = x.shape
+        
+        # Standard attention computation
+        qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
+
+        attn = (q * module.scale) @ k.transpose(-2, -1)
+
+        if module.use_rel_pos:
+            attn = add_decomposed_rel_pos(attn, q, module.rel_pos_h, module.rel_pos_w, (H, W), (H, W))
+
+        attn = attn.softmax(dim=-1)
+        B_nhead, N, _ = attn.shape  # B * num_heads, N, N
+
+        # Apply token pruning: set attention scores to uniform for selected tokens
+        if tokens_to_prune:
+            for token_idx in tokens_to_prune:
+                if token_idx < N:  # Ensure token index is valid
+                    # Set attention scores for this token position across all heads to uniform
+                    attn[:, token_idx, :] = 1.0 / N
+    
+        x = (attn @ v).view(B, module.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = module.proj(x)
+
+        return x    
+@register_encoder_processor("FAKE_PRUNE_WQ_WK")
+class FakePruneWeightWqQkProcessor(FakePruneProcessor): 
+    def __init__(self, strategy_name:str='prune Wq Wk based on entropy attention scores'):
+        super().__init__(strategy_name)
+        self.headthreshold =20
+    def _take_Q(self, args):
+        self.threshold = 5.0
+        self.percent = args.quantization.percent_entropy
+        self.prunehighentropy = args.quantization.high_entropy
+        self.headthreshold = getattr(args.quantization, 'head_threshold', 18)
+    def calibrate(self, predictor, modules, num_samples=32):
+        """
+        Custom calibration that finds weight heads to prune based on entropy
+        """
+        # Reset entropy statistics
+        self.entropy_stats = defaultdict(lambda: {"entropy_per_position": []})
+        
+        # Get num_weight_heads from predictor
+        num_weight_heads = predictor.model.image_encoder.blocks[0].attn.num_heads  # Assuming 16
+        
+        # Register hooks
+        attention_hooks, _ = self._register_hooks(predictor, modules)
+        
+        logger = setup_logger('./calib_logs', self.strategy_name)
+        print(f'______Using: {self.strategy_name}_______')
+        print('Collecting entropy values for weight head pruning during calibration')
+        
+        # Run calibration
+        total_processed = 0
+        for k in range(len(self.dataloaders)):
+            dataloader = self.accelerator.prepare(self.dataloaders[k])
+            print(f'Dataloader {k} length:', len(dataloader))
+            progress_bar = tqdm(total=min(num_samples, len(dataloader)), 
+                              desc=f"Collecting entropy data for weight heads")
+            
+            for i, data_val in enumerate(dataloader):
+                if total_processed >= num_samples:
+                    break
+                
+                self._run_forward_pass(predictor, data_val)
+                total_processed += 1
+                progress_bar.update(1)
+            
+            if total_processed >= num_samples:
+                break
+        
+        # Remove hooks
+        for hook in attention_hooks:
+            hook.remove()
+        
+        # Convert attention head indices to weight head indices and count frequency
+        print('Converting attention heads to weight heads and counting frequency...')
+        layer_weight_head_counts = defaultdict(lambda: defaultdict(int))
+        
+        # First, get high-entropy attention heads like FakePruneProcessor
+        temp_entropy_stats = []
+    
+        # Use percentage-based selection
+        self.final_weight_head_stats = {}
+        layer_heads = {}
+        for head_key, stats in self.entropy_stats.items():
+            entropy_values = stats["entropy_per_position"]
+            if len(entropy_values) > 0:
+                entropy_tensor = torch.tensor(entropy_values)
+                
+                parts = head_key.split('.')
+                layer_name = f"image_encoder.{parts[0]}.{parts[1]}.{parts[2]}"
+                head_idx = int(parts[3].split('_')[1]) % num_weight_heads
+                
+                if layer_name not in layer_heads:
+                    layer_heads[layer_name] = {}
+                if head_idx not in layer_heads[layer_name]:
+                    layer_heads[layer_name][head_idx] = []
+                layer_heads[layer_name][head_idx].extend(entropy_tensor.tolist())
+        
+        # Calculate number of heads to select
+        num_heads_to_select = int(self.percent * num_weight_heads)
+        
+        for layer_name, heads in layer_heads.items():
+            if  any(num in layer_name for num in ["5", "11", "17", "23"]):
+                continue
+            head_stats = []
+            
+            for head_idx, entropy_values in heads.items():
+                if len(entropy_values) > 0:
+                    entropy_tensor = torch.tensor(entropy_values)
+                    entropy_mean = torch.mean(entropy_tensor)
+                    entropy_variance = torch.var(entropy_tensor)
+                    head_stats.append((layer_name,head_idx, entropy_mean.item(), entropy_variance.item()))
+            temp_entropy_stats.extend(head_stats)
+            # Sort by entropy mean (highest first) and select top heads
+            head_stats.sort(key=lambda x: x[2], reverse=True)
+            selected_head_indices = [head_idx for _,head_idx, _, _ in head_stats[:num_heads_to_select]]
+            
+            self.final_weight_head_stats[layer_name] = selected_head_indices
+        # temp_entropy_stats.sort(key=lambda x: x[2], reverse=True)
+
+        # # Select top 70% heads globally
+        # total_heads = len(temp_entropy_stats)
+        # num_heads_to_select = int(self.percent * total_heads)
+        
+        # top_heads = temp_entropy_stats[:num_heads_to_select]
+
+        # # Organize selected heads by layer
+        # for layer_name in layer_heads.keys():
+        #     if any(num in layer_name for num in ["5", "11", "17", "23"]):
+        #         continue
+        #     self.final_weight_head_stats[layer_name] = []
+
+        # for layer_name, head_idx, _, _ in top_heads:
+        #     self.final_weight_head_stats[layer_name].append(head_idx)
+            
+        # import ipdb; ipdb.set_trace()
+        
+        print('Zeroing out weights for selected weight heads...')
+        for name, module in predictor.model.image_encoder.named_modules():
+            if hasattr(module, 'qkv') and hasattr(module, 'num_heads'):
+                module_name = f"image_encoder.{name}"
+                if module_name in self.final_weight_head_stats:
+                    list_prune_weight_heads = self.final_weight_head_stats[module_name]
+                    
+                    num_weight_heads = module.num_heads
+                    head_dim = module.qkv.weight.data.shape[0] // (3 * num_weight_heads)
+                    
+                    with torch.no_grad():
+                        for weight_head_idx in list_prune_weight_heads:
+                            # Calculate weight indices for this weight head
+                            start_q = weight_head_idx * head_dim
+                            end_q = (weight_head_idx + 1) * head_dim
+                            start_k = num_weight_heads * head_dim + weight_head_idx * head_dim
+                            end_k = num_weight_heads * head_dim + (weight_head_idx + 1) * head_dim
+                            
+                            # Zero out Wq weights for this weight head
+                            module.qkv.weight.data[start_q:end_q, :] = 0.0
+                            # Zero out Wk weights for this weight head  
+                            module.qkv.weight.data[start_k:end_k, :] = 0.0
+                            
+                            if hasattr(module.qkv, 'bias') and module.qkv.bias is not None:
+                                module.qkv.bias.data[start_q:end_q] = 0.0  # Wq bias
+                                module.qkv.bias.data[start_k:end_k] = 0.0  # Wk bias
+                    
+                    print(f'Zeroed weights for {len(list_prune_weight_heads)} weight heads in {module_name}')
+        
+        # Log results
+    
+        for layer_name, weight_head_list in self.final_weight_head_stats.items():
+            print(f'Layer {layer_name}: {len(weight_head_list)} weight heads to prune: {weight_head_list}')
+    
+    def get_entropy_stats(self):
+        """Return the collected weight head statistics"""
+        return getattr(self, 'final_weight_head_stats', {})
+    
+    def process(self, x: torch.Tensor, module, module_name: str = None):
+        """Process attention with weight head pruning - weights already zeroed in calibration"""
+        B, H, W, _ = x.shape
+        
+        # Standard attention computation
+        qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
+ 
+        attn = (q * module.scale) @ k.transpose(-2, -1)
+        if module.use_rel_pos:
+            attn = add_decomposed_rel_pos(attn, q, module.rel_pos_h, module.rel_pos_w, (H, W), (H, W))
+        attn = attn.softmax(dim=-1)
+        B_nhead, N, _ = attn.shape  # B * num_heads, N, N
+
+        
+
+        x = (attn @ v).view(B, module.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = module.proj(x)
+
+        return x
+
+
+        
 
 @register_encoder_processor("SMOOTH_MEAN_Q")
 class EncoderAttentionProcessorSmoothMeanQ(AttentionProcessor):
