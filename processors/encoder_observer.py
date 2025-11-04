@@ -463,8 +463,8 @@ def image_encoder_monkey_patch(
         config=config,
         module_name_to_exclude=modules_to_exclude,
     )
-# move model to device
     model.to(device)
+
 def print_model_structure(model, title="Model Structure"):
     print(f"\n{title}")
     print("=" * len(title))

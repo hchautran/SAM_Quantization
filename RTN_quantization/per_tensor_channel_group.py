@@ -9,15 +9,15 @@ This module provides various quantization strategies including:
 - Random rounding strategies (RTN, up, down, random)
 
 Architecture:
-- Base W8A8Linear class with common functionality
-- Specialized subclasses for different quantization strategies
-- Clean inheritance hierarchy without factory patterns
+- Strategy pattern for activation and weight quantization
+- WnAnLinear class uses composition with strategy objects
+- Clean separation between quantization algorithms and linear layer logic
 """
 
 import torch
 from torch import nn
 import torch.nn.functional as F
-from typing import Optional
+from typing import Optional, Protocol
 from abc import ABC, abstractmethod
 
 
@@ -387,20 +387,192 @@ def quantize_activation_low_high_density_activation_index(
         return output.view(original_shape).to(original_dtype), indices
 
 # ============================================================================
-# Base W8A8Linear Class
+# Strategy Interfaces
 # ============================================================================
 
-class W8A8Linear(nn.Module, ABC):
+class ActivationQuantizationStrategy(Protocol):
+    """Protocol defining the interface for activation quantization strategies."""
+
+    def quantize(self, x: torch.Tensor, n_bits: int) -> torch.Tensor:
+        """
+        Quantize activation tensor.
+
+        Args:
+            x: Input activation tensor
+            n_bits: Number of quantization bits
+
+        Returns:
+            Quantized activation tensor
+        """
+        ...
+
+    @property
+    def name(self) -> str:
+        """Return the strategy name for identification."""
+        ...
+
+
+class WeightQuantizationStrategy(Protocol):
+    """Protocol defining the interface for weight quantization strategies."""
+
+    def quantize(self, w: torch.Tensor, n_bits: int) -> torch.Tensor:
+        """
+        Quantize weight tensor.
+
+        Args:
+            w: Input weight tensor
+            n_bits: Number of quantization bits
+
+        Returns:
+            Quantized weight tensor
+        """
+        ...
+
+    @property
+    def name(self) -> str:
+        """Return the strategy name for identification."""
+        ...
+
+
+# ============================================================================
+# Concrete Activation Quantization Strategies
+# ============================================================================
+
+class PerTokenActivationQuantization:
+    """Per-token activation quantization strategy."""
+
+    @property
+    def name(self) -> str:
+        return "per_token"
+
+    def quantize(self, x: torch.Tensor, n_bits: int) -> torch.Tensor:
+        return quantize_activation_per_token_absmax(x, n_bits=n_bits)
+
+
+class PerTensorActivationQuantization:
+    """Per-tensor activation quantization strategy."""
+
+    @property
+    def name(self) -> str:
+        return "per_tensor"
+
+    def quantize(self, x: torch.Tensor, n_bits: int) -> torch.Tensor:
+        return quantize_activation_per_tensor_absmax(x, n_bits=n_bits)
+
+
+class PerGroupActivationQuantization:
+    """Per-group activation quantization strategy."""
+
+    def __init__(self, group_size: int = 128):
+        self.group_size = group_size
+
+    @property
+    def name(self) -> str:
+        return "per_group_token"
+
+    def quantize(self, x: torch.Tensor, n_bits: int) -> torch.Tensor:
+        return quantize_activation_per_group_absmax_token_dim(
+            x, group_size=self.group_size, n_bits=n_bits
+        )
+
+
+class DensityBasedActivationQuantization:
+    """Density-based selective activation quantization strategy."""
+
+    def __init__(self, quantize_high: bool = True, percent: float = 50):
+        self.quantize_high = quantize_high
+        self.percent = percent
+
+    @property
+    def name(self) -> str:
+        return "low_high_density_activation"
+
+    def quantize(self, x: torch.Tensor, n_bits: int) -> torch.Tensor:
+        return quantize_activation_low_high_density_activation(
+            x, n_bits=n_bits, quantizehigh=self.quantize_high, percent=self.percent
+        )
+
+
+# ============================================================================
+# Concrete Weight Quantization Strategies
+# ============================================================================
+
+class PerChannelWeightQuantization:
+    """Per-channel weight quantization strategy."""
+
+    def __init__(self, rounding: str = "RTN", percent: float = 0.75):
+        self.rounding = rounding
+        self.percent = percent
+
+    @property
+    def name(self) -> str:
+        return "per_channel"
+
+    def quantize(self, w: torch.Tensor, n_bits: int) -> torch.Tensor:
+        if self.rounding in ["up", "down", "RTN", "random"]:
+            return quantize_weight_per_channel_random_round_up_down_absmax(
+                w, n_bits=n_bits, state=self.rounding, percent=self.percent
+            )
+        else:
+            return quantize_weight_per_channel_absmax(w, n_bits=n_bits)
+
+
+class PerTensorWeightQuantization:
+    """Per-tensor weight quantization strategy."""
+
+    @property
+    def name(self) -> str:
+        return "per_tensor"
+
+    def quantize(self, w: torch.Tensor, n_bits: int) -> torch.Tensor:
+        return quantize_weight_per_tensor_absmax(w, n_bits=n_bits)
+
+
+class PerGroupWeightQuantization:
+    """Per-group weight quantization strategy."""
+
+    def __init__(self, group_size: int = 128):
+        self.group_size = group_size
+
+    @property
+    def name(self) -> str:
+        return "per_group"
+
+    def quantize(self, w: torch.Tensor, n_bits: int) -> torch.Tensor:
+        return quantize_weight_per_group_absmax_input_features(
+            w, group_size=self.group_size, n_bits=n_bits
+        )
+
+
+class SelectiveChannelWeightQuantization:
+    """Selective channel weight quantization with reordering strategy."""
+
+    def __init__(self, order: Optional[torch.Tensor] = None, topk: Optional[torch.Tensor] = None):
+        self.order = order
+        self.topk = topk
+
+    @property
+    def name(self) -> str:
+        return "selective_channel"
+
+    def quantize(self, w: torch.Tensor, n_bits: int) -> torch.Tensor:
+        return quantize_weight_per_channel_absmax_selective(
+            w, n_bits=n_bits, order=self.order, topk=self.topk
+        )
+
+
+# ============================================================================
+# Base WnAnLinear Class
+# ============================================================================
+
+class WnAnLinear(nn.Module):
     """
-    Base class for all W8A8 quantized linear layers.
+    W8A8 quantized linear layer using strategy pattern.
 
-    This abstract base class provides:
-    - Common weight/bias buffer management
-    - Forward pass structure
-    - Abstract methods for quantization strategies
-    - Backward compatibility interface
-
-    All specialized quantization variants should inherit from this class.
+    Uses composition with strategy objects for flexible quantization:
+    - Activation quantization strategy for input quantization
+    - Optional output quantization (reuses activation strategy)
+    - Clean separation between quantization algorithms and layer logic
     """
 
     def __init__(
@@ -410,10 +582,11 @@ class W8A8Linear(nn.Module, ABC):
         bias: bool = True,
         n_bits_w: int = 8,
         n_bits_a: int = 8,
+        activation_strategy: Optional[ActivationQuantizationStrategy] = None,
         quantize_output: bool = False,
     ):
         """
-        Initialize base W8A8Linear layer.
+        Initialize WnAnLinear layer with strategies.
 
         Args:
             in_features: Number of input features
@@ -421,6 +594,7 @@ class W8A8Linear(nn.Module, ABC):
             bias: Whether to include bias
             n_bits_w: Number of weight quantization bits
             n_bits_a: Number of activation quantization bits
+            activation_strategy: Strategy for activation quantization
             quantize_output: Whether to quantize output activations
         """
         super().__init__()
@@ -429,6 +603,9 @@ class W8A8Linear(nn.Module, ABC):
         self.n_bits_w = n_bits_w
         self.n_bits_a = n_bits_a
         self.quantize_output_flag = quantize_output
+
+        # Strategy for activation quantization
+        self.activation_strategy = activation_strategy or PerTokenActivationQuantization()
 
         # Initialize weight buffer
         self.register_buffer(
@@ -447,15 +624,16 @@ class W8A8Linear(nn.Module, ABC):
 
         # Metadata for backward compatibility
         self.weight_quant_name = "None"
-        self.act_quant_name = "unknown"
         self.output_quant_name = "None"
 
-    @abstractmethod
+    @property
+    def act_quant_name(self) -> str:
+        """Get activation quantization strategy name."""
+        return self.activation_strategy.name
+
     def quantize_activation(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Quantize input activation.
-
-        Must be implemented by subclass to define specific activation quantization strategy.
+        Quantize input activation using the configured strategy.
 
         Args:
             x: Input activation tensor
@@ -463,14 +641,13 @@ class W8A8Linear(nn.Module, ABC):
         Returns:
             Quantized activation tensor
         """
-        pass
+        return self.activation_strategy.quantize(x, self.n_bits_a)
 
     def quantize_output(self, y: torch.Tensor) -> torch.Tensor:
         """
         Quantize output activation.
 
-        Default implementation reuses input quantization strategy if enabled.
-        Can be overridden by subclasses for different output quantization.
+        Reuses input quantization strategy if enabled.
 
         Args:
             y: Output activation tensor
@@ -529,18 +706,19 @@ class W8A8Linear(nn.Module, ABC):
         quantizehigh: bool = True,
         up_down_RTN: str = "none",
         percent: float = 100
-    ) -> 'W8A8Linear':
+    ) -> 'WnAnLinear':
         """
-        Factory method to create appropriate W8A8Linear subclass from float linear layer.
+        Factory method to create WnAnLinear from float linear layer using strategies.
 
-        This method analyzes the parameters and instantiates the appropriate subclass.
+        This method creates the appropriate quantization strategies based on parameters
+        and applies them to create a quantized linear layer.
 
         Args:
             module: Source floating-point linear layer
             n_bits_w: Number of bits for weight quantization
-            n_bits_ac: Number of bits for activation quantization
-            weight_quant: Weight quantization strategy
-            act_quant: Activation quantization strategy
+            n_bits_a: Number of bits for activation quantization
+            weight_quant: Weight quantization strategy name
+            act_quant: Activation quantization strategy name
             quantize_output: Whether to quantize output
             group_size: Group size for group quantization
             quantize_weight: Whether to quantize weights
@@ -551,41 +729,20 @@ class W8A8Linear(nn.Module, ABC):
             percent: Percentage for density-based quantization
 
         Returns:
-            Appropriate W8A8Linear subclass instance
+            WnAnLinear instance with configured strategies
         """
         assert isinstance(module, torch.nn.Linear)
 
-        # Create appropriate subclass based on activation quantization strategy
-        if weight_quant == "selective_channel":
-            new_module = W8A8LinearSelectiveChannel(
-                module.in_features, module.out_features, module.bias is not None,
-                n_bits_w=n_bits_w, n_bits_a=n_bits_a,
-                order=order, topk=topk, quantize_output=quantize_output
-            )
-        elif act_quant == "per_token":
-            new_module = W8A8LinearPerChannel(
-                module.in_features, module.out_features, module.bias is not None,
-                n_bits_w=n_bits_w, n_bits_a=n_bits_a,
-                quantize_output=quantize_output, rounding=up_down_RTN
-            )
+        # Create activation quantization strategy
+        if act_quant == "per_token":
+            activation_strategy = PerTokenActivationQuantization()
         elif act_quant == "per_tensor":
-            new_module = W8A8LinearPerTensor(
-                module.in_features, module.out_features, module.bias is not None,
-                n_bits_w=n_bits_w, n_bits_a=n_bits_a,
-                quantize_output=quantize_output
-            )
+            activation_strategy = PerTensorActivationQuantization()
         elif act_quant == "per_group_token":
-            new_module = W8A8LinearPerGroup(
-                module.in_features, module.out_features, module.bias is not None,
-                n_bits_w=n_bits_w, n_bits_a=n_bits_a,
-                group_size=group_size, quantize_output=quantize_output
-            )
+            activation_strategy = PerGroupActivationQuantization(group_size=group_size or 128)
         elif act_quant == "low_high_density_activation":
-            new_module = W8A8LinearDensityBased(
-                module.in_features, module.out_features, module.bias is not None,
-                n_bits_w=n_bits_w, n_bits_a=n_bits_a,
-                quantize_high=quantizehigh, percent=percent,
-                quantize_output=quantize_output
+            activation_strategy = DensityBasedActivationQuantization(
+                quantize_high=quantizehigh, percent=percent
             )
         elif act_quant == "log_per_token":
             new_module = W8A8LogPerChannel(
@@ -596,12 +753,21 @@ class W8A8Linear(nn.Module, ABC):
         else:
             raise ValueError(f"Invalid act_quant: {act_quant}")
 
-        # Apply weight quantization
+        # Create WnAnLinear module with activation strategy
+        new_module = WnAnLinear(
+            module.in_features,
+            module.out_features,
+            module.bias is not None,
+            n_bits_w=n_bits_w,
+            n_bits_a=n_bits_a,
+            activation_strategy=activation_strategy,
+            quantize_output=quantize_output
+        )
+
+        # Apply weight quantization using appropriate strategy
         if quantize_weight:
             if weight_quant == "selective_channel":
-                new_module.weight = quantize_weight_per_channel_absmax_selective(
-                    module.weight, n_bits=n_bits_w, order=order, topk=topk
-                )
+                weight_strategy = SelectiveChannelWeightQuantization(order=order, topk=topk)
             elif weight_quant == "per_channel":
                 if up_down_RTN in ["up", "down", "RTN", "random"]:
                     new_module.weight = quantize_weight_per_channel_random_round_up_down_absmax(
@@ -612,9 +778,7 @@ class W8A8Linear(nn.Module, ABC):
                         module.weight, n_bits=n_bits_w
                     )
             elif weight_quant == "per_tensor":
-                new_module.weight = quantize_weight_per_tensor_absmax(
-                    module.weight, n_bits=n_bits_w
-                )
+                weight_strategy = PerTensorWeightQuantization()
             elif weight_quant == "per_group":
                 new_module.weight = quantize_weight_per_group_absmax_input_features(
                     module.weight, group_size, n_bits=n_bits_w
@@ -625,7 +789,6 @@ class W8A8Linear(nn.Module, ABC):
                 )
             else:
                 raise ValueError(f"Invalid weight_quant: {weight_quant}")
-            new_module.weight_quant_name = weight_quant
         else:
             new_module.weight = module.weight
 
@@ -637,10 +800,13 @@ class W8A8Linear(nn.Module, ABC):
 
 
 # ============================================================================
-# Specialized W8A8Linear Subclasses
+# Backward Compatibility Aliases (Legacy Subclasses)
 # ============================================================================
+# These classes are kept for backward compatibility with existing code.
+# New code should use WnAnLinear directly with appropriate strategies.
 
-class W8A8LinearPerChannel(W8A8Linear):
+class WnAnLinearPerChannel(WnAnLinear):
+    """Legacy class for backward compatibility. Use WnAnLinear with PerTokenActivationQuantization instead."""
 
     def __init__(
         self,
@@ -652,28 +818,16 @@ class W8A8LinearPerChannel(W8A8Linear):
         quantize_output: bool = False,
         rounding: str = "RTN",
     ):
-        """
-        Initialize per-channel W8A8Linear.
-
-        Args:
-            in_features: Number of input features
-            out_features: Number of output features
-            bias: Whether to include bias
-            n_bits_w: Number of weight quantization bits
-            n_bits_a: Number of activation quantization bits
-            quantize_output: Whether to quantize output
-            rounding: Rounding strategy ("up", "down", "RTN", "random")
-        """
-        super().__init__(in_features, out_features, bias, n_bits_w, n_bits_a, quantize_output)
+        super().__init__(
+            in_features, out_features, bias, n_bits_w, n_bits_a,
+            activation_strategy=PerTokenActivationQuantization(),
+            quantize_output=quantize_output
+        )
         self.rounding = rounding
-        self.act_quant_name = "per_token"
-
-    def quantize_activation(self, x: torch.Tensor) -> torch.Tensor:
-        """Quantize activation using per-token strategy."""
-        return quantize_activation_per_token_absmax(x, n_bits=self.n_bits_a)
 
 
-class W8A8LinearPerTensor(W8A8Linear):
+class WnAnLinearPerTensor(WnAnLinear):
+    """Legacy class for backward compatibility. Use WnAnLinear with PerTensorActivationQuantization instead."""
 
     def __init__(
         self,
@@ -684,15 +838,15 @@ class W8A8LinearPerTensor(W8A8Linear):
         n_bits_a: int = 8,
         quantize_output: bool = False,
     ):
-        super().__init__(in_features, out_features, bias, n_bits_w, n_bits_a, quantize_output)
-        self.act_quant_name = "per_tensor"
+        super().__init__(
+            in_features, out_features, bias, n_bits_w, n_bits_a,
+            activation_strategy=PerTensorActivationQuantization(),
+            quantize_output=quantize_output
+        )
 
-    def quantize_activation(self, x: torch.Tensor) -> torch.Tensor:
-        """Quantize activation using per-tensor strategy."""
-        return quantize_activation_per_tensor_absmax(x, n_bits=self.n_bits_a)
 
-
-class W8A8LinearPerGroup(W8A8Linear):
+class WnAnLinearPerGroup(WnAnLinear):
+    """Legacy class for backward compatibility. Use WnAnLinear with PerGroupActivationQuantization instead."""
 
     def __init__(
         self,
@@ -704,24 +858,16 @@ class W8A8LinearPerGroup(W8A8Linear):
         group_size: int = 128,
         quantize_output: bool = False,
     ):
-        super().__init__(in_features, out_features, bias, n_bits_w, n_bits_a, quantize_output)
-        self.group_size = group_size
-        self.act_quant_name = "per_group_token"
-
-    def quantize_activation(self, x: torch.Tensor) -> torch.Tensor:
-        """Quantize activation using per-group strategy."""
-        return quantize_activation_per_group_absmax_token_dim(
-            x, group_size=self.group_size, n_bits=self.n_bits_a
+        super().__init__(
+            in_features, out_features, bias, n_bits_w, n_bits_a,
+            activation_strategy=PerGroupActivationQuantization(group_size=group_size),
+            quantize_output=quantize_output
         )
+        self.group_size = group_size
 
 
-class W8A8LinearDensityBased(W8A8Linear):
-    """
-    W8A8Linear with density-based selective activation quantization.
-
-    Selectively quantizes activations based on token density scores,
-    preserving important tokens in full precision.
-    """
+class WnAnLinearDensityBased(WnAnLinear):
+    """Legacy class for backward compatibility. Use WnAnLinear with DensityBasedActivationQuantization instead."""
 
     def __init__(
         self,
@@ -734,39 +880,20 @@ class W8A8LinearDensityBased(W8A8Linear):
         percent: float = 50,
         quantize_output: bool = False,
     ):
-        """
-        Initialize density-based W8A8Linear.
-
-        Args:
-            in_features: Number of input features
-            out_features: Number of output features
-            bias: Whether to include bias
-            n_bits_w: Number of weight quantization bits
-            n_bits_a: Number of activation quantization bits
-            quantize_high: If True, quantize high-density tokens; else low-density
-            percent: Percentage of tokens to quantize
-            quantize_output: Whether to quantize output
-        """
-        super().__init__(in_features, out_features, bias, n_bits_w, n_bits_a, quantize_output)
+        super().__init__(
+            in_features, out_features, bias, n_bits_w, n_bits_a,
+            activation_strategy=DensityBasedActivationQuantization(
+                quantize_high=quantize_high, percent=percent
+            ),
+            quantize_output=quantize_output
+        )
         self.quantize_high = quantize_high
         self.percent = percent
         self.quantizehigh = quantize_high  # Backward compatibility
-        self.act_quant_name = "low_high_density_activation"
-
-    def quantize_activation(self, x: torch.Tensor) -> torch.Tensor:
-        """Quantize activation using density-based strategy."""
-        return quantize_activation_low_high_density_activation(
-            x, n_bits=self.n_bits_a, quantizehigh=self.quantize_high, percent=self.percent
-        )
 
 
-class W8A8LinearSelectiveChannel(W8A8Linear):
-    """
-    W8A8Linear with selective channel weight quantization.
-
-    Reorders and selectively preserves important weight channels in full precision,
-    achieving better accuracy retention.
-    """
+class WnAnLinearSelectiveChannel(WnAnLinear):
+    """Legacy class for backward compatibility. Use WnAnLinear with SelectiveChannelWeightQuantization instead."""
 
     def __init__(
         self,
@@ -779,20 +906,11 @@ class W8A8LinearSelectiveChannel(W8A8Linear):
         topk: Optional[torch.Tensor] = None,
         quantize_output: bool = False,
     ):
-        """
-        Initialize selective channel W8A8Linear.
-
-        Args:
-            in_features: Number of input features
-            out_features: Number of output features
-            bias: Whether to include bias
-            n_bits_w: Number of weight quantization bits
-            n_bits_a: Number of activation quantization bits
-            order: Channel reordering tensor
-            topk: Top-k channels to preserve in full precision
-            quantize_output: Whether to quantize output
-        """
-        super().__init__(in_features, out_features, bias, n_bits_w, n_bits_a, quantize_output)
+        super().__init__(
+            in_features, out_features, bias, n_bits_w, n_bits_a,
+            activation_strategy=PerTokenActivationQuantization(),
+            quantize_output=quantize_output
+        )
         self.order = order
         self.topk = topk
         self.act_quant_name = "per_token"
@@ -801,7 +919,7 @@ class W8A8LinearSelectiveChannel(W8A8Linear):
         """Quantize activation using per-token strategy."""
         return quantize_activation_per_token_absmax(x, n_bits=self.n_bits_a)
 
-class W8A8LogPerChannel(W8A8Linear):
+class W8A8LogPerChannel(WnAnLinear):
 
     def __init__(
         self,

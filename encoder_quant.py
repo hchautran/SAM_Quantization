@@ -21,18 +21,21 @@ from segment_anything.modeling.image_encoder import (
 # from train.segment_anything_training.modeling.image_encoder import Block as EncoderBlockTraining 
 # from train.segment_anything_training.modeling.image_encoder import ImageEncoderViT as ImageEncoderViTTraining
 # Local imports
-from quant_utils import (
+from processors.base import (
     # ImageEncoderProcessor,
     AttentionProcessor,
-    EncoderRecenterAttentionProcessor,
-    quantize_activation_per_token_absmax,
 )
+from processors.encoder import (
+    # ImageEncoderProcessor,
+    EncoderRecenterAttentionProcessor,
+)
+from quant_utils import quantize_activation_per_token_absmax
 from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
 from RTN_quantization import per_tensor_channel_group
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'RTN_quantization'))
-from RTN_quantization.utils import replace_linear_with_quantized, QuantizationConfig
+from quant.quant_utils import replace_linear_with_quantized, QuantizationConfig
 from RTN_quantization.per_tensor_channel_group import quantize_activation_low_high_density_activation_index
 # from utils import inference_image, to_numpy
 from segment_anything.modeling.image_encoder import (
@@ -43,6 +46,28 @@ from utils import inference_image
 
 def to_numpy(x: torch.Tensor):
     return x.detach().cpu().numpy()
+
+
+
+
+
+    
+
+class QuantizedAttention(EncoderAttention):
+    def __init__(self, *args, **kwargs):
+        """Initialize with same arguments as parent Attention class."""
+        super().__init__(*args, **kwargs)
+
+    def set_processor(self, processor:AttentionProcessor, module_name):
+        self.processor = processor
+        self.module_name = module_name 
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.processor.process(x, self, self.module_name)
+
+
 
 @torch.no_grad()
 def quantize_weight_per_channel_absmax(w: torch.Tensor, n_bits: int = 8) -> torch.Tensor:
@@ -131,10 +156,6 @@ class QuantizedAttention(EncoderAttention):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.processor.process(x, self, self.module_name)
 
-    @staticmethod
-    def clear_dict():
-        """Clear the attention score dictionary."""
-        AttentionObserver.attention_score = defaultdict(list)
 
 class QuantizedAttentionQuarotCenterQ(QuantizedAttention):
     def __init__(self, *args, **kwargs):
@@ -231,7 +252,7 @@ def image_encoder_monkey_patch(
         #     layer_idx += 1
     
     
-    if not args_yaml.quantization.quanro: # already quantized in the rotation process
+    if not args_yaml.quantization.quanro and n_bits < 16: # already quantized in the rotation process
         
         modules_to_exclude = ['decoder'] # Quantize Encoder only
         config = QuantizationConfig(
@@ -256,6 +277,13 @@ def image_encoder_monkey_patch(
 
 
 if __name__ == "__main__":
+    from quant_utils import (
+    # ImageEncoderProcessor,
+    AttentionProcessor,
+    EncoderRecenterAttentionProcessor,
+    EncoderHighLowAttentionProcessor,
+    quantize_activation_per_token_absmax,
+)
     # Configuration
     model_type = "vit_l"
     num_calib_samples = 1
@@ -266,6 +294,7 @@ if __name__ == "__main__":
     predictor = SamPredictor(sam)
 
     # Setup processor with calibration for image encoder
+    # processor = EncoderHighLowAttentionProcessor("highlow")
     processor = EncoderRecenterAttentionProcessor("recenter")
     processor.calibrate(
         predictor=predictor,
@@ -288,9 +317,4 @@ if __name__ == "__main__":
         show_image=True,
     )
 
-    # Access attention scores
-    print("\nCaptured attention information:")
-    for key in ImageEncoderViTObserver.attention_score.keys():
-        print(f"  {key}: {len(ImageEncoderViTObserver.attention_score[key])} items")
-
-    print("\nImage encoder quantization completed successfully!")
+ 

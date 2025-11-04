@@ -21,17 +21,23 @@ from segment_anything.modeling.transformer import (
 )
 
 # Local imports
-from quant_utils import (
-    AttentionProcessor,
-    EncoderAttentionProcessorSmoothMeanQ,
-    EncoderAttentionProcessorSmooth,
-    EncoderAttentionProcessorHighLow,
-    ProcessStrategy,
+from processors.decoder import (
+    DecoderDoNothingProcessor,
+    quantize_activation_per_token_absmax,
 )
 from RTN_quantization import per_tensor_channel_group
+from quant.quant_utils import (
+    QuantizationConfig,
+    # AttentionProcessor,
+    # EncoderAttentionProcessorSmoothMeanQ,
+    # EncoderAttentionProcessorSmooth,
+    # EncoderAttentionProcessorHighLow,
+    # ProcessStrategy,
+)
 from RTN_quantization.utils import replace_linear_with_quantized,QuantizationConfig
 from utils import inference_image
-from decoder_observer import TwoWayTransformerObserverElementLow,TwoWayAttentionBlockObserverElementLow, AttentionObserverElementLow
+from processors.decoder_observer import TwoWayTransformerObserverElementLow,TwoWayAttentionBlockObserverElementLow, AttentionObserverElementLow
+
 
 
 # ============================================================================
@@ -485,7 +491,7 @@ def replace_linear_with_target_and_quantize(
 
 def mask_decoder_monkey_patch(
     model,
-    processor: ProcessStrategy = None,
+    processor=  None,
     n_bits=8,
     weight_quant="per_channel",
     k_preserve=0,
@@ -565,7 +571,7 @@ if __name__ == "__main__":
     predictor = SamPredictor(sam)
 
     # Setup processor with calibration
-    processor = AttnBasedProcessor("attn")
+    processor = DecoderDoNothingProcessor("donothing")
     processor.calibrate(
         predictor=predictor,
         modules=(TwoWayTransformer),

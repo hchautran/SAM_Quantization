@@ -12,12 +12,12 @@ except ImportError:
     EXTENSION_AVAILABLE = False
     print("Warning: W8A8 extension not available. Please compile first.")
 
-class W8A8Linear(nn.Module):
+class WnAnLinear(nn.Module):
     """
     8-bit weight, 8-bit activation linear layer using custom CUDA kernel
     """
     def __init__(self, in_features, out_features, bias=True, use_tensor_cores=True):
-        super(W8A8Linear, self).__init__()
+        super(WnAnLinear, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.use_tensor_cores = use_tensor_cores
@@ -101,11 +101,11 @@ class W8A8MLP(nn.Module):
         in_size = input_size
         
         for hidden_size in hidden_sizes:
-            layers.append(W8A8Linear(in_size, hidden_size, use_tensor_cores=use_tensor_cores))
+            layers.append(WnAnLinear(in_size, hidden_size, use_tensor_cores=use_tensor_cores))
             layers.append(nn.ReLU())
             in_size = hidden_size
         
-        layers.append(W8A8Linear(in_size, output_size, use_tensor_cores=use_tensor_cores))
+        layers.append(WnAnLinear(in_size, output_size, use_tensor_cores=use_tensor_cores))
         
         self.layers = nn.Sequential(*layers)
     
@@ -167,13 +167,13 @@ def benchmark_w8a8():
         print(f"Speedup: {speedup:.2f}x")
 
 def test_w8a8_layer():
-    """Test W8A8Linear layer"""
-    print("Testing W8A8Linear layer...")
+    """Test WnAnLinear layer"""
+    print("Testing WnAnLinear layer...")
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Create layer
-    layer = W8A8Linear(256, 128).to(device)
+    layer = WnAnLinear(256, 128).to(device)
     
     # Test input
     x = torch.randn(32, 256, device=device)  # Batch size 32

@@ -21,12 +21,11 @@ from segment_anything.modeling.transformer import (
 )
 
 # Local imports
-from quant_utils import (
-    AttentionProcessor,
+from .base import AttentionProcessor
+from .encoder import (
     EncoderAttentionProcessorSmoothMeanQ,
     EncoderAttentionProcessorSmooth,
     EncoderAttentionProcessorHighLow,
-    ProcessStrategy,
 )
 from RTN_quantization import per_tensor_channel_group
 from RTN_quantization.utils import QuantizationConfig, replace_linear_with_quantized
@@ -303,7 +302,7 @@ class AttentionObserverElementLow(Attention):
 
 def mask_decoder_monkey_patch(
     model,
-    processor: ProcessStrategy = None,
+    processor: AttentionProcessor = None,
     n_bits=8,
     weight_quant="per_channel",
     k_preserve=0,

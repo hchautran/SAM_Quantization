@@ -22,10 +22,16 @@ import train.utils.misc as misc
 from utils import show_mask_image
 from decoder_quant import mask_decoder_monkey_patch, TwoWayTransformerObserver
 from encoder_quant import image_encoder_monkey_patch
-from quant_utils import quantize_activation_per_token_absmax, get_encoder_processor
+from quant_utils import (
+    quantize_activation_per_token_absmax,
+)
+from processors import (
+    get_encoder_processor,
+    EncoderRecenterAttentionProcessor,
+    EncoderAttentionProcessor,
+    DecoderDoNothingProcessor,
+)
 from profiler import InferenceProfiler, compare_inference_speed
-from quant_utils import  EncoderRecenterAttentionProcessor, EncoderAttentionProcessor
-from decoder_processor import  DecoderDoNothingProcessor
 from segment_anything.modeling.image_encoder import Attention as EncoderSamAttention
 from segment_anything.modeling.transformer import  Attention as  DecoderAttention
 from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining
@@ -733,7 +739,7 @@ class Engine:
         if self.quantize_encoder:
             print("Setting up encoder processor...")
             # encoder_processor = EncoderAttentionProcessor()
-            encoder_processor._take_Q(args_yaml)
+            encoder_processor.set_params(args_yaml)
             encoder_processor.calibrate(
                 predictor=predictor,
                 modules=(DecoderAttention, EncoderAttentionTraining, EncoderAttention, EncoderSamAttention),
@@ -766,73 +772,23 @@ class Engine:
         """Delegate to evaluator component"""
         return self.evaluator.eval_hq44k(predictor, num_samples, plot_figures)
 
-    # Delegate to KPreserveExperimenter
-    def run_k_preserve_experiment(self, predictor, k_preserve_values, num_samples=None, experiment_config=None, target='decoder'):
-        """Delegate to k_preserve experimenter component"""
-        return self.k_preserve_experimenter.run_k_preserve_experiment(
-            predictor, k_preserve_values, num_samples, experiment_config, target
-        )
+encoder_processor_registry = {
+    'base': EncoderAttentionProcessor,
+    'quarot': EncoderAttentionProcessor,
+    'smooth': EncoderAttentionProcessor,
+    'recenter': EncoderRecenterAttentionProcessor,
+    # 'highlow':  EncoderHighLowAttentionProcessor,
+}
 
-    def save_k_preserve_result(self, k_preserve, test_stats, experiment_config=None):
-        """Delegate to k_preserve experimenter component"""
-        return self.k_preserve_experimenter.save_k_preserve_result(k_preserve, test_stats, experiment_config)
+decoder_processor_registry = {
+    'base': EncoderAttentionProcessor,
+    'quarot': EncoderAttentionProcessor,
+    'smooth': EncoderAttentionProcessor,
+    'recenter': EncoderRecenterAttentionProcessor,
+    # 'highlow':  EncoderHighLowAttentionProcessor,
+}
 
-    def save_k_preserve_results_to_csv(self, filename=None):
-        """Delegate to k_preserve experimenter component"""
-        return self.k_preserve_experimenter.save_k_preserve_results_to_csv(filename)
 
-    def clear_k_preserve_results(self):
-        """Delegate to k_preserve experimenter component"""
-        return self.k_preserve_experimenter.clear_k_preserve_results()
-
-    # Delegate to QKAnalyzer
-    def analyze_qk_quantization_errors(self, predictor, num_samples=5, n_bits_range=[4, 6, 8], save_results=True):
-        """Delegate to QK analyzer component"""
-        return self.qk_analyzer.analyze_qk_quantization_errors(predictor, num_samples, n_bits_range, save_results)
-
-    def clear_qk_error_results(self):
-        """Delegate to QK analyzer component"""
-        return self.qk_analyzer.clear_qk_error_results()
-
-    # Delegate to Visualizer
-    def visualize_qk_errors(self, results, save_path='./'):
-        """Delegate to visualizer component"""
-        return self.visualizer.visualize_qk_errors(results, save_path)
-
-    # Benchmark methods
-    def benchmark_inference(self, predictor, num_runs=20, warmup=5):
-        """
-        Benchmark inference speed on sample data.
-
-        Args:
-            predictor: SamPredictor instance
-            num_runs: Number of profiling runs
-            warmup: Number of warmup runs
-
-        Returns:
-            Profiling results dictionary
-        """
-        print(f"\n=== Benchmarking Inference Speed ===")
-
-        # Get sample data
-        dataloader = self.accelerator.prepare(self.dataloaders[0])
-        for data_val in dataloader:
-            imgs = data_val['image'].permute(0, 2, 3, 1).cpu().numpy().squeeze()
-            labels_boxes = misc.masks_to_boxes(data_val['label'][:, 0, :, :]).cpu().numpy()
-            break
-
-        # Run profiling
-        profiler = InferenceProfiler()
-        results = profiler.profile_sam_inference(
-            predictor=predictor,
-            image=imgs,
-            input_box=labels_boxes,
-            num_runs=num_runs,
-            warmup=warmup
-        )
-        profiler.print_results()
-
-        return results
 
 def override_args(args, args_yaml):
     """
@@ -875,12 +831,7 @@ def override_args(args, args_yaml):
             target[keys[-1]] = value
 
     return args_yaml
-def print_model_structure(model, title="Model Structure"):
-    print(f"\n{title}")
-    print("=" * len(title))
-    for name, module in model.named_modules():
-        print(f"{name}: {module.__class__.__name__}")
-    print("=" * len(title))
+
 if __name__ == '__main__':
     import argparse
 
@@ -889,6 +840,8 @@ if __name__ == '__main__':
                         choices=['eval', 'k_preserve', 'qk_analysis', 'benchmark'],
                         help='Execution mode')
     parser.add_argument('--quantize-encoder', action='store_true',
+                        help='Enable encoder quantization')
+    parser.add_argument('--encoder_processor', default='base',
                         help='Enable encoder quantization')
     parser.add_argument('--quantize-decoder', action='store_true', 
                         help='Enable decoder quantization')
@@ -903,10 +856,10 @@ if __name__ == '__main__':
                         choices=['per_channel', 'selective_channel'],
                         help='Weight quantization method')
     parser.add_argument('--en-act-quant', type=str, default='per_token',
-                        choices=['per_channel', 'selective_channel'],
+                        choices=['per_token',  'low_high_density_activation'],
                         help='Weight quantization method')
     parser.add_argument('--de-act-quant', type=str, default='per_token',
-                        choices=['per_channel', 'selective_channel'],
+                        choices=['per_channel', 'low_high_density_activation'],
                         help='Weight quantization method')
     parser.add_argument('--k-preserve', type=int, default=0,
                         help='Number of channels to preserve')
@@ -926,7 +879,6 @@ if __name__ == '__main__':
     # overide args_yaml with args
     args_yaml = override_args(args, args_yaml)
 
-    # Initialize model
     model_type = 'vit_l'
     checkpoint_path = './pretrained_checkpoint/sam_hq_vit_l.pth'
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
@@ -935,12 +887,19 @@ if __name__ == '__main__':
     # Initialize engine
     engine = Engine('hq44k', quantize_encoder=args.quantize_encoder, quantize_decoder=args.quantize_decoder)
 
+    # encoder_processor = encoder_processor_registry[args.encoder_processor](args.encoder_processor, args.n_bits)
+    # decoder_processor = decoder_processor_registry[args.encoder_processor](args.encoder_processor, args.n_bits)
+    # print('='*50, f'using {encoder_processor.strategy_name}', 50*'=')
+
     # Setup and calibrate processors
-    enc_processor= get_encoder_processor("FAKE_PRUNE_ALL_HEADS_SAME_TOKEN")
+    # enc_processor= get_encoder_processor("HEAD_PRUNE")
+    # enc_processor= get_encoder_processor("POSITIONAL_PRUNE")
+    enc_processor= get_encoder_processor("POSITIONAL_PRUNE")
+    # enc_processor= get_encoder_processor("POSITIONAL_QUANT")
     encoder_processor, decoder_processor = engine.setup_and_calibrate_processors(
         predictor,
         num_calib_samples=args.num_calib_samples,
-        encoder_processor=enc_processor, 
+        encoder_processor=enc_processor,
         decoder_processor= DecoderDoNothingProcessor("DO_NOTHING"),
         args_yaml= args_yaml,
     )
@@ -963,7 +922,7 @@ if __name__ == '__main__':
     } if decoder_processor else None
 
     engine.apply_quantization(predictor, encoder_config, decoder_config,args_yaml)
-    print_model_structure(predictor.model,"Final structure ")
+    # print_model_structure(predictor.model,"Final structure ")
     # Execute based on mode
     print("\n=== Running Evaluation ===")
     results = engine.eval_hq44k(predictor=predictor, num_samples=args.num_samples, plot_figures=False)

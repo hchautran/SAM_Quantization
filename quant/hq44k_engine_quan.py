@@ -166,6 +166,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             self.rot_args = args.quarot_inf
         else:
             self.rot_args = None
+
     def build_predictor(self):
         self.hq_mask_decoder = MaskDecoderHQ(self.model_type) 
         self.predictor = sam_model_registry[self.model_type](checkpoint=self.checkpoint)
@@ -193,11 +194,11 @@ class Hq44kInferenceStrategy(InferenceStrategy):
             if self.qkT_v:
                 self.qkT_v= False
 
-        
+
         if self.centerQ:
             calibrate_= True
             from encoder_quant import image_encoder_monkey_patch
-            if calibrate_ :
+            if not os.path.exists('./pretrained_checkpoint/stat_dict.pth'):
                 num_calib_samples=8
                 from quant_utils import ImageEncoderProcessor
                 
@@ -207,7 +208,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                     ImageEncoderViT,
                 )
                 from segment_anything import SamPredictor
-                predictor_ = SamPredictor(self.predictor)
+                predictor_ = SamPredictor(self.predictor.to('cuda'))
                 processor = ImageEncoderProcessor("encoder_attn")
                 processor.calibrate(
                     predictor=predictor_,
@@ -231,12 +232,11 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                 weight_quant="per_channel",
                 act_quant="per_token",
                 device = self.device,
-                path_stat_dict= "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/pretrained_checkpoint/stat_dict.pth",
+                path_stat_dict= "./pretrained_checkpoint/stat_dict.pth",
                 percent = self.percent if self.qkT_v else None,
                 qkT_v = self.qkT_v,
                 quarot= self.quant_ro,
                 rot_args= self.rot_args
-                
             )
             self.predictor.to(self.device)
             if self.qkT_v:

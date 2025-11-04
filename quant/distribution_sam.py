@@ -24,7 +24,7 @@ from segment_anything.modeling.mask_decoder import MaskDecoder
 from segment_anything.utils.transforms import ResizeLongestSide
 from train.segment_anything_training.modeling.image_encoder import ImageEncoderViT as ImageEncoderViTtrain
 from train.train import MaskDecoderHQ as MaskDecoderHQtrain
-from RTN_quantization import per_tensor_channel_group
+from quant import quant_utils
 from quarot import utils, rotation_utils
 def show_points(coords, labels, ax, marker_size=200):
     pos_points = coords[labels==1]
@@ -610,7 +610,7 @@ class ActivationObserver(ObserverBase):
             self.activation_dict[name]['low'] += hist_low
 
         for name, module in model.named_modules():
-            if (isinstance(module, nn.Linear) or isinstance(module,per_tensor_channel_group.W8A8Linear) or isinstance(module,utils.ActQuantWrapper)) and name in self.activation_dict.keys():
+            if (isinstance(module, nn.Linear) or isinstance(module,quant_utils.WnAnLinear) or isinstance(module,utils.ActQuantWrapper)) and name in self.activation_dict.keys():
                 if use_post_hook:
                     module.register_forward_hook(partial(post_hook, name=name))
                 else:
@@ -625,7 +625,7 @@ class ActivationObserver(ObserverBase):
             pass
 
         for name, module in model.named_modules():
-            if (isinstance(module, nn.Linear) or isinstance(module,per_tensor_channel_group.W8A8Linear) or isinstance(module,utils.ActQuantWrapper)) and name in self.activation_dict.keys():
+            if (isinstance(module, nn.Linear) or isinstance(module,quant_utils.WnAnLinear) or isinstance(module,utils.ActQuantWrapper)) and name in self.activation_dict.keys():
                 # module.register_forward_pre_hook(partial(pre_hook,name=name))
                 module.register_forward_hook(partial(post_hook,name=name))
 
@@ -655,8 +655,8 @@ class ActivationObserver(ObserverBase):
 
         for name, module in model.named_modules():
             name_class= type(module).__name__
-            if (isinstance(module, nn.Linear) or isinstance(module,per_tensor_channel_group.W8A8Linear) or 'ActQuantWrapper' in name_class ) and name in self.activation_dict.keys():
-                
+            if (isinstance(module, nn.Linear) or isinstance(module,quant_utils.WnAnLinear) or 'ActQuantWrapper' in name_class ) and name in self.activation_dict.keys():
+
                 if use_post_hook:
                     module.register_forward_hook(partial(post_hook,name=name))
                 else:

@@ -2,13 +2,10 @@ import torch
 import torch.nn as nn
 from .Smooth import smooth_ln_fcs
 from matplotlib import pyplot as plt
-from dataclasses import dataclass
-from typing import Optional
-
-
 import os
 import sys
 import numpy as np
+from dataclasses import dataclass
 from segment_anything.modeling.image_encoder import Attention
 from .per_tensor_channel_group import quantize_activation_low_high_density_activation_index, quantize_activation_per_token_absmax, quantize_weight_per_channel_absmax
 # Add the sam-hq directory to Python path
@@ -18,6 +15,7 @@ sam_hq_path = os.path.join(project_root, "sam-hq")
 
 sys.path.insert(0, sam_hq_path)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from typing import Optional
 
 
 class AttentionQ(Attention):
