@@ -38,7 +38,7 @@ class BaseEntropyProcessor(AttentionProcessor):
         self.percent = args.quantization.percent_entropy
         self.prunehighentropy = args.quantization.high_entropy
         self.prune_global = args.quantization.prune_global
-
+        self.model_type = args.model.model_type
     def calculate_entropy(self, attn_head):
         """
         Calculate entropy for attention head.
@@ -280,10 +280,17 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
 
     def _calculate_num_heads_to_select(self, total_heads):
         """Override to support global vs local percentages."""
-        if total_heads < 400:
-            return max(1, int(total_heads * self.global_percent))
-        else:
-            return max(1, int(total_heads * self.percent))
+        if self.model_type == "vit_b" :
+            if total_heads < 300:
+                return max(1, int(total_heads * self.global_percent))
+        elif self.model_type == "vit_l" :
+            if total_heads < 400:
+                return max(1, int(total_heads * self.global_percent))
+        elif self.model_type == "vit_h" :
+            if total_heads < 400:
+                return max(1, int(total_heads * self.global_percent))
+        
+        return max(1, int(total_heads * self.percent))
 
     def _create_attention_hook(self, name):
         """Create attention hook for positional pruning."""
@@ -319,10 +326,21 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
         """Standard attention processing with optional head pruning."""
         # Determine if we should prune this layer
         if not self.prune_global:
-            if not any(num in module_name for num in ["5", "11", "17", "23"]):
-                prune_mask = module.processor.final_entropy_stats.get(module_name, None)
-            else:
-                prune_mask = None
+            if self.model_type == "vit_b" :
+                if not any(num in module_name for num in ["2", "5", "8", "11"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
+            elif self.model_type =="vit_l":
+                if not any(num in module_name for num in ["5", "11", "17", "23"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
+            elif self.model_type == "vit_h":
+                if not any(num in module_name for num in ["7", "15", "23", "31"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
         else:
             prune_mask = module.processor.final_entropy_stats.get(module_name, None)
 
@@ -516,10 +534,17 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
 
     def _calculate_num_heads_to_select(self, total_heads):
         """Override to support global vs local percentages."""
-        if total_heads < 400:
-            return max(1, int(total_heads * self.global_percent))
-        else:
-            return max(1, int(total_heads * self.percent))
+        if self.model_type == "vit_b" :
+            if total_heads < 300:
+                return max(1, int(total_heads * self.global_percent))
+        elif self.model_type == "vit_l" :
+            if total_heads < 400:
+                return max(1, int(total_heads * self.global_percent))
+        elif self.model_type == "vit_h" :
+            if total_heads < 400:
+                return max(1, int(total_heads * self.global_percent))
+        
+        return max(1, int(total_heads * self.percent))
 
     def _create_attention_hook(self, name):
         """Create attention hook for positional quantization."""
@@ -570,15 +595,33 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
         """Standard attention processing with optional head quantization."""
         # Determine if we should quantize this layer
         if not self.prune_global:
-            if not any(num in module_name for num in ["5", "11", "17", "23"]):
-                prune_mask = module.processor.final_entropy_stats.get(module_name, None)
-            else:
-                prune_mask = None
+            if self.model_type == "vit_b" :
+                if not any(num in module_name for num in ["2", "5", "8", "11"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
+            elif self.model_type =="vit_l":
+                if not any(num in module_name for num in ["5", "11", "17", "23"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
+            elif self.model_type == "vit_h":
+                if not any(num in module_name for num in ["7", "15", "23", "31"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
         else:
             prune_mask = module.processor.final_entropy_stats.get(module_name, None)
 
         B, H, W, _ = x.shape
-        n_bits = 4 if not prune_mask.shape[0] == 400 else 2
+        
+        
+        if self.model_type == "vit_b" : 
+            n_bits = 4 if not prune_mask.shape[0] == 300 else 2
+        elif  self.model_type == "vit_l" :
+            n_bits = 4 if not prune_mask.shape[0] == 400 else 2
+        elif  self.model_type == "vit_h" :
+            n_bits = 4 if not prune_mask.shape[0] == 400 else 2
 
         q, k, v, B, H, W = self._compute_qkv(x, module)
 

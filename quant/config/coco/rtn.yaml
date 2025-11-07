@@ -2,8 +2,13 @@ model:
   name: sam
   use_hq: True
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
-  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
-  model_type: vit_l 
+  model_type: 'vit_b'
+  hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
+  # model_type: vit_l 
+  # hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  # model_type: 'vit_h'
+  # hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_h.pth'
+  
   device: cpu
 
 
@@ -24,7 +29,9 @@ data:
     pipeline: test_pipeline
 
 quantization:
+  quandecoder: False
   quanrtn: True
+  low_high_density: none
   quangptq: False
   quansmooth: False
   quanro: False
@@ -34,9 +41,15 @@ quantization:
   act_quant: per_token
   weight_quant: per_channel
   n_bits: 4
-  quantize_output: True
-  checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
-  seed: 42
-  output: ./output/hq44k/base_l
-  restore_model:  work_dirs/hq_sam_vit_l/epoch_11.pth
+  n_bits_mlp: 16
+  quantize_output: False
+  up_down_RTN: none
+  qkT_v: True
+  channel: False
+  percent: 100
+  centerQ: False
+  percent_entropy: 0.5
+  percent_entropy_global: 0.7
+  high_entropy: True 
+  prune_global: True 
 

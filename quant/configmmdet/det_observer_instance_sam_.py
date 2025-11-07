@@ -165,7 +165,6 @@ class DetObserverInstanceSAM(BaseDetector):
         # import ipdb; ipdb.set_trace()
         print(self.show_image)
         if self.show_image >0:
-            print("chiii")
             self.show_image -=1
             self.save_image_coco(ori_img, bbox_results, mask_results,  self.show_image,self.result_coco_path)
         return output_results
