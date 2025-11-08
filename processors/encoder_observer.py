@@ -15,13 +15,12 @@ from segment_anything.modeling.image_encoder import (
     ImageEncoderViT,
 )
 from RTN_quantization.utils import replace_linear_with_quantized, QuantizationConfig
-from utils import inference_image, to_numpy
+from utils.utils import inference_image, to_numpy
 from segment_anything.modeling.image_encoder import (
     window_partition,
     window_unpartition,
 )
 from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
-from utils import quantize_activation_per_highblock_abmax, find_O_qha
 
 @torch.no_grad()
 def quantize_weight_per_channel_absmax(w, n_bits=8):

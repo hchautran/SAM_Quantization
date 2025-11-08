@@ -8,7 +8,7 @@ from tqdm.auto import tqdm
 from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
 from ..base import AttentionProcessor, setup_logger
 from torch.distributions import Exponential
-from quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
+from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
 
 
 class BaseEntropyProcessor(AttentionProcessor):

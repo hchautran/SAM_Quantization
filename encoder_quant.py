@@ -29,7 +29,7 @@ from processors.encoder import (
     # ImageEncoderProcessor,
     EncoderRecenterAttentionProcessor,
 )
-from quant_utils import quantize_activation_per_token_absmax
+from utils.quant_utils import quantize_activation_per_token_absmax
 from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
 from RTN_quantization import per_tensor_channel_group
 import sys
@@ -42,7 +42,7 @@ from segment_anything.modeling.image_encoder import (
     window_partition,
     window_unpartition,
 )
-from utils import inference_image
+from utils.utils import inference_image
 
 def to_numpy(x: torch.Tensor):
     return x.detach().cpu().numpy()

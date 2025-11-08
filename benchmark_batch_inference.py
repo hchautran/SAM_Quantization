@@ -35,7 +35,7 @@ from torchvision import transforms
 from segment_anything import SamPredictor, sam_model_registry
 
 # Local imports
-from small_engine import Engine, override_args, get_default_datasets
+from sam_engine import Engine, override_args, get_default_datasets
 from processors import get_encoder_processor, DecoderDoNothingProcessor
 from train.utils.dataloader import get_im_gt_name_dict, Resize
 from data_utils import OnlineDataset
@@ -70,7 +70,7 @@ def custom_collate_fn(batch):
     return collated
 
 
-class BatchInferenceBenchmark:
+class BatchEvaluator:
     """Benchmark SAM encoder with batched image processing"""
 
     def __init__(self):
@@ -459,9 +459,9 @@ def main():
     print(f"{'='*80}\n")
 
     datasets = get_default_datasets()
-    benchmark = BatchInferenceBenchmark()
+    batch_evaluator = BatchEvaluator()
 
-    results = benchmark.run_benchmark(
+    results = batch_evaluator.run_benchmark(
         predictor=predictor,
         batch_sizes=args.batch_sizes,
         num_samples=args.num_samples,
