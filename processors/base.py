@@ -8,6 +8,7 @@ from accelerate import Accelerator
 from tqdm.auto import tqdm
 import logging
 import os
+from typing import Union 
 
 from train.utils.dataloader import get_im_gt_name_dict, Resize
 from data_utils import OnlineDataset
@@ -139,7 +140,7 @@ class AttentionProcessor():
             hq_token_only=False
         )
 
-    def calibrate(self, predictor: SamPredictor | SamPredictor_ | None, modules, num_samples=32):
+    def calibrate(self,  predictor: Union[SamPredictor, SamPredictor_, None], modules, num_samples=32):
         """
         Calibrate the processor using sample images.
 
@@ -173,7 +174,7 @@ class AttentionProcessor():
 
         logger.info(f'Calibration complete. Collected stats for {len(self.stat)} modules.')
 
-    def smooth_model(self, predictor: SamPredictor | SamPredictor_ | None, act_scales_file=None, centerQ=False):
+    def smooth_model(self, predictor: Union[SamPredictor, SamPredictor_, None], centerQ=False):
         """Apply smoothing to the model."""
         from RTN_quantization import utils as rtn_utils
         assert act_scales_file is not None, "Run Smooth_sam.py to generate act_scales_file"
@@ -183,7 +184,7 @@ class AttentionProcessor():
         else:
             predictor.model = rtn_utils.smooth_sam(predictor.model, act_scales, alpha=0.5)
 
-    def quarot_model(self, predictor: SamPredictor | SamPredictor_ | None, rot_args, rtn_ro, decoder=False, centerQ=False):
+    def quarot_model(self, predictor: Union[SamPredictor, SamPredictor_, None], rot_args, rtn_ro, decoder=False, centerQ=False):
         """Apply QuaRot rotation to the model."""
         from quarot import rotate_sam
         rotate_sam.rotate_sam(predictor.model, rot_args, rtn_ro, decoder=False, centerQ=centerQ)

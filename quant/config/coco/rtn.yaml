@@ -2,10 +2,10 @@ model:
   name: sam
   use_hq: True
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
-  model_type: 'vit_b'
-  hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
-  # model_type: vit_l 
-  # hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  # model_type: 'vit_b'
+  # hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
+  model_type: vit_l 
+  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
   # model_type: 'vit_h'
   # hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_h.pth'
   
@@ -44,7 +44,7 @@ quantization:
   n_bits_mlp: 16
   quantize_output: False
   up_down_RTN: none
-  qkT_v: True
+  qkT_v: False
   channel: False
   percent: 100
   centerQ: False

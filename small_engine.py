@@ -772,6 +772,103 @@ class Engine:
         """Delegate to evaluator component"""
         return self.evaluator.eval_hq44k(predictor, num_samples, plot_figures)
 
+class Engineade20k:
+    def __init__(self, strategy_name: str, datasets=None, quantize_encoder=False, quantize_decoder=True) -> None:
+
+        self.stat = {}
+        self.strategy_name = strategy_name
+        self.quantize_encoder = quantize_encoder
+        self.quantize_decoder = quantize_decoder
+
+        # Setup datasets
+        if datasets is None:
+            datasets = get_default_datasets()
+
+        valid_im_gt_list = get_im_gt_name_dict([datasets[0]], flag="valid")
+        self.dataloaders, self.datasets = create_calib_dataloaders(
+            valid_im_gt_list,
+            my_transforms=[Resize([1024, 1024])],
+            batch_size=1,
+        )
+
+    def apply_quantization(self, predictor, encoder_config=None, decoder_config=None,args_yaml= None):
+        """
+        Apply quantization to encoder and/or decoder based on configuration.
+
+        Args:
+            predictor: SamPredictor instance
+            encoder_config: Dict with encoder quantization config {processor, n_bits, weight_quant, k_preserve}
+            decoder_config: Dict with decoder quantization config {processor, n_bits, weight_quant, k_preserve}
+        """
+
+        if self.quantize_encoder and encoder_config:
+            print("Applying encoder quantization...")
+            image_encoder_monkey_patch(
+                predictor.model,
+                processor=encoder_config.get('processor'),
+                n_bits=encoder_config.get('n_bits', 8),
+                weight_quant=encoder_config.get('weight_quant', 'per_channel'),
+                act_quant=encoder_config.get('act_quant', 'per_token'),
+                args_yaml= args_yaml,
+            )
+            print(f"Encoder quantized: {encoder_config.get('n_bits', 8)}-bit, "
+                  f"weight: {encoder_config.get('weight_quant', 'per_channel')}", f"activation: {encoder_config.get('act_quant', 'per_token')} ")
+
+        if self.quantize_decoder and decoder_config:
+            print("Applying decoder quantization...")
+            mask_decoder_monkey_patch(
+                predictor.model,
+                processor=decoder_config.get('processor'),
+                n_bits=decoder_config.get('n_bits', 8),
+                weight_quant=decoder_config.get('weight_quant', 'per_channel'),
+                k_preserve=decoder_config.get('k_preserve', 0),  
+            )
+            print(f"Decoder quantized: {decoder_config.get('n_bits', 8)}-bit, "
+                  f"{decoder_config.get('weight_quant', 'per_channel')}, k_preserve={decoder_config.get('k_preserve', 0)}")
+
+    def setup_and_calibrate_processors(self, predictor, num_calib_samples=32, encoder_processor:EncoderAttentionProcessor=None, decoder_processor:DecoderDoNothingProcessor=None,args_yaml=None):
+        """
+        Setup and calibrate processors for encoder and/or decoder.
+
+        Args:
+            predictor: SamPredictor instance
+            num_calib_samples: Number of samples for calibration
+
+        Returns:
+            Tuple of (encoder_processor, decoder_processor)
+        """
+
+        if self.quantize_encoder:
+            print("Setting up encoder processor...")
+            # encoder_processor = EncoderAttentionProcessor()
+            encoder_processor.set_params(args_yaml)
+            encoder_processor.calibrate(
+                predictor=predictor,
+                modules=(DecoderAttention, EncoderAttentionTraining, EncoderAttention, EncoderSamAttention),
+                num_samples=num_calib_samples
+            )
+            
+            if args_yaml.quantization.quansmooth :
+                encoder_processor.smooth_model(predictor,args_yaml.quantization.act_scales_file, args_yaml.quantization.centerQ)
+            elif args_yaml.quantization.quanro:
+                encoder_processor.quarot_model(predictor,args_yaml.quarot_inf, args_yaml.rtn_ro_config, centerQ=True)
+                
+            
+            print(f"Encoder processor calibrated on {num_calib_samples} samples")
+        
+
+        if self.quantize_decoder:
+            print("Setting up decoder processor...")
+            # decoder_processor = DecoderDoNothingProcessor('decoder_attn')
+            decoder_processor.calibrate(
+                predictor=predictor,
+                modules=(TwoWayTransformer,),
+                num_samples=num_calib_samples
+            )
+            print(f"Decoder processor calibrated on {num_calib_samples} samples")
+
+        return encoder_processor, decoder_processor
+
 encoder_processor_registry = {
     'base': EncoderAttentionProcessor,
     'quarot': EncoderAttentionProcessor,

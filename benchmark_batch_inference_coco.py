@@ -60,37 +60,37 @@ def print_model_structure(model, title="Model Structure"):
     for name, module in model.named_modules():
         print(f"{name}: {module.__class__.__name__}")
     print("=" * len(title))
-def evaluate_loadptq4sam(predictor, args_, args_quant):
-    state="seginw_"
-    if args_quant.quanrtn:
+def evaluate_loadptq4sam(predictor, config_ ):
+    state="coco_"
+    if config_.quantization.quanrtn:
         state +="rtn"
-    if args_quant.quansmooth:
+    if config_.quantization.quansmooth:
         state += "smooth"
-    if args_quant.quanro:
+    if config_.quantization.quanro:
         state += "ro"
-    if args_quant.quandecoder:
+    if config_.quantization.quandecoder:
         state += "decoder "
-    if args_quant.quangptq:
+    if config_.quantization.quangptq:
         state += "gptq "
-    if args_quant.rtn_cuda:
+    if config_.quantization.rtn_cuda:
         state += "rtncuda "
-    if args_quant.gptq_cuda:
+    if config_.quantization.gptq_cuda:
         state += "gptqcuda "
-    if args_quant.low_high_density != "none":
-        state+= "lh "+ args_quant.low_high_density + str(args_quant.percent)
-    if args_quant.qkT_v:
-        state += "qkTv " + str(args_quant.percent)
-        if args_quant.channel:
+    if config_.quantization.low_high_density != "none":
+        state+= "lh "+ config_.quantization.low_high_density + str(config_.quantization.percent)
+    if config_.quantization.qkT_v:
+        state += "qkTv " + str(config_.quantization.percent)
+        if config_.quantization.channel:
             state += "channel " 
         else:
             state += "token "
-    if args_quant.centerQ:
+    if config_.quantization.centerQ:
         state += "centerQ"
-    logger =setup_logger(args_.logging_path,state)
     
     # Use parse_argsptq4sam_with_unknown to handle additional arguments
     args, unknown_args = parse_argsptq4sam()
     
+    state += args.detector + "_" + args.processor + "_" + config_.model.model_type
     # Parse additional arguments that are not recognized by parse_argsptq4sam
     additional_parser = argparse.ArgumentParser()
     additional_parser.add_argument('--num-calib-samples', type=int, default=16,
@@ -103,11 +103,20 @@ def evaluate_loadptq4sam(predictor, args_, args_quant):
                                  help='Enable encoder quantization')
     additional_parser.add_argument('--quantize-decoder', action='store_true',
                                  help='Enable decoder quantization')
-    additional_parser.add_argument('--processor', type=str, default='POSITIONAL_PRUNE',
-                                 help='Enable decoder quantization')
     additional_args = additional_parser.parse_args(unknown_args)
     
-    
+    if args.detector == 'yolox':
+        args.config = "./quant/configmmdet/yolox/yolo_l-sam-vit-l.py"
+    elif args.detector == 'dino':
+        args.config = "./quant/configmmdet/focalnet_dino/focalnet-l-dino_sam-vit-l.py"
+    elif args.detector == 'hdetr':
+        args.config = "./quant/configmmdet/hdetr/r50-hdetr_sam-vit-l.py"
+        
+    logger =setup_logger(config_.data.logging_path,state)
+    print("---------------Logging file: ", state ,"------------------")
+    logger.info("Model type: %s", config_.model.model_type)
+    logger.info("Processor: %s", args.processor)
+    logger.info("Detector: %s", args.detector)
     # args.* for the original parse_argsptq4sam arguments
     # additional_args.* for the new arguments
     
@@ -350,6 +359,8 @@ def main():
                        help='Enable encoder quantization')
     parser.add_argument('--quantize-decoder', action='store_true',
                        help='Enable decoder quantization')
+    parser.add_argument('--detector',type=str, default='yolo',
+                        choices=['yolox', 'dino', "hdetr"])
 
     # Quantization parameters
     parser.add_argument('--n-bits', type=int, default=16,
@@ -425,7 +436,6 @@ def main():
     } if args.quantize_decoder else None
 
     engine.apply_quantization(predictor, encoder_config, decoder_config, config)
-    print_model_structure(predictor.model, title="Quantized SAM Model Structure")
-    evaluate_loadptq4sam(predictor, config.data, config.quantization)
+    evaluate_loadptq4sam(predictor, config)
 if __name__ == '__main__':
     main()

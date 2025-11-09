@@ -94,9 +94,11 @@ class DetObserverInstanceSAM(BaseDetector):
             ori_img = cv2.cvtColor(ori_img, cv2.COLOR_BGR2RGB)
         self.predictor.set_image(ori_img)
         
-        limit_boxes = 120
-        if len(output_boxes) >=limit_boxes:
-            output_boxes= output_boxes[:limit_boxes]
+        ##TODO : limit bboxes to process
+        limit_boxes = len(output_boxes)
+        # if len(output_boxes) >=limit_boxes:
+        #     output_boxes= output_boxes[:limit_boxes]
+            
         transformed_boxes = self.predictor.transform.apply_boxes_torch(output_boxes, ori_img.shape[:2])
         
         # mask_pred: n,1/3,h,w

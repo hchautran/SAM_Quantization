@@ -168,10 +168,17 @@ class BaseEntropyProcessor(AttentionProcessor):
                 # Create mask
                 mask_size = mask_size_fn(layer_name, heads_with_entropy)
                 selected_indices = [head_idx for head_idx, _ in selected_heads]
-                mask = torch.isin(
-                    torch.arange(mask_size),
-                    torch.tensor(selected_indices)
-                ).to(predictor.device)
+                # mask = torch.isin(
+                #     torch.arange(mask_size),
+                #     torch.tensor(selected_indices)
+                # ).to(predictor.device)
+                # final_stats[layer_name] = mask
+                
+                elements = torch.arange(len(heads_with_entropy))
+                test_elements = torch.tensor([head_idx for head_idx, _ in selected_heads])
+                
+                # Create mask using broadcasting
+                mask = (elements.unsqueeze(1) == test_elements.unsqueeze(0)).any(dim=1).to(predictor.device)
                 final_stats[layer_name] = mask
 
         return final_stats
@@ -585,12 +592,17 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
                 num_heads_to_select = self._calculate_num_heads_to_select(len(heads_with_entropy))
                 selected_heads = heads_with_entropy[:num_heads_to_select]
 
-                mask = torch.isin(
-                    torch.arange(len(heads_with_entropy)),
-                    torch.tensor([head_idx for head_idx, _ in selected_heads])
-                ).to(predictor.device)
+                # mask = torch.isin(
+                #     torch.arange(len(heads_with_entropy)),
+                #     torch.tensor([head_idx for head_idx, _ in selected_heads])
+                # ).to(predictor.device)
+                # self.final_entropy_stats[layer_name] = mask
+                elements = torch.arange(len(heads_with_entropy))
+                test_elements = torch.tensor([head_idx for head_idx, _ in selected_heads])
+                
+                # Create mask using broadcasting
+                mask = (elements.unsqueeze(1) == test_elements.unsqueeze(0)).any(dim=1).to(predictor.device)
                 self.final_entropy_stats[layer_name] = mask
-
     def process(self, x: torch.Tensor, module, module_name: str = None):
         """Standard attention processing with optional head quantization."""
         # Determine if we should quantize this layer

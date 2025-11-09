@@ -58,8 +58,7 @@ def parse_argsptq4sam():
     parser = argparse.ArgumentParser(
         description='MMDet test (and eval) a model')
     parser.add_argument('--config',
-                        default='/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/configmmdet/focalnet_dino/focalnet-l-dino_sam-vit-l.py', 
-                        # default ="/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/configmmdet/yolox/yolo_l-sam-vit-l.py",
+                        default='./quant/configmmdet/hdetr/r50-hdetr_sam-vit-l.py',
                         help='test config file path')
     parser.add_argument(
         '--work-dir',
@@ -184,7 +183,10 @@ def parse_argsptq4sam():
         default='./exp/config66.yaml',
         help='quantization config files')
     parser.add_argument('--local_rank', type=int, default=0)
-    
+    parser.add_argument('--processor', type=str, default='POSITIONAL_PRUNE',
+                                 help='Process attention')
+    parser.add_argument('--detector',type=str, default='yolo',
+                        choices=['yolox', 'dino', "hdetr"])
     # Use parse_known_args instead of parse_args
     args, unknown_args = parser.parse_known_args()
     

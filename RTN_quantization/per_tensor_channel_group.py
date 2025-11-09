@@ -17,7 +17,7 @@ Architecture:
 import torch
 from torch import nn
 import torch.nn.functional as F
-from typing import Optional, Protocol
+from typing import Optional, Protocol,Tuple
 from abc import ABC, abstractmethod
 
 
@@ -318,7 +318,7 @@ def quantize_activation_low_high_density_activation_index(
     quantizehigh: bool = True,
     percent: float = 50,
     indices: Optional[torch.Tensor] = None
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize activations based on token density (high or low)."""
     original_shape = t.shape
     original_dtype = t.dtype

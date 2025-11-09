@@ -16,8 +16,8 @@ fast-hadamard-transform/
 seginw_output/
 PTQ4SAM/
 Semantic-Segmentation-Anything/
-/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/Semantic-Segmentation-Anything/
 decoder_quant_r/
+sam-mmrotate/
 quant/qgemm/third-party/
 attention_utilsdebug.py
 attention_utilsdebug.ipynb
@@ -26,6 +26,7 @@ pretrained_checkpoint.zip
 result/
 encoder_quant_1.py
 quant_utils_1.py
+benchmark_results/ade20k/
 # Exclude Python cache files
 __pycache__/
 *.pyc
