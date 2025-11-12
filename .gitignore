@@ -6,7 +6,7 @@ sam2/
 segment-anything/
 data/
 hq_ckts/
-pretrained_checkpoint/
+ckts/
 quarot/fast-hadamard-transform/
 sam2_ckts/
 demo/
@@ -15,15 +15,18 @@ quant/load_coco_ptq4sam/
 fast-hadamard-transform/
 seginw_output/
 PTQ4SAM/
+Semantic-Segmentation-Anything/
 decoder_quant_r/
+sam-mmrotate/
 quant/qgemm/third-party/
 attention_utilsdebug.py
 attention_utilsdebug.ipynb
 decoder_quant.py
-pretrained_checkpoint.zip
+ckts.zip
 result/
 encoder_quant_1.py
 quant_utils_1.py
+benchmark_results/ade20k/
 # Exclude Python cache files
 __pycache__/
 *.pyc
@@ -50,7 +53,7 @@ Thumbs.db
 *.pt
 __pycache__/
 hq_ckts/
-pretrained_checkpoint/
+ckts/
 *.egg-info
 */sam-hq/
 *.pth

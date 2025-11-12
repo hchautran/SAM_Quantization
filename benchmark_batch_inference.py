@@ -409,7 +409,7 @@ def main():
     # Initialize model
     print("Loading SAM model...")
     model_type = 'vit_l'
-    checkpoint_path = './pretrained_checkpoint/sam_hq_vit_l.pth'
+    checkpoint_path = './ckts/sam_hq_vit_l.pth'
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
     predictor = SamPredictor(sam)
 

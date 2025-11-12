@@ -151,7 +151,7 @@ def main():
     # Define device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    sam_model_checkpoint = "/media/caduser/MyBook/chau/chi/SAM_Quantization/pretrained_checkpoint/sam_hq_vit_l.pth"
+    sam_model_checkpoint = "/media/caduser/MyBook/chau/chi/SAM_Quantization/ckts/sam_hq_vit_l.pth"
     sam_model_type = args.model_type
 
     print(f"Loading SAM model: {sam_model_type}")

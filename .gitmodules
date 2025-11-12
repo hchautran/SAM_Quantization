@@ -13,3 +13,9 @@
 [submodule "SageAttention"]
 	path = SageAttention
 	url = https://github.com/thu-ml/SageAttention.git
+[submodule "Semantic-Segmentation-Anything"]
+	path = Semantic-Segmentation-Anything
+	url = https://github.com/fudan-zvg/Semantic-Segment-Anything.git
+[submodule "sam-mmrotate"]
+	path = sam-mmrotate
+	url = https://github.com/VisionXLab/sam-mmrotate.git

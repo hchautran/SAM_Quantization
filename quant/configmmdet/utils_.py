@@ -9,8 +9,6 @@ from mmengine.config import Config, DictAction
 from mmengine.runner import Runner
 
 
-
-
 def parse_args_train():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config',nargs='?',default ="/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/configmmdet/coco_detection.py", help='train config file path')
@@ -56,18 +54,17 @@ def parse_args_train():
         os.environ['LOCAL_RANK'] = str(args.local_rank)
 
     return args
-
-def parse_argsptq4sam():
+def parse_argsptq4sam(): 
     parser = argparse.ArgumentParser(
         description='MMDet test (and eval) a model')
     parser.add_argument('--config',
-                        default='/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/configmmdet/yolo_l-sam-vit-l.py', 
+                        default='./quant/configmmdet/hdetr/r50-hdetr_sam-vit-l.py',
                         help='test config file path')
     parser.add_argument(
         '--work-dir',
         default='result/tmp',
         help='the directory to save the file containing evaluation metrics')
-    parser.add_argument('--out', default='/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/demo/coco/results.pkl', help='output result file in pickle format')
+    parser.add_argument('--out', default='./demo/coco/results.pkl', help='output result file in pickle format')
     parser.add_argument(
         '--fuse-conv-bn',
         action='store_true',
@@ -82,7 +79,7 @@ def parse_argsptq4sam():
     parser.add_argument(
         '--gpu-id',
         type=int,
-        default=[0,1,2,3],
+        default=0,
         help='id of gpu to use '
         '(only applicable to non-distributed testing)')
     parser.add_argument(
@@ -178,7 +175,7 @@ def parse_argsptq4sam():
     parser.add_argument(
         '--launcher',
         choices=['none', 'pytorch', 'slurm', 'mpi'],
-        default='pytorch',
+        default='none',
         help='job launcher')
     parser.add_argument(
         '--q_config',
@@ -186,14 +183,21 @@ def parse_argsptq4sam():
         default='./exp/config66.yaml',
         help='quantization config files')
     parser.add_argument('--local_rank', type=int, default=0)
-    args = parser.parse_args()
+    parser.add_argument('--processor', type=str, default='POSITIONAL_PRUNE',
+                                 help='Process attention')
+    parser.add_argument('--detector',type=str, default='yolo',
+                        choices=['yolox', 'dino', "hdetr"])
+    # Use parse_known_args instead of parse_args
+    args, unknown_args = parser.parse_known_args()
+    
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
-    if args.options and args.eval_options:
+    if hasattr(args, 'options') and args.options and hasattr(args, 'eval_options') and args.eval_options:
         raise ValueError(
             '--options and --eval-options cannot be both '
             'specified, --options is deprecated in favor of --eval-options')
-    if args.options:
+    if hasattr(args, 'options') and args.options:
         warnings.warn('--options is deprecated in favor of --eval-options')
         args.eval_options = args.options
-    return args
+    
+    return args, unknown_args

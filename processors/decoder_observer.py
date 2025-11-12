@@ -361,7 +361,7 @@ if __name__ == "__main__":
     # Configuration
     model_type = "vit_l"
     num_calib_samples = 8
-    checkpoint_path = "./pretrained_checkpoint/sam_hq_vit_l.pth"
+    checkpoint_path = "./ckts/sam_hq_vit_l.pth"
 
     # Initialize model and predictor
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to("cuda")

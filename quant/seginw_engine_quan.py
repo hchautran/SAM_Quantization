@@ -221,7 +221,7 @@ class SeginwInferenceStrategy(InferenceStrategy):
                 weight_quant="per_channel",
                 act_quant="per_token",
                 device=self.device,
-                path_stat_dict="/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/pretrained_checkpoint/stat_dict.pth",
+                path_stat_dict="/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/ckts/stat_dict.pth",
                 percent=self.percent if self.qkT_v else None,
                 qkT_v=self.qkT_v
             )
@@ -343,7 +343,7 @@ class SeginwInferenceStrategy(InferenceStrategy):
 
                 
             if self.save_rtn_cuda:
-                save_cuda_quantized_model(self.predictor.model, save_dir="./pretrained_checkpoint", model_name="sam_int4_full")
+                save_cuda_quantized_model(self.predictor.model, save_dir="./ckts", model_name="sam_int4_full")
 
         
         if self.low_high_density != "none":

@@ -1,21 +1,24 @@
 _base_ = [
-     'datasets/coco_panoptic.py', 'datasets/default_runtime.py'
+    '../datasets/coco_panoptic.py', '../datasets/default_runtime.py'
 ]
 
 plugin = True
-plugin_dir = 'projects/instance_segment_anything/'
+plugin_dir = 'PTQ4SAM/projects/instance_segment_anything/'
 
 model = dict(
     type='DetObserverInstanceSAM',
     det_wrapper_type='generalized_detector',
     det_wrapper_cfg=dict(
-                det_config = './PTQ4SAM/mmdetection/configs/yolox/yolox_l_8x8_300e_coco.py',
-                det_weight = './pretrained_checkpoint/yolox_l_8x8_300e_coco_20211126_140236-d3bd2b23.pth',
+        det_config = './PTQ4SAM/mmdetection/configs/yolox/yolox_l_8x8_300e_coco.py',
+        det_weight = './ckts/yolox_l_8x8_300e_coco_20211126_140236-d3bd2b23.pth',
         ),
     num_classes=80,
-    model_type='vit_h',
-    sam_checkpoint='pretrained_checkpoint/sam_vit_h_4b8939.pth',
+    model_type='vit_l',
+    sam_checkpoint='ckts/sam_vit_l_0b3195.pth',
     use_sam_iou=True,
+    
+    show_image = 10,
+    result_coco_path ="./demo/coco"
 )
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
@@ -40,7 +43,7 @@ test_pipeline = [
 ]
 
 dataset_type = 'CocoDataset'
-data_root = '/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/data/coco/'
+data_root = './data/coco/'
 
 data = dict(
     samples_per_gpu=4,

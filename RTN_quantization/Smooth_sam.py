@@ -109,7 +109,7 @@ def print_model_structure(model, title="Model Structure"):
     
     print("=" * len(title))
 if __name__ == "__main__":
-    sam_checkpoint = "./pretrained_checkpoint/sam_hq_vit_h.pth"  # Updated path
+    sam_checkpoint = "./ckts/sam_hq_vit_h.pth"  # Updated path
     model_type = "vit_h"
     device = "cuda"
     act_scales_file = None
@@ -122,8 +122,8 @@ if __name__ == "__main__":
   
     
     # Load or calculate activation scales
-    act_scales_file = f"./pretrained_checkpoint/sam_{model_type}_activation_scales.pt"
-    # act_scales_file ="/media/caduser/MyBook/chau/chi/SAM_Quantization/pretrained_checkpoint/sam_vit_lactivation_scales.pt"
+    act_scales_file = f"./ckts/sam_{model_type}_activation_scales.pt"
+    # act_scales_file ="/media/caduser/MyBook/chau/chi/SAM_Quantization/ckts/sam_vit_lactivation_scales.pt"
     if os.path.exists(act_scales_file):
         print("Loading activation scales...")
         act_scales = torch.load(act_scales_file)
