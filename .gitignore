@@ -29,6 +29,7 @@ encoder_quant_1.py
 quant_utils_1.py
 benchmark_results/ade20k/
 benchmark_results/
+data/
 # Exclude Python cache files
 __pycache__/
 *.pyc
