@@ -928,7 +928,7 @@ def get_channel_distribution_modify(sam,hq_decoder,model_type, act,rot_args):
     observer.clear_dict()
 if __name__ == '__main__':
 
-    checkpoint_path = "/media/caduser/MyBook/chau/chi/SAM_Quantization/pretrained_checkpoint/sam_hq_vit_l.pth"
+    checkpoint_path = "/media/caduser/MyBook/chau/chi/SAM_Quantization/ckts/sam_hq_vit_l.pth"
     model_type = "vit_l"
     
     # get_tensor_density_distribution(

@@ -89,10 +89,10 @@ model = dict(
                    ema_decay=0.9997,
                    ema_epoch=0,
                    use_detached_boxes_dec_out=False),
-    det_model_ckpt='/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/pretrained_checkpoint/focalnet_l_dino.pth',
+    det_model_ckpt='/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/ckts/focalnet_l_dino.pth',
     num_classes=80,
     model_type='vit_l',
-    sam_checkpoint='./pretrained_checkpoint/sam_vit_l_0b3195.pth',
+    sam_checkpoint='./ckts/sam_vit_l_0b3195.pth',
     use_sam_iou=True,
     
     show_image = 10,

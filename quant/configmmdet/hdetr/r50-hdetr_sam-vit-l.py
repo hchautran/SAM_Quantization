@@ -40,10 +40,10 @@ model = dict(
                          use_checkpoint=False,
                          use_fp16=False,
                          with_box_refine=True),
-    det_model_ckpt='./pretrained_checkpoint/r50_hdetr.pth',
+    det_model_ckpt='./ckts/r50_hdetr.pth',
     num_classes=80,
     model_type='vit_l',
-    sam_checkpoint='./pretrained_checkpoint/sam_vit_l_0b3195.pth',
+    sam_checkpoint='./ckts/sam_vit_l_0b3195.pth',
     use_sam_iou=True,
 )
 img_norm_cfg = dict(

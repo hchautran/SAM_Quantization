@@ -29,9 +29,9 @@ from .encoder import (
 )
 from RTN_quantization import per_tensor_channel_group
 from RTN_quantization.utils import QuantizationConfig, replace_linear_with_quantized
-from utils import inference_image
+from utils.utils import inference_image
 
-from utils import quantize_activation_per_highblock_abmax, find_O_qha
+from utils.utils import quantize_activation_per_highblock_abmax, find_O_qha
 
 # ============================================================================
 # Utility Functions
@@ -361,7 +361,7 @@ if __name__ == "__main__":
     # Configuration
     model_type = "vit_l"
     num_calib_samples = 8
-    checkpoint_path = "./pretrained_checkpoint/sam_hq_vit_l.pth"
+    checkpoint_path = "./ckts/sam_hq_vit_l.pth"
 
     # Initialize model and predictor
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to("cuda")
