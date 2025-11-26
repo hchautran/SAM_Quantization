@@ -164,7 +164,7 @@ class BaseEntropyProcessor(AttentionProcessor):
                 # Calculate number of heads to select
                 num_heads_to_select = self._calculate_num_heads_to_select(len(heads_with_entropy))
                 selected_heads = heads_with_entropy[:num_heads_to_select]
-
+                print("remain heads/ total heads:", len(heads_with_entropy)-num_heads_to_select, "/", len(heads_with_entropy))
                 # Create mask
                 mask_size = mask_size_fn(layer_name, heads_with_entropy)
                 selected_indices = [head_idx for head_idx, _ in selected_heads]
@@ -217,7 +217,7 @@ class BaseEntropyProcessor(AttentionProcessor):
         else:
             self._process_percent_mode(predictor)
 
-        self._log_final_stats()
+        # self._log_final_stats()
 
     def _log_final_stats(self):
         """Log the final entropy statistics."""
@@ -251,6 +251,54 @@ class BaseEntropyProcessor(AttentionProcessor):
         """Reshape attention output to original spatial dimensions."""
         return x.view(B, num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
 
+class PruneRateProcessor(BaseEntropyProcessor):
+    def __init__(self, strategy_name: str = 'PruneRate'):
+        super().__init__(strategy_name)
+    def calculate_entropy(self, attn_head):
+        """Calculate mean entropy of the entire attention matrix."""
+        if isinstance(attn_head, torch.Tensor) is False:
+            attn_head = torch.from_numpy(attn_head)
+
+        eps = 1e-12
+        attn_head = torch.clamp(attn_head, min=eps).flatten()
+        entropy = -torch.sum(attn_head * torch.log(attn_head))
+        return entropy
+    def _process_percent_mode(self, predictor):
+        """Process calibration in percent mode, sorting heads by entropy values."""
+        layer_heads = self._group_entropy_by_layer()
+        
+        # Sort each layer's heads by entropy value in descending order
+        sorted_layer_heads = {}
+        for layer_name, heads_with_entropy in layer_heads.items():
+            sorted_heads = sorted(heads_with_entropy, key=lambda x: x[1])
+            sorted_layer_heads[layer_name] = [index for index, _ in sorted_heads]
+        self.final_entropy_stats = sorted_layer_heads
+        
+        # Clean up the original entropy_stats to save memory
+        del self.entropy_stats
+    def _create_attention_hook(self, name):
+        """Create attention hook for positional pruning."""
+        def attention_hook(module, input, output):
+            x = input[0] if isinstance(input, tuple) else input
+            B, H, W, _ = x.shape
+
+            qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
+
+            attn = (q * module.scale) @ k.transpose(-2, -1)
+            if module.use_rel_pos:
+                attn = add_decomposed_rel_pos(attn, q, module.rel_pos_h, module.rel_pos_w, (H, W), (H, W))
+
+            attn = attn.softmax(dim=-1)
+            B_nhead, N, _ = attn.shape
+
+            for head_idx in range(B_nhead):
+                attn_head = attn[head_idx]
+                mean_entropy = self.calculate_entropy(attn_head)
+                head_key = f"{name}.head_{head_idx}"
+                self.entropy_stats[head_key].append(mean_entropy)
+
+        return attention_hook
 
 class PositionalPruneProcessor(BaseEntropyProcessor):
     """
@@ -289,15 +337,14 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
         """Override to support global vs local percentages."""
         if self.model_type == "vit_b" :
             if total_heads < 300:
-                return max(1, int(total_heads * self.global_percent))
+                return  int(total_heads * self.global_percent)
         elif self.model_type == "vit_l" :
             if total_heads < 400:
-                return max(1, int(total_heads * self.global_percent))
+                return int(total_heads * self.global_percent)
         elif self.model_type == "vit_h" :
             if total_heads < 400:
-                return max(1, int(total_heads * self.global_percent))
-        
-        return max(1, int(total_heads * self.percent))
+                return  int(total_heads * self.global_percent)
+        return int(total_heads * self.percent)
 
     def _create_attention_hook(self, name):
         """Create attention hook for positional pruning."""
@@ -366,7 +413,6 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
         # Compute attention
         attn = self._compute_attention(q_attn, k_attn, module, H, W)
         x_attn = attn @ v_attn
-
         # Merge outputs
         if prune_mask is not None:
             x = torch.zeros_like(v).to(v.device)

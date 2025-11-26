@@ -315,7 +315,7 @@ class BatchInferenceBenchmark:
 
         for batch_size in batch_sizes:
             # Create dataloader with specific batch size
-            valid_im_gt_list = get_im_gt_name_dict([datasets_config[0]], flag="valid")
+            valid_im_gt_list = get_im_gt_name_dict([datasets_config[2]], flag="valid")
 
             gos_dataset = OnlineDataset(
                 [valid_im_gt_list[0]],
@@ -370,7 +370,7 @@ def main():
 
     # Model parameters
     parser.add_argument('--processor', type=str, default='POSITIONAL_PRUNE',
-                       choices=['base','POSITIONAL_PRUNE', 'POSITIONAL_QUANT', 'HEAD_PRUNE'],
+                       choices=['BASE','POSITIONAL_PRUNE', 'POSITIONAL_QUANT', 'HEAD_PRUNE'],
                        help='Processor to use')
     parser.add_argument('--quantize-encoder', action='store_true',
                        help='Enable encoder quantization')
@@ -408,8 +408,8 @@ def main():
 
     # Initialize model
     print("Loading SAM model...")
-    model_type = 'vit_l'
-    checkpoint_path = './pretrained_checkpoint/sam_hq_vit_l.pth'
+    model_type = 'vit_b'
+    checkpoint_path = './pretrained_checkpoint/sam_hq_vit_b.pth'
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
     predictor = SamPredictor(sam)
 

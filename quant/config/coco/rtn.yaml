@@ -2,16 +2,32 @@ model:
   name: sam
   use_hq: True
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
-  # model_type: 'vit_b'
-  # hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
-  model_type: vit_l 
-  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  model_type: 'vit_b'
+  hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
+  # model_type: vit_l 
+  # hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
   # model_type: 'vit_h'
   # hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_h.pth'
   
   device: cpu
-
-
+train_prune_rate:
+  learning_rate: 1e-3
+  lr_drop_epoch: 10
+  start_epoch: 0
+  output: './pretrained_checkpoint/prune_rate/'
+  max_epoch_num: 51
+  batch_size_train: 1
+  batch_size_valid: 1
+  model_save_fre: 50
+  seed: 42
+  gpu: [0]
+  find_unused_params: True
+  world_size: 1
+  rank: 0                 
+  local_rank: 0           
+  distributed: false     
+  dist_url: "env://"   
+  training: False 
 data:
   config_file: ./GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py
   checkpoint_path: ./pretrained_checkpoint/groundingdino_swint_ogc.pth
@@ -48,8 +64,8 @@ quantization:
   channel: False
   percent: 100
   centerQ: False
-  percent_entropy: 0.5
-  percent_entropy_global: 0.7
+  percent_entropy: 0.85
+  percent_entropy_global: 0.75
   high_entropy: True 
   prune_global: True 
-
+  train_rate_prune: True

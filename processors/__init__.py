@@ -10,6 +10,7 @@ from .encoder import (
     EncoderAttentionProcessor,
     EncoderRecenterAttentionProcessor,
     PositionalPruneProcessor,
+    PruneRateProcessor,
     HeadPruneProcessor,
     PositionalQuantProcessor,
     EncoderAttentionProcessorSmoothMeanQ,
@@ -69,6 +70,7 @@ def get_encoder_processor(name: str, **kwargs):
 register_encoder_processor("BASE")(EncoderAttentionProcessor)
 register_encoder_processor("RECENTER")(EncoderRecenterAttentionProcessor)
 register_encoder_processor("POSITIONAL_PRUNE")(PositionalPruneProcessor)
+register_encoder_processor("PRUNE_RATE")(PruneRateProcessor)
 register_encoder_processor("HEAD_PRUNE")(HeadPruneProcessor)
 register_encoder_processor("POSITIONAL_QUANT")(PositionalQuantProcessor)
 register_encoder_processor("SMOOTH_MEAN_Q")(EncoderAttentionProcessorSmoothMeanQ)
@@ -89,6 +91,7 @@ __all__ = [
     "EncoderRecenterAttentionProcessor",
     "HeadPruneProcessor",
     "PositionalPruneProcessor",
+    "PruneRateProcessor",
     "PositionalQuantProcessor",
     "EncoderAttentionProcessorSmoothMeanQ",
     "EncoderAttentionProcessorCompensate",

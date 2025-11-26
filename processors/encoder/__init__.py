@@ -1,7 +1,7 @@
 """Encoder processors for SAM quantization."""
 
 from .basic import EncoderAttentionProcessor, EncoderRecenterAttentionProcessor
-from .entropy import PositionalPruneProcessor, HeadPruneProcessor, PositionalQuantProcessor 
+from .entropy import PositionalPruneProcessor, HeadPruneProcessor, PositionalQuantProcessor ,PruneRateProcessor
 from .smooth import (
     EncoderAttentionProcessorSmoothMeanQ,
     EncoderAttentionProcessorSmooth,
@@ -25,4 +25,5 @@ __all__ = [
     "EncoderAttentionProcessorHighLow",
     "EncoderAttentionProcessorSmoothLogQ",
     "EncoderAttentionProcessorQuarot",
+    "PruneRateProcessor",
 ]

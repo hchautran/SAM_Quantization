@@ -2,7 +2,7 @@
 
 CUDA_VISIBLE_DEVICES=1 python benchmark_batch_inference.py \
     --config-file quant/config/hq44k/rtn.yaml \
-    --batch-sizes 1 2 4 8 16 32 64 \
-    --num-samples 100 \
+    --batch-sizes 1 \
+    --num-samples 400 \
     --quantize-encoder \
     --n-bits 16 

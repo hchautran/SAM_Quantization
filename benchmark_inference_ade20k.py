@@ -19,7 +19,7 @@ from processors import get_encoder_processor, DecoderDoNothingProcessor
 import torch.distributed as dist
 import torch.multiprocessing as mp
 os.environ['MASTER_ADDR'] = 'localhost'
-os.environ['MASTER_PORT'] = '12327'
+os.environ['MASTER_PORT'] = '12329'
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Semantically segment anything with SAM quantization.')
@@ -143,23 +143,7 @@ def main(rank, args):
     
     # Set up semantic branch model
     if args.model == 'oneformer':
-        try:
-            from transformers import OneFormerProcessor, OneFormerForUniversalSegmentation
-        except KeyError as e:
-            if "'Version'" in str(e):
-                print("Transformers library metadata error detected. Trying to reload...")
-                # Try importing again after clearing metadata cache
-                import importlib
-                import sys
-                
-                # Clear any cached metadata
-                if 'transformers' in sys.modules:
-                    del sys.modules['transformers']
-                
-                # Force reimport
-                from transformers import OneFormerProcessor, OneFormerForUniversalSegmentation
-            else:
-                raise e
+        from transformers import OneFormerProcessor, OneFormerForUniversalSegmentation
         
         if args.dataset == 'ade20k':
             semantic_branch_processor = OneFormerProcessor.from_pretrained(
@@ -178,30 +162,13 @@ def main(rank, args):
         else:
             raise NotImplementedError()
     elif args.model == 'segformer':
-        try:
-            from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
-        except KeyError as e:
-            if "'Version'" in str(e):
-                print("Transformers library metadata error detected. Trying to reload...")
-                # Try importing again after clearing metadata cache
-                import importlib
-                import importlib.metadata
-                import sys
-                
-                # Clear any cached metadata
-                if 'transformers' in sys.modules:
-                    del sys.modules['transformers']
-                
-                # Force reimport
-                from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
-            else:
-                raise e
+        from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
         
         if args.dataset == 'ade20k':
             semantic_branch_processor = SegformerFeatureExtractor.from_pretrained(
-                "nvidia/segformer-b5-finetuned-ade-640-640")
+                "nvidia/segformer-b0-finetuned-ade-512-512")
             semantic_branch_model = SegformerForSemanticSegmentation.from_pretrained(
-                "nvidia/segformer-b5-finetuned-ade-640-640").to(rank)
+                "nvidia/segformer-b0-finetuned-ade-512-512").to(rank)
         elif args.dataset == 'cityscapes' or args.dataset == 'foggy_driving':
             semantic_branch_processor = SegformerFeatureExtractor.from_pretrained(
                 "nvidia/segformer-b5-finetuned-cityscapes-1024-1024")
