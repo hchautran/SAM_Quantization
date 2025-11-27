@@ -30,6 +30,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torchvision import transforms
+import wandb
 
 # SAM imports
 from segment_anything import SamPredictor, sam_model_registry
@@ -301,6 +302,21 @@ class BatchEvaluator:
         print(f"  Peak memory: {memory_stats.get('peak_memory_allocated_mb', 0):.2f} MB")
         print(f"  mIoU: {np.mean(ious):.4f} ± {np.std(ious):.4f}")
 
+        # Log to wandb
+        wandb.log({
+            f'batch_{batch_size}/throughput_imgs_per_sec': throughput,
+            f'batch_{batch_size}/encoder_batch_mean_ms': np.mean(encoder_times),
+            f'batch_{batch_size}/encoder_batch_std_ms': np.std(encoder_times),
+            f'batch_{batch_size}/encoder_per_image_mean_ms': np.mean(encoder_times_per_image),
+            f'batch_{batch_size}/encoder_per_image_std_ms': np.std(encoder_times_per_image),
+            f'batch_{batch_size}/peak_memory_allocated_mb': memory_stats.get('peak_memory_allocated_mb', 0),
+            f'batch_{batch_size}/peak_memory_reserved_mb': memory_stats.get('peak_memory_reserved_mb', 0),
+            f'batch_{batch_size}/miou': np.mean(ious),
+            f'batch_{batch_size}/miou_std': np.std(ious),
+            f'batch_{batch_size}/boundary_iou': np.mean(boundary_ious),
+            f'batch_{batch_size}/boundary_iou_std': np.std(boundary_ious),
+        })
+
         return result
 
     def run_benchmark(
@@ -315,7 +331,7 @@ class BatchEvaluator:
 
         for batch_size in batch_sizes:
             # Create dataloader with specific batch size
-            valid_im_gt_list = get_im_gt_name_dict([datasets_config[0]], flag="valid")
+            valid_im_gt_list = get_im_gt_name_dict([datasets_config[1]], flag="valid")
 
             gos_dataset = OnlineDataset(
                 [valid_im_gt_list[0]],
@@ -350,61 +366,37 @@ class BatchEvaluator:
         return all_results
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Benchmark SAM encoder with batch inference'
-    )
-
-    # Config
-    parser.add_argument('--config-file', type=str, required=True,
-                       help='Path to config YAML file')
-
-    # Benchmark parameters
-    parser.add_argument('--batch-sizes', type=int, nargs='+',
-                       default=[1, 2, 4, 8, 16],
-                       help='Batch sizes to test')
-    parser.add_argument('--num-samples', type=int, default=100,
-                       help='Number of samples per batch size')
-    parser.add_argument('--num-calib-samples', type=int, default=16,
-                       help='Number of calibration samples')
-
-    # Model parameters
-    parser.add_argument('--processor', type=str, default='POSITIONAL_PRUNE',
-                       choices=['base','POSITIONAL_PRUNE', 'POSITIONAL_QUANT', 'HEAD_PRUNE'],
-                       help='Processor to use')
-    parser.add_argument('--quantize-encoder', action='store_true',
-                       help='Enable encoder quantization')
-    parser.add_argument('--quantize-decoder', action='store_true',
-                       help='Enable decoder quantization')
-
-    # Quantization parameters
-    parser.add_argument('--n-bits', type=int, default=16,
-                       help='Number of quantization bits')
-    parser.add_argument('--n-bits-mlp', type=int, default=4,
-                       help='Number of quantization bits for MLP')
-    parser.add_argument('--en-weight-quant', type=str, default='per_channel',
-                       help='Encoder weight quantization method')
-    parser.add_argument('--en-act-quant', type=str, default='per_token',
-                       help='Encoder activation quantization method')
-    parser.add_argument('--de-weight-quant', type=str, default='per_channel',
-                       help='Decoder weight quantization method')
-    parser.add_argument('--de-act-quant', type=str, default='per_token',
-                       help='Decoder activation quantization method')
-    parser.add_argument('--k-preserve', type=int, default=0,
-                       help='Number of channels to preserve')
-
-    # Output
-    parser.add_argument('--output-dir', type=str, default='./benchmark_results',
-                       help='Output directory for results')
-
-    args = parser.parse_args()
-
-    # Load config
-    config = OmegaConf.load(args.config_file)
-    config = override_args(args, config)
-
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+def run_single_benchmark(args):
+    """Run a single benchmark with given arguments"""
+    # Initialize wandb
+    if not args.no_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config={
+                'percent': args.percent,
+                'percent_global': args.percent_global,
+                'prune_global': args.prune_global,
+                'n_bits': args.n_bits,
+                'n_bits_mlp': args.n_bits_mlp,
+                'high_entropy': args.high_entropy,
+                'batch_sizes': args.batch_sizes,
+                'num_samples': args.num_samples,
+                'num_calib_samples': args.num_calib_samples,
+                'processor': args.processor,
+                'quantize_encoder': args.quantize_encoder,
+                'quantize_decoder': args.quantize_decoder,
+                'en_weight_quant': args.en_weight_quant,
+                'en_act_quant': args.en_act_quant,
+                'de_weight_quant': args.de_weight_quant,
+                'de_act_quant': args.de_act_quant,
+                'k_preserve': args.k_preserve,
+                'model_ckt': args.model_ckt,
+                'model_type': args.model_type,
+            }
+        )
+    else:
+        wandb.init(mode='disabled')
 
     # Initialize model
     print("Loading SAM model...")
@@ -430,7 +422,7 @@ def main():
         num_calib_samples=args.num_calib_samples,
         encoder_processor=enc_processor,
         decoder_processor=DecoderDoNothingProcessor("DO_NOTHING"),
-        args_yaml=config,
+        args_yaml=args,
     )
 
     # Apply quantization
@@ -449,7 +441,7 @@ def main():
         'k_preserve': args.k_preserve
     } if args.quantize_decoder else None
 
-    engine.apply_quantization(predictor, encoder_config, decoder_config, config)
+    engine.apply_quantization(predictor, encoder_config, decoder_config, args)
 
     # Run benchmark
     print(f"\n{'='*80}")
@@ -483,6 +475,8 @@ def main():
     df['n_bits'] = args.n_bits
     df['weight_quant'] = args.en_weight_quant
     df['act_quant'] = args.en_act_quant
+    df['percent'] = args.percent
+    df['percent_global'] = args.percent_global
 
     df.to_csv(csv_filename, index=False)
 
@@ -505,8 +499,207 @@ def main():
               f"{result['miou']:>8.4f}")
 
     print("-" * 80)
-    print(f"\n Best throughput: {max(r['throughput_imgs_per_sec'] for r in results):.2f} imgs/sec "
-          f"at batch_size={max(results, key=lambda x: x['throughput_imgs_per_sec'])['batch_size']}")
+
+    best_throughput_result = max(results, key=lambda x: x['throughput_imgs_per_sec'])
+    print(f"\n Best throughput: {best_throughput_result['throughput_imgs_per_sec']:.2f} imgs/sec "
+          f"at batch_size={best_throughput_result['batch_size']}")
+
+    # Log summary to wandb
+    wandb.log({
+        'summary/best_throughput': best_throughput_result['throughput_imgs_per_sec'],
+        'summary/best_throughput_batch_size': best_throughput_result['batch_size'],
+        'summary/best_miou': max(r['miou'] for r in results),
+        'summary/min_latency_per_image': min(r['encoder_per_image_mean_ms'] for r in results),
+    })
+
+    # Log the results table to wandb
+    wandb.log({'results_table': wandb.Table(dataframe=df)})
+
+    # Finish wandb run
+    wandb.finish()
+
+    return results
+
+
+def run_parameter_sweep(args):
+    """Run parameter sweep over percent and percent-global values"""
+    import itertools
+
+    print(f"\n{'='*80}")
+    print("PARAMETER SWEEP MODE")
+    print(f"{'='*80}")
+    print(f"Percent values: {args.percent_values}")
+    print(f"Percent-global values: {args.percent_global_values}")
+
+    # Generate all combinations
+    combinations = list(itertools.product(args.percent_values, args.percent_global_values))
+    total_runs = len(combinations)
+
+    print(f"Total runs: {total_runs}")
+    print(f"{'='*80}\n")
+
+    all_sweep_results = []
+    successful_runs = 0
+    failed_runs = 0
+
+    # Run each combination
+    for idx, (percent, percent_global) in enumerate(combinations, 1):
+        print(f"\n{'='*80}")
+        print(f"SWEEP RUN {idx}/{total_runs}")
+        print(f"percent={percent}, percent_global={percent_global}")
+        print(f"{'='*80}\n")
+
+        # Update args for this run
+        args.percent = percent
+        args.percent_global = percent_global
+
+        # Set wandb run name if not specified
+        if not args.wandb_run_name:
+            args.wandb_run_name = f"p{percent}_pg{percent_global}_{args.processor}"
+
+        try:
+            results = run_single_benchmark(args)
+            successful_runs += 1
+
+            # Collect sweep results
+            for result in results:
+                result['sweep_percent'] = percent
+                result['sweep_percent_global'] = percent_global
+                all_sweep_results.append(result)
+
+        except Exception as e:
+            print(f"ERROR: Run failed for percent={percent}, percent_global={percent_global}")
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+            failed_runs += 1
+
+        # Reset wandb run name for next iteration
+        args.wandb_run_name = None
+
+    # Save sweep summary
+    print(f"\n{'='*80}")
+    print("SWEEP COMPLETE")
+    print(f"{'='*80}")
+    print(f"Total runs: {total_runs}")
+    print(f"Successful: {successful_runs}")
+    print(f"Failed: {failed_runs}")
+    print(f"{'='*80}\n")
+
+    if all_sweep_results:
+        # Save comprehensive sweep results
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        sweep_csv = args.summary_csv or os.path.join(
+            args.output_dir,
+            f'sweep_results_{timestamp}.csv'
+        )
+
+        df_sweep = pd.DataFrame(all_sweep_results)
+        df_sweep.to_csv(sweep_csv, index=False)
+
+        print(f"Sweep results saved to: {sweep_csv}")
+
+        # Print best configurations
+        best_throughput = df_sweep.loc[df_sweep['throughput_imgs_per_sec'].idxmax()]
+        best_miou = df_sweep.loc[df_sweep['miou'].idxmax()]
+
+        print(f"\nBest throughput configuration:")
+        print(f"  percent={best_throughput['sweep_percent']}, "
+              f"percent_global={best_throughput['sweep_percent_global']}, "
+              f"batch_size={best_throughput['batch_size']}")
+        print(f"  Throughput: {best_throughput['throughput_imgs_per_sec']:.2f} imgs/sec")
+
+        print(f"\nBest mIoU configuration:")
+        print(f"  percent={best_miou['sweep_percent']}, "
+              f"percent_global={best_miou['sweep_percent_global']}, "
+              f"batch_size={best_miou['batch_size']}")
+        print(f"  mIoU: {best_miou['miou']:.4f}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Benchmark SAM encoder with batch inference'
+    )
+
+    # Config
+    parser.add_argument('--percent', type=float, default=0.0,
+                       help='Number of samples per batch size')
+    parser.add_argument('--percent-global', type=float, default=0.0,
+                       help='percent-global')
+    parser.add_argument('--prune-global', action='store_true',
+                       help='Number of samples per batch size')
+    parser.add_argument('--n-bits', type=int, default=8,
+                       help='Number of samples per batch size')
+    parser.add_argument('--high-entropy', action='store_true',
+                       help='Number of samples per batch size')
+
+    # Benchmark parameters
+    parser.add_argument('--batch-sizes', type=int, nargs='+',
+                       default=[1, 2, 4, 8, 16],
+                       help='Batch sizes to test')
+    parser.add_argument('--num-samples', type=int, default=100,
+                       help='Number of samples per batch size')
+    parser.add_argument('--num-calib-samples', type=int, default=16,
+                       help='Number of calibration samples')
+
+    # Model parameters
+    parser.add_argument('--processor', type=str, default='POSITIONAL_PRUNE',
+                       choices=['base','POSITIONAL_PRUNE', 'POSITIONAL_QUANT', 'HEAD_PRUNE'],
+                       help='Processor to use')
+    parser.add_argument('--quantize-encoder', action='store_true',
+                       help='Enable encoder quantization')
+    parser.add_argument('--quantize-decoder', action='store_true',
+                       help='Enable decoder quantization')
+
+    # Quantization parameters
+    parser.add_argument('--n-bits-mlp', type=int, default=4,
+                       help='Number of quantization bits for MLP')
+    parser.add_argument('--en-weight-quant', type=str, default='per_channel',
+                       help='Encoder weight quantization method')
+    parser.add_argument('--en-act-quant', type=str, default='per_token',
+                       help='Encoder activation quantization method')
+    parser.add_argument('--de-weight-quant', type=str, default='per_channel',
+                       help='Decoder weight quantization method')
+    parser.add_argument('--de-act-quant', type=str, default='per_token',
+                       help='Decoder activation quantization method')
+    parser.add_argument('--k-preserve', type=int, default=0,
+                       help='Number of channels to preserve')
+    parser.add_argument('--model-ckt', type=str, default='./ckts/sam_hq_vit_l.pth',
+                       help='Number of channels to preserve')
+    parser.add_argument('--model-type', type=str, default='vit_l',
+                       help='Number of channels to preserve')
+    # Output
+    parser.add_argument('--output-dir', type=str, default='./benchmark_results',
+                       help='Output directory for results')
+    parser.add_argument('--no-wandb', action='store_true',
+                       help='Disable wandb logging')
+    parser.add_argument('--wandb-project', type=str, default='sam-quantization-batch-benchmark',
+                       help='Wandb project name')
+    parser.add_argument('--wandb-run-name', type=str, default=None,
+                       help='Wandb run name')
+
+    # Sweep parameters
+    parser.add_argument('--sweep', action='store_true',
+                       help='Run parameter sweep over percent and percent-global values')
+    parser.add_argument('--percent-values', type=float, nargs='+',
+                       default=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+                       help='Percent values to sweep over')
+    parser.add_argument('--percent-global-values', type=float, nargs='+',
+                       default=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+                       help='Percent-global values to sweep over')
+    parser.add_argument('--summary-csv', type=str, default=None,
+                       help='CSV file to save sweep summary results')
+
+    args = parser.parse_args()
+
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Handle sweep mode
+    if args.sweep:
+        run_parameter_sweep(args)
+    else:
+        run_single_benchmark(args)
 
 
 if __name__ == '__main__':

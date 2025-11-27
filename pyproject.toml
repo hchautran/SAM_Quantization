@@ -37,5 +37,6 @@ dependencies = [
     "ufmt==2.0.0b2",
     "umap-learn>=0.5.9.post2",
     "usort==1.0.2",
+    "wandb>=0.23.0",
     "yapf>=0.43.0",
 ]

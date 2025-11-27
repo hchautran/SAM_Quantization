@@ -19,3 +19,6 @@
 [submodule "sam-mmrotate"]
 	path = sam-mmrotate
 	url = https://github.com/VisionXLab/sam-mmrotate.git
+[submodule "freesam/third-party/cutlass"]
+	path = freesam/third-party/cutlass
+	url = https://github.com/NVIDIA/cutlass.git

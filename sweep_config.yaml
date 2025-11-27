@@ -1,0 +1,63 @@
+program: benchmark_batch_inference.py
+method: grid
+project: sam-quantization-batch-benchmark
+metric:
+  name: summary/best_throughput
+  goal: maximize
+
+parameters:
+  # Sweep parameters
+  percent:
+    values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+
+  percent_global:
+    values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+
+  # Fixed parameters
+  batch_sizes:
+    value: [1, 2, 4, 8]
+
+  num_samples:
+    value: 100
+
+  num_calib_samples:
+    value: 16
+
+  processor:
+    value: POSITIONAL_PRUNE
+
+  quantize_encoder:
+    value: true
+
+  n_bits:
+    value: 4
+
+  en_weight_quant:
+    value: per_channel
+
+  en_act_quant:
+    value: per_token
+
+  model_ckt:
+    value: ./ckts/sam_hq_vit_l.pth
+
+  model_type:
+    value: vit_l
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --percent
+  - ${percent}
+  - --percent-global
+  - ${percent_global}
+  - --batch-sizes
+  - ${batch_sizes}
+  - --num-samples
+  - ${num_samples}
+  - --num-calib-samples
+  - ${num_calib_samples}
+  - --processor
+  - ${processor}
+  - ${args_no_hyphens}

@@ -77,6 +77,7 @@ def quantize_weight_per_channel_absmax(w: torch.Tensor, n_bits: int = 8) -> torc
     scales.clamp_(min=1e-5).div_(q_max)
     w.div_(scales).round_().mul_(scales)
     return w
+
 @torch.no_grad()
 def quantize_activation_per_token_absmax(t: torch.Tensor, n_bits: int = 8) -> torch.Tensor:
     """Quantize activations per token using absolute maximum scaling."""
@@ -87,6 +88,7 @@ def quantize_activation_per_token_absmax(t: torch.Tensor, n_bits: int = 8) -> to
     scales.clamp_(min=1e-5).div_(q_max)
     t.div_(scales).round_().mul_(scales)
     return t.view(t_shape)
+
 class nnLinear_qkv_hat(nn.Linear):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -237,11 +239,11 @@ def image_encoder_monkey_patch(
     # Replace classes with observer versions using monkey patching
     # ImageEncoderViTObserver.debug = debug 
     
-    Quantize_attention = Select_quantizedAttention_encoder(args_yaml)
+    # Quantize_attention = Select_quantizedAttention_encoder(args_yaml)
    
     for name, module in model.named_modules():
         if isinstance(module, (EncoderAttention)):
-            module.__class__ = Quantize_attention
+            module.__class__ = QuantizedAttention
             module.set_processor(processor, name)
       
         # if isinstance(module, Block) or isinstance(module, block_) or isinstance(module, Block__):
@@ -252,7 +254,7 @@ def image_encoder_monkey_patch(
         #     layer_idx += 1
     
     
-    if not args_yaml.quantization.quanro and n_bits < 16: # already quantized in the rotation process
+    if n_bits < 16: # already quantized in the rotation process
         
         modules_to_exclude = ['decoder'] # Quantize Encoder only
         config = QuantizationConfig(

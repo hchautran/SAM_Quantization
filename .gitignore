@@ -65,4 +65,6 @@ CMakeCache.txt
 Makefile
 *.so
 */CmakeFiles
+*.csv
+wandb/*
 

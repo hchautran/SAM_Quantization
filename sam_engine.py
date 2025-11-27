@@ -74,6 +74,13 @@ def get_default_datasets():
             "gt_ext": ".png"
         },
         {
+            "name": "DIS5K-TR",
+            "im_dir": "./data/DIS5K/DIS-TR/im",
+            "gt_dir": "./data/DIS5K/DIS-TR/gt",
+            "im_ext": ".jpg",
+            "gt_ext": ".png"
+        },
+        {
             "name": "ThinObject5k-TR",
             "im_dir": "./data/thin_object_detection/ThinObject5K/images_train",
             "gt_dir": "./data/thin_object_detection/ThinObject5K/masks_train",
@@ -672,7 +679,7 @@ class Engine:
         if datasets is None:
             datasets = get_default_datasets()
 
-        valid_im_gt_list = get_im_gt_name_dict([datasets[0]], flag="valid")
+        valid_im_gt_list = get_im_gt_name_dict([datasets[1]], flag="valid")
         self.dataloaders, self.datasets = create_calib_dataloaders(
             valid_im_gt_list,
             my_transforms=[Resize([1024, 1024])],
@@ -745,10 +752,10 @@ class Engine:
                 num_samples=num_calib_samples
             )
             
-            if args_yaml.quantization.quansmooth :
-                encoder_processor.smooth_model(predictor,args_yaml.quantization.act_scales_file, args_yaml.quantization.centerQ)
-            elif args_yaml.quantization.quanro:
-                encoder_processor.quarot_model(predictor,args_yaml.quarot_inf, args_yaml.rtn_ro_config, centerQ=True)
+            # if args_yaml.quantization.quansmooth:
+                # encoder_processor.smooth_model(predictor,args_yaml.quantization.act_scales_file, args_yaml.quantization.centerQ)
+            # elif args_yaml.quantization.quanro:
+                # encoder_processor.quarot_model(predictor,args_yaml.quarot_inf, args_yaml.rtn_ro_config, centerQ=True)
                 
             
             print(f"Encoder processor calibrated on {num_calib_samples} samples")

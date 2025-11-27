@@ -35,10 +35,11 @@ class BaseEntropyProcessor(AttentionProcessor):
     def set_params(self, args):
         """Set parameters from args. Override in subclasses for custom params."""
         self.threshold = 5.0
-        self.percent = args.quantization.percent_entropy
-        self.prunehighentropy = args.quantization.high_entropy
-        self.prune_global = args.quantization.prune_global
-        self.model_type = args.model.model_type
+        self.percent = args.percent
+        self.percent_global = args.percent_global
+        self.prunehighentropy = args.high_entropy
+        self.prune_global = args.prune_global
+        self.model_type = args.model_type
     def calculate_entropy(self, attn_head):
         """
         Calculate entropy for attention head.
@@ -200,7 +201,6 @@ class BaseEntropyProcessor(AttentionProcessor):
         attention_hooks, _ = self._register_hooks(predictor, modules)
 
         logger = setup_logger('./calib_logs', self.strategy_name)
-        print(f'______Using: {self.strategy_name}_______')
         print('Collecting entropy values for all attention heads during calibration')
 
         self._run_calibration_loop(predictor, num_samples)
@@ -273,7 +273,7 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
 
     def set_params(self, args):
         super().set_params(args)
-        self.global_percent = args.quantization.percent_entropy_global
+        self.global_percent = args.percent_global
 
     def calculate_entropy(self, attn_head):
         """Calculate mean entropy of the entire attention matrix."""
@@ -389,7 +389,7 @@ class HeadPruneProcessor(BaseEntropyProcessor):
 
     def set_params(self, args):
         super().set_params(args)
-        self.percent_global = args.quantization.percent_global
+        self.percent_global = args.percent_global
 
     def calculate_entropy(self, attn_head):
         """Calculate entropy for each position in a single attention head."""
@@ -484,6 +484,7 @@ class HeadPruneProcessor(BaseEntropyProcessor):
         q, k, v, B, H, W = self._compute_qkv(x, module)
 
         if prune_mask is not None:
+            prune_mask = prune_mask.repeat(q.shape[0] // prune_mask.shape[0])
             q = q[~prune_mask, :, :]
             k = k[~prune_mask, :, :]
             v_pruned = v[prune_mask, :, :]
@@ -527,7 +528,7 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
 
     def set_params(self, args):
         super().set_params(args)
-        self.global_percent = args.quantization.percent_entropy_global
+        self.global_percent = args.percent_global
 
     def calculate_entropy(self, attn_head):
         """Calculate global entropy of the entire attention matrix."""
@@ -638,6 +639,7 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
         q, k, v, B, H, W = self._compute_qkv(x, module)
 
         if prune_mask is not None:
+            prune_mask = prune_mask.repeat(q.shape[0] // prune_mask.shape[0])
             q_attn = q[~prune_mask, :, :]
             k_attn = k[~prune_mask, :, :]
             v_attn = v[~prune_mask, :, :]

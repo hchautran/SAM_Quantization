@@ -15,7 +15,10 @@ python eval_sam2_hq44k.py \
     --percent-entropy-global 0.0 \
     --high-entropy \
     --processor POSITIONAL_PRUNE_SAM2 \
-    --batch-size 1
+    --batch-size 1 \
+    --model-type vit_l\
+    --model-ckt ./ckts/sam_hq_vit_l.pth \
+    --n-bits 16 \
     # --use-batch \
 
 # python visualize_encoder_latency_sam2.py \
