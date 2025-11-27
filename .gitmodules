@@ -19,3 +19,6 @@
 [submodule "sam-mmrotate"]
 	path = sam-mmrotate
 	url = https://github.com/VisionXLab/sam-mmrotate.git
+[submodule "sam2"]
+	path = sam2
+	url = https://github.com/NguyenHuuChi/sam2.git
