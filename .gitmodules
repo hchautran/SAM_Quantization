@@ -7,9 +7,18 @@
 [submodule "quant/qgemm/third-party/fast-hadamard-transform"]
 	path = quant/qgemm/third-party/fast-hadamard-transform
 	url = https://github.com/Dao-AILab/fast-hadamard-transform.git
+[submodule "SpargeAttn"]
+	path = SpargeAttn
+	url = https://github.com/thu-ml/SpargeAttn.git
+[submodule "SageAttention"]
+	path = SageAttention
+	url = https://github.com/thu-ml/SageAttention.git
 [submodule "Semantic-Segmentation-Anything"]
 	path = Semantic-Segmentation-Anything
 	url = https://github.com/fudan-zvg/Semantic-Segment-Anything.git
 [submodule "sam-mmrotate"]
 	path = sam-mmrotate
 	url = https://github.com/VisionXLab/sam-mmrotate.git
+[submodule "freesam/third-party/cutlass"]
+	path = freesam/third-party/cutlass
+	url = https://github.com/NVIDIA/cutlass.git

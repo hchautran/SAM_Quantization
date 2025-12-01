@@ -46,6 +46,12 @@ from .encoder_observer import (
     image_encoder_monkey_patch,
 )
 
+# SAM2 observers
+from .sam2_observer import (
+    MultiScaleAttentionObserver,
+    sam2_image_encoder_monkey_patch,
+)
+
 # Registry for encoder processors
 ENCODER_PROCESSOR_REGISTRY = {}
 
@@ -109,7 +115,7 @@ __all__ = [
     "TwoWayAttentionBlockObserverElementLow",
     "AttentionObserverElementLow",
     "mask_decoder_monkey_patch",
-    # Encoder observers
+    # Encoder observers (SAM1)
     "AttentionObserver",
     "BlockObserver",
     "ImageEncoderViTObserver",
@@ -117,6 +123,9 @@ __all__ = [
     "BlockObserver_compensate",
     "ImageEncoderViTObserver_compensate",
     "image_encoder_monkey_patch",
+    # SAM2 observers
+    "MultiScaleAttentionObserver",
+    "sam2_image_encoder_monkey_patch",
     # Registry functions
     "ENCODER_PROCESSOR_REGISTRY",
     "register_encoder_processor",

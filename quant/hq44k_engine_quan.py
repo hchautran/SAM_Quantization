@@ -198,7 +198,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
         if self.centerQ:
             calibrate_= True
             from encoder_quant import image_encoder_monkey_patch
-            if not os.path.exists('./pretrained_checkpoint/stat_dict.pth'):
+            if not os.path.exists('./ckts/stat_dict.pth'):
                 num_calib_samples=8
                 from quant_utils import ImageEncoderProcessor
                 
@@ -232,7 +232,7 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                 weight_quant="per_channel",
                 act_quant="per_token",
                 device = self.device,
-                path_stat_dict= "./pretrained_checkpoint/stat_dict.pth",
+                path_stat_dict= "./ckts/stat_dict.pth",
                 percent = self.percent if self.qkT_v else None,
                 qkT_v = self.qkT_v,
                 quarot= self.quant_ro,
@@ -441,9 +441,9 @@ class Hq44kInferenceStrategy(InferenceStrategy):
                 replace_linear_with_int4(self.hq_mask_decoder,  exclude_modules=modules_to_exclude)
                 
             if self.save_rtn_cuda:
-                save_cuda_quantized_model(self.predictor, save_dir="./pretrained_checkpoint", model_name="sam_int4_full")
+                save_cuda_quantized_model(self.predictor, save_dir="./ckts", model_name="sam_int4_full")
                 if self.quantize_decoder:
-                    save_cuda_quantized_model(self.hq_mask_decoder, save_dir="./pretrained_checkpoint", model_name="hq_decoder_int4_full")
+                    save_cuda_quantized_model(self.hq_mask_decoder, save_dir="./ckts", model_name="hq_decoder_int4_full")
 # %%
         if self.low_high_density != "none":
             modules_to_exclude=["mask_decoder"]

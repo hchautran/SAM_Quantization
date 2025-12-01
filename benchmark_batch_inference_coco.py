@@ -10,10 +10,6 @@ from typing import List, Dict
 import numpy as np
 import pandas as pd
 import torch
-from omegaconf import OmegaConf
-from tqdm import tqdm
-from torch.utils.data import DataLoader
-from torchvision import transforms
 
 # SAM imports
 from segment_anything import SamPredictor, sam_model_registry
@@ -385,8 +381,8 @@ def main():
     args = parser.parse_args()
 
     # Load config
-    config = OmegaConf.load(args.config_file)
-    config = override_args(args, config)
+    # config = OmegaConf.load(args.config_file)
+    # config = override_args(args, config)
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -394,8 +390,8 @@ def main():
     # Initialize model
     print("Loading SAM model...")
     
-    model_type= config.model.model_type
-    checkpoint_path = config.model.hq_checkpoint
+    model_type= args.model_type
+    checkpoint_path = args.hq_checkpoint
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
     predictor = SamPredictor(sam)
 

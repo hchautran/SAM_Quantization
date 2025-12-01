@@ -4,7 +4,7 @@
 model:
   model_type: "vit_l"
   use_hq: false
-  checkpoint: "./pretrained_checkpoint/sam_vit_l_0b3193.pth"
+  checkpoint: "./ckts/sam_vit_l_0b3193.pth"
   device: "cuda"
 
 quantization:
@@ -30,7 +30,7 @@ quantization:
 data:
   data_path: "./data/coco"
   config_file: "./config/coco/base_h.yaml"
-  checkpoint_path: "./pretrained_checkpoint/groundingdino_swint_ogc.py"
+  checkpoint_path: "./ckts/groundingdino_swint_ogc.py"
   num_select: 300
   num_workers: 4
   save_json: true

@@ -1,6 +1,6 @@
 # torchrun \
 #     --nproc_per_node=2 sam-hq/train/train.py \
-#     --checkpoint ./pretrained_checkpoint/sam_vit_b.pth \
+#     --checkpoint ./ckts/sam_vit_b.pth \
 #     --model-type vit_b \
 #     --output outputs \
 #     --eval \

@@ -188,7 +188,7 @@ The scripts use YAML configuration files. Example:
 # quant/config/hq44k/low_high.yaml
 model:
   model_type: vit_l
-  checkpoint: ./pretrained_checkpoint/sam_vit_l_0b3195.pth
+  checkpoint: ./ckts/sam_vit_l_0b3195.pth
 
 quantization:
   low_high_density: low  # Overridden by script

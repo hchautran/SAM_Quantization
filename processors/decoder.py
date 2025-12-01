@@ -22,12 +22,11 @@ from functools import partial
 from accelerate import Accelerator
 import train.utils.misc as misc
 from tqdm.auto import tqdm
-from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
 # from utils import show_mask_image
 from collections import defaultdict
 # from quarot import rotate_sam, rotation_utils
 from RTN_quantization.per_tensor_channel_group import quantize_activation_per_token_absmax, quantize_weight_per_channel_absmax, quantize_activation_low_high_density_activation_index
-from utils import quantize_activation_per_highblock_abmax, find_O_qha
+from utils.utils import quantize_activation_per_highblock_abmax, find_O_qha
 from .base import AttentionProcessor
 
 class DecoderSignProcessor(AttentionProcessor):

@@ -6,7 +6,7 @@ sam2/
 segment-anything/
 data/
 hq_ckts/
-pretrained_checkpoint/
+ckts/
 quarot/fast-hadamard-transform/
 sam2_ckts/
 demo/
@@ -23,7 +23,7 @@ quant/qgemm/third-party/
 attention_utilsdebug.py
 attention_utilsdebug.ipynb
 decoder_quant.py
-pretrained_checkpoint.zip
+ckts.zip
 result/
 encoder_quant_1.py
 quant_utils_1.py
@@ -55,7 +55,7 @@ Thumbs.db
 *.pt
 __pycache__/
 hq_ckts/
-pretrained_checkpoint/
+ckts/
 *.egg-info
 */sam-hq/
 *.pth
@@ -67,4 +67,6 @@ CMakeCache.txt
 Makefile
 *.so
 */CmakeFiles
+*.csv
+wandb/*
 

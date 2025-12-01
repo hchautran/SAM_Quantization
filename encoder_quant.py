@@ -29,7 +29,7 @@ from processors.encoder import (
     # ImageEncoderProcessor,
     EncoderRecenterAttentionProcessor,
 )
-from quant_utils import quantize_activation_per_token_absmax
+from utils.quant_utils import quantize_activation_per_token_absmax
 from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
 from RTN_quantization import per_tensor_channel_group
 import sys
@@ -42,7 +42,7 @@ from segment_anything.modeling.image_encoder import (
     window_partition,
     window_unpartition,
 )
-from utils import inference_image
+from utils.utils import inference_image
 
 def to_numpy(x: torch.Tensor):
     return x.detach().cpu().numpy()
@@ -77,6 +77,7 @@ def quantize_weight_per_channel_absmax(w: torch.Tensor, n_bits: int = 8) -> torc
     scales.clamp_(min=1e-5).div_(q_max)
     w.div_(scales).round_().mul_(scales)
     return w
+
 @torch.no_grad()
 def quantize_activation_per_token_absmax(t: torch.Tensor, n_bits: int = 8) -> torch.Tensor:
     """Quantize activations per token using absolute maximum scaling."""
@@ -87,6 +88,7 @@ def quantize_activation_per_token_absmax(t: torch.Tensor, n_bits: int = 8) -> to
     scales.clamp_(min=1e-5).div_(q_max)
     t.div_(scales).round_().mul_(scales)
     return t.view(t_shape)
+
 class nnLinear_qkv_hat(nn.Linear):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -237,11 +239,11 @@ def image_encoder_monkey_patch(
     # Replace classes with observer versions using monkey patching
     # ImageEncoderViTObserver.debug = debug 
     
-    Quantize_attention = Select_quantizedAttention_encoder(args_yaml)
+    # Quantize_attention = Select_quantizedAttention_encoder(args_yaml)
    
     for name, module in model.named_modules():
         if isinstance(module, (EncoderAttention)):
-            module.__class__ = Quantize_attention
+            module.__class__ = QuantizedAttention
             module.set_processor(processor, name)
       
         # if isinstance(module, Block) or isinstance(module, block_) or isinstance(module, Block__):
@@ -252,7 +254,7 @@ def image_encoder_monkey_patch(
         #     layer_idx += 1
     
     
-    if not args_yaml.quantization.quanro and n_bits < 16: # already quantized in the rotation process
+    if n_bits < 16: # already quantized in the rotation process
         
         modules_to_exclude = ['decoder'] # Quantize Encoder only
         config = QuantizationConfig(
@@ -287,7 +289,7 @@ if __name__ == "__main__":
     # Configuration
     model_type = "vit_l"
     num_calib_samples = 1
-    checkpoint_path = "./pretrained_checkpoint/sam_hq_vit_l.pth"
+    checkpoint_path = "./ckts/sam_hq_vit_l.pth"
 
     # Initialize model and predictor
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to("cuda")

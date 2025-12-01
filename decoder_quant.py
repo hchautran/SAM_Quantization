@@ -35,7 +35,7 @@ from quant.quant_utils import (
     # ProcessStrategy,
 )
 from RTN_quantization.utils import replace_linear_with_quantized,QuantizationConfig
-from utils import inference_image
+from utils.utils import inference_image
 from processors.decoder_observer import TwoWayTransformerObserverElementLow,TwoWayAttentionBlockObserverElementLow, AttentionObserverElementLow
 
 
