@@ -4,15 +4,15 @@ model:
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
   model_type: 'vit_b'
   hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
-  model_type: vit_l 
-  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  # model_type: vit_l 
+  # hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
   # model_type: 'vit_h'
   # hq_checkpoint: './ckts/sam_hq_vit_h.pth'
   
   device: cpu
 train_prune_rate:
-  learning_rate: 1e-3
-  lr_drop_epoch: 10
+  learning_rate: 1e-2
+  lr_drop_epoch: 5
   start_epoch: 0
   output: './pretrained_checkpoint/prune_rate/'
   max_epoch_num: 51

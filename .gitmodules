@@ -22,3 +22,6 @@
 [submodule "freesam/third-party/cutlass"]
 	path = freesam/third-party/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
+[submodule "sam2_repo"]
+	path = sam2_repo
+	url = https://github.com/NguyenHuuChi/sam2.git

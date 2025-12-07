@@ -8,7 +8,7 @@ CONFIG_PATH=./sam2/sam2/configs/sam2.1
 
 
 python eval_sam2_hq44k.py \
-    --model-cfg //home/chauht2/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
+    --model-cfg //home/22chi.nh/project/SAMquantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
     --checkpoint ./sam2_ckts/sam2.1_hiera_base_plus.pt  \
     --num-samples 100 \
     --percent-entropy  0.0  \
@@ -16,11 +16,21 @@ python eval_sam2_hq44k.py \
     --high-entropy \
     --processor POSITIONAL_PRUNE_SAM2 \
     --batch-size 1 \
-    --model-type vit_l\
-    --model-ckt ./ckts/sam_hq_vit_l.pth \
-    --n-bits 16 \
-    # --use-batch \
+    --num-calib-samples 16 \
+    --prune-global \
 
+
+
+# python eval_sam2_prune_rate_hq44k.py \
+#     --model-cfg //home/22chi.nh/project/SAMquantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
+#     --checkpoint ./sam2_ckts/sam2.1_hiera_base_plus.pt  \
+#     --num-samples 100 \
+#     --percent-entropy  0.5132  \
+#     --percent-entropy-global 0.5833 \
+#     --high-entropy \
+#     --processor TRAINING_PRUNE_RATE_SAM2 \
+#     --batch-size 1 \
+#     --num-calib-samples 16 \
 # python visualize_encoder_latency_sam2.py \
   # --model_config //home/chauht2/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml  \
   # --checkpoint ./sam2_ckts/sam2.1_hiera_base_plus.pt

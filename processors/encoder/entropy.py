@@ -35,11 +35,11 @@ class BaseEntropyProcessor(AttentionProcessor):
     def set_params(self, args):
         """Set parameters from args. Override in subclasses for custom params."""
         self.threshold = 5.0
-        self.percent = args.percent
-        self.percent_global = args.percent_global
-        self.prunehighentropy = args.high_entropy
-        self.prune_global = args.prune_global
-        self.model_type = args.model_type
+        self.percent_global = args.quantization.percent_entropy_global
+        self.percent = args.quantization.percent_entropy
+        self.prunehighentropy = args.quantization.high_entropy
+        self.prune_global = args.quantization.prune_global
+        self.model_type = args.model.model_type
     def calculate_entropy(self, attn_head):
         """
         Calculate entropy for attention head.
