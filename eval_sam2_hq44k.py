@@ -48,7 +48,12 @@ from processors.encoder.entropy_sam2 import (
 )
 from processors.sam2_observer import sam2_image_encoder_monkey_patch
 
-
+def print_model_structure(model, title="Model Structure"):
+    print(f"\n{title}")
+    print("=" * len(title))
+    for name, module in model.named_modules():
+        print(f"{name}: {module.__class__.__name__}")
+    print("=" * len(title))
 def custom_collate_fn(batch):
     """
     Custom collate function to handle variable-sized ori_im fields.

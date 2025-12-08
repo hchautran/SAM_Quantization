@@ -8,7 +8,7 @@ CONFIG_PATH=./sam2/sam2/configs/sam2.1
 
 
 python eval_sam2_hq44k.py \
-    --model-cfg //home/chauht2/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
+    --model-cfg //home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
     --checkpoint ./sam2_ckts/sam2.1_hiera_base_plus.pt  \
     --num-samples 100 \
     --percent-entropy  0.0  \

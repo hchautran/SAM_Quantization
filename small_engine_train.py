@@ -24,9 +24,9 @@ from train.train import compute_iou, compute_boundary_iou, MaskDecoderHQ
 from segment_anything import SamPredictor,sam_model_registry
 import train.utils.misc as misc
 
-from utils import show_mask_image
+from utils.utils import show_mask_image
 from prunning_rate.samprune import image_encoder_monkey_patch_train
-from quant_utils import (
+from utils.quant_utils import (
     quantize_activation_per_token_absmax,
 )
 from processors import (
@@ -35,7 +35,7 @@ from processors import (
     EncoderAttentionProcessor,
     DecoderDoNothingProcessor,
 )
-from profiler import InferenceProfiler, compare_inference_speed
+import time
 from segment_anything.modeling.image_encoder import Attention as EncoderSamAttention
 from segment_anything.modeling.transformer import  Attention as  DecoderAttention
 from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention 
@@ -153,10 +153,17 @@ def train(args, sam_hq, target_flop ,optimizer, train_dataloaders, valid_dataloa
     _ = sam_hq.to(device="cuda")
     sam_hq = torch.nn.parallel.DistributedDataParallel(sam_hq, device_ids=[args.gpu], find_unused_parameters=args.find_unused_params)
     
+    lr_start = str(args.learning_rate)
+    # Import time module for timing measurements
+    
+    total_training_time = 0
     for epoch in range(epoch_start, epoch_num): 
         print("epoch:   ", epoch, "  learning rate:  ", optimizer.param_groups[0]["lr"])
         metric_logger = misc.MetricLogger(delimiter="  ")
         train_dataloaders.batch_sampler.sampler.set_epoch(epoch)
+        
+        # Start timing for this epoch
+        epoch_start_time = time.time()
 
         for data in metric_logger.log_every(train_dataloaders, 1000):
             inputs, labels = data['image'], data['label']
@@ -248,13 +255,20 @@ def train(args, sam_hq, target_flop ,optimizer, train_dataloaders, valid_dataloa
         test_stats = evaluate(args, sam_hq, valid_dataloaders)
         train_stats.update(test_stats)
         
+        # Calculate epoch training time
+        epoch_training_time = time.time() - epoch_start_time
+        total_training_time += epoch_training_time
         wandb_log_dict = {"epoch": epoch}
         wandb_log_dict.update({f"epoch/{k}": v for k, v in train_stats.items()})
+        
+        # Add training time to wandb log
+        wandb_log_dict["epoch/total_training_time"]= total_training_time
+        wandb_log_dict["epoch/training_time"] = epoch_training_time
         wandb.log(wandb_log_dict)
         sam_hq.train()  
 
-        if epoch % args.model_save_fre == 0:
-            model_name = "/sam_hq_epoch_"+str(epoch)+args_yaml.model.model_type+"target_flopsize_"+str(target_flop)+"_ratio_"+str(ratio)+"init.pth"
+        if epoch>0 and epoch % args.model_save_fre == 0:
+            model_name = "/sam_hq_epoch_"+str(epoch)+"_"+args_yaml.model.model_type+"_target_flopsize_"+str(target_flop)+"_ratio_"+str(ratio)+"startlr"+lr_start +"_lr_drop_"+ str(args.lr_drop_epoch) +".pth"
             print('come here save at', args.output + model_name)
             misc.save_on_master(sam_hq.module.state_dict(), args.output + model_name)
     
@@ -486,8 +500,7 @@ class training_engine:
             
         
         if self.train:
-            wandb.init(project="sam-hq-training", name=f"experiment_{strategy_name}")
-            valid_im_gt_list = get_im_gt_name_dict([datasets[0]], flag="valid")
+            valid_im_gt_list = get_im_gt_name_dict([datasets[2]], flag="valid")
             for dataset_dict in valid_im_gt_list:
                 dataset_dict["im_path"] = dataset_dict["im_path"][-10:]
                 dataset_dict["gt_path"] = dataset_dict["gt_path"][-10:]
@@ -498,10 +511,10 @@ class training_engine:
                 training= False
             )
             
-            train_im_gt_list = get_im_gt_name_dict([datasets[0]], flag="train")
+            train_im_gt_list = get_im_gt_name_dict([datasets[2]], flag="train")
             for dataset_dict in train_im_gt_list:
-                dataset_dict["im_path"] = dataset_dict["im_path"][:-10]
-                dataset_dict["gt_path"] = dataset_dict["gt_path"][:-10]
+                dataset_dict["im_path"] = dataset_dict["im_path"][:500]
+                dataset_dict["gt_path"] = dataset_dict["gt_path"][:500]
             self.train_dataloaders, self.train_datasets = create_dataloaders(
                 train_im_gt_list,
                 my_transforms=[RandomHFlip(),
@@ -510,7 +523,7 @@ class training_engine:
                 training= True
             )
         else:
-            valid_im_gt_list = get_im_gt_name_dict([datasets[2]], flag="valid")
+            valid_im_gt_list = get_im_gt_name_dict([datasets[0]], flag="valid")
             self.dataloaders, self.datasets = create_calib_dataloaders(
                 valid_im_gt_list,
                 my_transforms=[Resize([1024, 1024])],
@@ -552,7 +565,7 @@ class training_engine:
         return encoder_processor
     def eval_hq44k(self, predictor: SamPredictor, num_samples=None, plot_figures=False):
         """Delegate to evaluator component"""
-        checkpoint_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/pretrained_checkpoint/prune_rate/sam_hq_epoch_40vit_btarget_flopsize_2.3_ratio_5.pth"
+        checkpoint_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/pretrained_checkpoint/prune_rate/sam_hq_epoch_40_vit_b_target_flopsize_1.5_ratio_5startlr0.1_lr_drop_10.pth"
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
         predictor.model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
@@ -575,7 +588,7 @@ class training_engine:
         # Collect ONLY selected_probability parameters for the optimizer
         trainable_params = []
         for name, param in sam.named_parameters():
-            param.requires_grad = True
+            # param.requires_grad = True
             if 'selected_probability' in name:
                 trainable_params.append(param)
                 print(f"Training parameter: {name}")
@@ -601,6 +614,7 @@ class training_engine:
         elif args_yaml.model.model_type == "vit_h":
             target_flop = 32
             ratio= 0.025 
+        wandb.init(project=f"sam-hq-training", name=f"experiment_{self.strategy_name}-model-{args_yaml.model.model_type}-targetflop-{target_flop}-ratio-{ratio}-lr-{args_yaml.train_prune_rate.learning_rate}-lr_drop-{args_yaml.train_prune_rate.lr_drop_epoch}")
         train(args_yaml.train_prune_rate, sam, target_flop, optimizer, self.train_dataloaders, self.valid_dataloaders, lr_scheduler, ratio)
 if __name__ == '__main__':
     

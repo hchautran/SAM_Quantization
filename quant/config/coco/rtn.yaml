@@ -11,14 +11,14 @@ model:
   
   device: cpu
 train_prune_rate:
-  learning_rate: 1e-3
-  lr_drop_epoch: 10
+  learning_rate: 1e-1
+  lr_drop_epoch: 2
   start_epoch: 0
   output: './pretrained_checkpoint/prune_rate/'
-  max_epoch_num: 51
+  max_epoch_num: 11
   batch_size_train: 1
   batch_size_valid: 1
-  model_save_fre: 50
+  model_save_fre: 5
   seed: 42
   gpu: [0]
   find_unused_params: True

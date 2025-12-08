@@ -19,10 +19,10 @@ from segment_anything.modeling.transformer import TwoWayTransformer
 from train.train import compute_iou, compute_boundary_iou, MaskDecoderHQ
 from segment_anything import SamPredictor, sam_model_registry
 import train.utils.misc as misc
-from utils import show_mask_image
+from utils.utils import show_mask_image
 from decoder_quant import mask_decoder_monkey_patch, TwoWayTransformerObserver
 from encoder_quant import image_encoder_monkey_patch
-from quant_utils import (
+from utils.quant_utils import (
     quantize_activation_per_token_absmax,
 )
 from processors import (
@@ -31,7 +31,7 @@ from processors import (
     EncoderAttentionProcessor,
     DecoderDoNothingProcessor,
 )
-from profiler import InferenceProfiler, compare_inference_speed
+
 from segment_anything.modeling.image_encoder import Attention as EncoderSamAttention
 from segment_anything.modeling.transformer import  Attention as  DecoderAttention
 from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining

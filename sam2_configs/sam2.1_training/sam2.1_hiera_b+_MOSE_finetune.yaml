@@ -13,9 +13,9 @@ scratch:
 
 dataset:
   # PATHS to Dataset
-  img_folder: null # PATH to MOSE JPEGImages folder
-  gt_folder: null  # PATH to MOSE Annotations folder
-  file_list_txt: training/assets/MOSE_sample_train_list.txt # Optional PATH to filelist containing a subset of videos to be used for training
+  img_folder: /home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/data/DIS5K/DIS-VD/im # PATH to MOSE JPEGImages folder
+  gt_folder: /home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/data/DIS5K/DIS-VD/gt  # PATH to MOSE Annotations folder
+  file_list_txt: null # Optional PATH to filelist containing a subset of videos to be used for training
   multiplier: 2
 
 # Video transforms
@@ -307,7 +307,7 @@ trainer:
 
   # initialize from a SAM 2 checkpoint
   checkpoint:
-    save_dir: ${launcher.experiment_log_dir}/checkpoints
+    save_dir: ${launcher.experiment_log_dir}/sam2_ckts
     save_freq: 0 # 0 only last checkpoint is saved.
     model_weight_initializer:
       _partial_: True
@@ -318,7 +318,7 @@ trainer:
 
       state_dict:
         _target_: training.utils.checkpoint_utils.load_checkpoint_and_apply_kernels
-        checkpoint_path: ./checkpoints/sam2.1_hiera_base_plus.pt # PATH to SAM 2.1 checkpoint
+        checkpoint_path: ./sam2_ckts/sam2.1_hiera_base_plus.pt # PATH to SAM 2.1 checkpoint
         ckpt_state_dict_keys: ['model']
 
 launcher:

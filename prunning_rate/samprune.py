@@ -581,5 +581,8 @@ def image_encoder_monkey_patch_train( model, processor=None,  device="cuda",  ar
             if 'selected_probability' in name:
                 param.requires_grad = True
                 print(f"Enabled training for: {name}")
+            else :
+                param.requires_grad = False
+            
     
     

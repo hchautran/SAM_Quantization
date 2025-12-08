@@ -37,7 +37,7 @@ class DiffPruneRate(nn.Module):
         self.kept_head_candidate =  nn.Parameter(torch.arange(head_number, 0,-1*granularity).float())
         self.kept_head_candidate.requires_grad_(False)
         self.selected_probability =  nn.Parameter(torch.zeros_like(self.kept_head_candidate))   
-        self.selected_probability.data[0] = 10.0  # initialize to keep all heads
+        # self.selected_probability.data[0] = 10.0  # initialize to keep all heads
         self.selected_probability.requires_grad_(True)
         
         # the learn target, which can be directly applied to the off-the-shlef pre-trained models

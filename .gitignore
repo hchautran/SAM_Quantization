@@ -2,13 +2,11 @@
 # Exclude checkpoint and model folders
 checkpoint_sam/
 sam-hq/
-sam2/
 segment-anything/
 data/
 hq_ckts/
 ckts/
 quarot/fast-hadamard-transform/
-sam2_ckts/
 demo/
 GroundingDINO/
 quant/load_coco_ptq4sam/
@@ -31,6 +29,8 @@ benchmark_results/ade20k/
 benchmark_results/
 data/
 pretrained_checkpoint.zip
+sam2_logs/
+SageAttention_SM80/
 # Exclude Python cache files
 __pycache__/
 *.pyc
