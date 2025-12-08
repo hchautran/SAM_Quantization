@@ -31,6 +31,7 @@ data/
 pretrained_checkpoint.zip
 sam2_logs/
 SageAttention_SM80/
+sam2_repo/
 # Exclude Python cache files
 __pycache__/
 *.pyc
