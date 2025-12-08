@@ -20,5 +20,5 @@
 	path = sam-mmrotate
 	url = https://github.com/VisionXLab/sam-mmrotate.git
 [submodule "sam2"]
-	path = sam2
+	path = sam2_repo
 	url = https://github.com/NguyenHuuChi/sam2.git
