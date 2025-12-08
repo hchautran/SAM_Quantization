@@ -38,16 +38,17 @@ from train.utils.dataloader import get_im_gt_name_dict, Resize
 from data_utils import OnlineDataset
 import train.utils.misc as misc
 from train.train import compute_iou, compute_boundary_iou
-
+from prunning_rate.sam2prune import monkey_patch_train_sam2
 
 # SAM2 entropy processors
 from processors.encoder.entropy_sam2 import (
     PositionalPruneSAM2Processor,
     HeadPruneSAM2Processor,
     PositionalQuantSAM2Processor,
+    PositionalTrainingPruneRateSAM2Processor,
 )
 from processors.sam2_observer import sam2_image_encoder_monkey_patch
-
+from prunning_rate.sam2prune import DiffPruneRateMultiScaleAttention
 
 def custom_collate_fn(batch):
     """
@@ -81,6 +82,7 @@ SAM2_PROCESSOR_REGISTRY = {
     "POSITIONAL_PRUNE_SAM2": PositionalPruneSAM2Processor,
     "HEAD_PRUNE_SAM2": HeadPruneSAM2Processor,
     "POSITIONAL_QUANT_SAM2": PositionalQuantSAM2Processor,
+    "TRAINING_PRUNE_RATE_SAM2": PositionalTrainingPruneRateSAM2Processor,
 }
 
 
@@ -91,7 +93,233 @@ def get_sam2_processor(name: str, **kwargs):
         raise ValueError(f"Unknown SAM2 processor '{name}'. Available: {available}")
     return SAM2_PROCESSOR_REGISTRY[name](**kwargs)
 
+def analyze_model_head_pruning_and_flops(predictor_model, manual_local_heads=None, manual_global_heads=None):
+    """
+    Analyze head pruning ratios and calculate FLOPs for attention operations.
+    
+    Args:
+        predictor_model: The SAM model with DiffPruneRateMultiScaleAttention modules
+        manual_local_heads: Number of local heads to keep manually (optional)
+        manual_global_heads: Number of global heads to keep manually (optional)
+        
+    Returns:
+        dict: Dictionary containing head statistics and FLOPs information
+    """
+    # Initialize counters
+    total_kept_heads_local = 0
+    total_original_heads_local = 0
+    total_kept_heads_global = 0
+    total_original_heads_global = 0
+    
+    # For FLOPs calculation
+    total_flops = 0
+    total_baseline_flops = 0  # FLOPs without pruning
+    
+    nu_layer_global = 0
+    nu_layer_local = 0
+    
+    # Collect per-layer information
+    layer_info = []
+    
+    # Iterate through all modules to find DiffPruneRateMultiScaleAttention modules
+    for name, module in predictor_model.named_modules():
+        if isinstance(module, DiffPruneRateMultiScaleAttention):
+            # Get head information
+            kept_heads = int(module.prune_ddp.update_kept_head_number())
+            original_heads = module.prune_ddp.head_number
+            
+            # Determine if this is a local or global attention
+            if original_heads ==8:
+                is_local = False
+            else:
+                is_local = True
+            
+            # For FLOPs calculation, we assume fixed dimensions
+           
+            if original_heads == 8:
+                batch_factor =1 
+            elif original_heads %100 ==0:
+                batch_factor =25
+            else:
+                batch_factor =1024
+            
 
+            if is_local: 
+                nu_layer_local += 1
+            else: 
+                nu_layer_global += 1
+            # Using typical attention map dimensions for SAM
+            H, W = (14, 14) if is_local else (64, 64)
+            
+            # Calculate FLOPs for this attention module
+            qkv_flops = module._calculate_qkv_flops(batch_factor, H, W)
+            proj_flops = module._calculate_projection_flops(batch_factor, H, W)
+            attention_flops = module._calculate_attention_flops(H, W, kept_heads)
+            baseline_attention_flops = module._calculate_attention_flops(H, W, original_heads)
+            
+            module_flops = qkv_flops + proj_flops + attention_flops
+            module_baseline_flops = qkv_flops + proj_flops + baseline_attention_flops
+            
+            # Update totals
+            total_flops += module_flops
+            total_baseline_flops += module_baseline_flops
+            
+            # Store layer information
+            layer_info.append({
+                'name': name,
+                'kept_heads': kept_heads,
+                'original_heads': original_heads,
+                'is_local': is_local,
+                'flops': module_flops,
+                'baseline_flops': module_baseline_flops
+            })
+            
+            # Update head counters
+            if is_local:
+                total_kept_heads_local += kept_heads
+                total_original_heads_local += original_heads
+            else:
+                total_kept_heads_global += kept_heads
+                total_original_heads_global += original_heads
+    
+    # Calculate overall ratios
+    overall_local_ratio = total_kept_heads_local / total_original_heads_local if total_original_heads_local > 0 else 0
+    overall_global_ratio = total_kept_heads_global / total_original_heads_global if total_original_heads_global > 0 else 0
+    flops_reduction = (1 - total_flops / total_baseline_flops) * 100 if total_baseline_flops > 0 else 0
+    
+    # Calculate manual heads if not provided
+    avg_local_heads = total_kept_heads_local / nu_layer_local if nu_layer_local > 0 else 0
+    avg_global_heads = total_kept_heads_global / nu_layer_global if nu_layer_global > 0 else 0
+    
+    # Round up to nearest integer (ceiling)
+    if manual_local_heads is None:
+        manual_local_heads = int(avg_local_heads + 0.999)  # Equivalent to math.ceil()
+    if manual_global_heads is None:
+        manual_global_heads = int(avg_global_heads + 0.999)  # Equivalent to math.ceil()
+    
+    # Recalculate manual FLOPs
+    total_manual_flops = 0
+    layer_idx_local = 0
+    layer_idx_global = 0
+    
+    for name, module in predictor_model.named_modules():
+        if isinstance(module, DiffPruneRateMultiScaleAttention):
+            original_heads = module.prune_ddp.head_number
+            if original_heads ==8:
+                is_local = False
+            else:
+                is_local = True
+            
+            if original_heads == 8:
+                batch_factor =1 
+            elif original_heads %100 ==0:
+                batch_factor =25
+            else:
+                batch_factor =1024
+            H, W = (14, 14) if is_local else (64, 64)
+            
+            # Calculate FLOPs with manual head counts
+            qkv_flops = module._calculate_qkv_flops(batch_factor, H, W)
+            proj_flops = module._calculate_projection_flops(batch_factor, H, W)
+            
+            # Use manual head counts
+            if is_local:
+                manual_attention_flops = module._calculate_attention_flops(H, W, manual_local_heads)
+                layer_idx_local += 1
+            else:
+                manual_attention_flops = module._calculate_attention_flops(H, W, manual_global_heads)
+                layer_idx_global += 1
+            
+            manual_module_flops = qkv_flops + proj_flops + manual_attention_flops
+            total_manual_flops += manual_module_flops
+    
+    # Calculate manual FLOPs reduction
+    manual_flops_reduction = None
+    if total_baseline_flops > 0:
+        manual_flops_reduction = (1 - total_manual_flops / total_baseline_flops) * 100
+    
+    return {
+        'layer_info': layer_info,
+        'head_stats': {
+            'local_kept': total_kept_heads_local,
+            'local_total': total_original_heads_local,
+            'local_ratio': overall_local_ratio,
+            'global_kept': total_kept_heads_global,
+            'global_total': total_original_heads_global,
+            'global_ratio': overall_global_ratio
+        },
+        'flops_stats': {
+            'total_flops': total_flops,
+            'baseline_flops': total_baseline_flops,
+            'reduction_percent': flops_reduction,
+            'manual_flops': total_manual_flops,
+            'manual_reduction_percent': manual_flops_reduction
+        },
+        'manual_settings': {
+            'manual_local_heads': manual_local_heads,
+            'manual_global_heads': manual_global_heads,
+            'avg_local_heads': avg_local_heads,
+            'avg_global_heads': avg_global_heads
+        }
+    }
+def print_head_pruning_and_flops_info(predictor_model):
+    """
+    Print detailed head pruning ratios and FLOPs information for the model.
+    
+    Args:
+        predictor_model: The SAM model with DiffPruneRateMultiScaleAttention modules
+    """
+    print("\n=== Head Pruning Ratios ===")
+    
+    # Analyze model
+    analysis = analyze_model_head_pruning_and_flops(predictor_model)
+    
+    # Print per-layer information
+    for layer in analysis['layer_info']:
+        layer_type = "Local" if layer['is_local'] else "Global"
+        print(f"Layer {layer['name']}: {layer['kept_heads']}/{layer['original_heads']} ({layer_type})")
+    
+    # Print overall head statistics
+    head_stats = analysis['head_stats']
+    if head_stats['local_total'] > 0:
+        print(f"\nOverall Local: {head_stats['local_kept']}/{head_stats['local_total']} heads kept "
+              f"({head_stats['local_ratio']:.2%}) pruning rate: {1-head_stats['local_ratio']:.2%}")
+    
+    if head_stats['global_total'] > 0:
+        print(f"\nOverall Global: {head_stats['global_kept']}/{head_stats['global_total']} heads kept "
+              f"({head_stats['global_ratio']:.2%}) pruning rate: {1-head_stats['global_ratio']:.2%}")
+    
+    # Print manual head information
+    manual_settings = analysis['manual_settings']
+    print(f"\nManual Settings:")
+    print(f"Average Local Heads: {manual_settings['avg_local_heads']:.2f}")
+    print(f"Average Global Heads: {manual_settings['avg_global_heads']:.2f}")
+    print(f"Manual Local Heads (rounded): {manual_settings['manual_local_heads']}")
+    print(f"Manual Global Heads (rounded): {manual_settings['manual_global_heads']}")
+    
+    # Print FLOPs information
+    flops_stats = analysis['flops_stats']
+    print("\n=== FLOPs Information (Attention Only) ===")
+    print(f"Total Attention FLOPs (with parameter pruning): {flops_stats['total_flops']/1e9:.2f} GFLOPs")
+    print(f"Total Attention FLOPs (baseline): {flops_stats['baseline_flops']/1e9:.2f} GFLOPs")
+    if flops_stats['reduction_percent'] >= 0:
+        print(f"Attention FLOPs Reduction (parameter pruning): {flops_stats['reduction_percent']:.2f}%")
+    
+    # Print manual pruning FLOPs information if provided
+    if flops_stats['manual_flops'] is not None:
+        print(f"\nTotal Attention FLOPs (with manual pruning): {flops_stats['manual_flops']/1e9:.2f} GFLOPs")
+        if flops_stats['manual_reduction_percent'] >= 0:
+            print(f"Attention FLOPs Reduction (manual pruning): {flops_stats['manual_reduction_percent']:.2f}%")
+        
+        # Compare the two pruning approaches
+        if flops_stats['total_flops'] and flops_stats['manual_flops']:
+            flops_diff = flops_stats['manual_flops'] - flops_stats['total_flops']
+            if flops_diff > 0:
+                print(f"Manual pruning uses {flops_diff/1e9:.2f} GFLOPs more than parameter pruning")
+            else:
+                print(f"Manual pruning uses {abs(flops_diff)/1e9:.2f} GFLOPs less than parameter pruning")
+    
+    print("===========================\n")
 class SAM2Evaluator:
     """Evaluate SAM2 on HQ44k dataset"""
 
@@ -306,7 +534,7 @@ def main():
 
     # Entropy processor parameters
     parser.add_argument('--processor', type=str, default=None,
-                       choices=[None, 'POSITIONAL_PRUNE_SAM2', 'HEAD_PRUNE_SAM2', 'POSITIONAL_QUANT_SAM2'],
+                       choices=[None, 'POSITIONAL_PRUNE_SAM2', 'HEAD_PRUNE_SAM2', 'POSITIONAL_QUANT_SAM2',"TRAINING_PRUNE_RATE_SAM2"],
                        help='SAM2 entropy processor to use (None = no processing)')
     parser.add_argument('--config-file', type=str, default=None,
                        help='Path to config YAML file for processor parameters')
@@ -406,11 +634,18 @@ def main():
 
         # Apply monkey patch to integrate processor into model
         print("Applying monkey patch to SAM2 image encoder...")
-        sam2_image_encoder_monkey_patch(
-            model=sam2_model,
-            processor=processor,
-            verbose=True
-        )
+        if args.processor == 'TRAINING_PRUNE_RATE_SAM2':
+            monkey_patch_train_sam2(
+                model=sam2_model,
+                processor=processor,
+                model_type ='hiera_b_plus',
+            )
+        else :
+            sam2_image_encoder_monkey_patch(
+                model=sam2_model,
+                processor=processor,
+                verbose=True
+            )
         print("✓ Monkey patch applied\n")
 
     # Setup dataset
@@ -439,7 +674,10 @@ def main():
     print(f"  Batch size: {args.batch_size}")
     print(f"  Use batch mode: {args.use_batch}")
     print(f"  Samples to evaluate: {args.num_samples if args.num_samples else 'all'}\n")
-
+    if args.processor == 'TRAINING_PRUNE_RATE_SAM2':
+        ckpt_prune_rate_path = "/home/22chi.nh/project/SAMquantization/SAM_Quantization/sam2_ckts/checkpoint.pt"
+        sam2_model.load_state_dict(torch.load(ckpt_prune_rate_path)['model'])
+        print_head_pruning_and_flops_info(predictor.model)
     # Run evaluation
     evaluator = SAM2Evaluator()
     results = evaluator.eval_hq44k(

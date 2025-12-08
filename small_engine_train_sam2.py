@@ -33,22 +33,47 @@ SAM2_PROCESSOR_REGISTRY = {
     "POSITIONAL_QUANT_SAM2": PositionalQuantSAM2Processor,
 }
 
+def cleanup_distributed():
+    """Properly cleanup distributed training resources"""
+    try:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+    except Exception as e:
+        logging.warning(f"Error during distributed cleanup: {e}")
+
+def register_resolvers_safe():
+    """Safely register OmegaConf resolvers, avoiding duplicates"""
+    try:
+        register_omegaconf_resolvers()
+    except ValueError as e:
+        if "is already registered" in str(e):
+            # Resolver already exists, skip registration
+            logging.debug(f"Resolver already registered: {e}")
+        else:
+            raise e
 
 def single_proc_run(local_rank, main_port, cfg, world_size):
-    """Single GPU process"""
+    """Single GPU process with proper cleanup"""
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(main_port)
     os.environ["RANK"] = str(local_rank)
     os.environ["LOCAL_RANK"] = str(local_rank)
     os.environ["WORLD_SIZE"] = str(world_size)
+    
+    trainer = None
     try:
-        register_omegaconf_resolvers()
+        register_resolvers_safe()  # Use safe registration
+        trainer = instantiate(cfg.trainer, _recursive_=False)
+        trainer.run()
     except Exception as e:
-        logging.info(e)
-
-    trainer = instantiate(cfg.trainer, _recursive_=False)
-    trainer.run()
-
+        logging.error(f"Training failed: {e}")
+        raise
+    finally:
+        # Cleanup
+        if trainer and hasattr(trainer, 'cleanup'):
+            trainer.cleanup()
+        cleanup_distributed()
+        torch.cuda.empty_cache()
 
 
 def single_node_runner(cfg, main_port: int):
@@ -57,17 +82,21 @@ def single_node_runner(cfg, main_port: int):
     torch.multiprocessing.set_start_method(
         "spawn"
     )  # CUDA runtime does not support `fork`
-    if num_proc == 1:
-        # directly call single_proc so we can easily set breakpoints
-        # mp.spawn does not let us set breakpoints
-        single_proc_run(local_rank=0, main_port=main_port, cfg=cfg, world_size=num_proc)
-    else:
-        mp_runner = torch.multiprocessing.start_processes
-        args = (main_port, cfg, num_proc)
-        # Note: using "fork" below, "spawn" causes time and error regressions. Using
-        # spawn changes the default multiprocessing context to spawn, which doesn't
-        # interact well with the dataloaders (likely due to the use of OpenCV).
-        mp_runner(single_proc_run, args=args, nprocs=num_proc, start_method="spawn")
+    try:
+        if num_proc == 1:
+            # directly call single_proc so we can easily set breakpoints
+            # mp.spawn does not let us set breakpoints
+            single_proc_run(local_rank=0, main_port=main_port, cfg=cfg, world_size=num_proc)
+        else:
+            mp_runner = torch.multiprocessing.start_processes
+            args = (main_port, cfg, num_proc)
+            # Note: using "fork" below, "spawn" causes time and error regressions. Using
+            # spawn changes the default multiprocessing context to spawn, which doesn't
+            # interact well with the dataloaders (likely due to the use of OpenCV).
+            mp_runner(single_proc_run, args=args, nprocs=num_proc, start_method="spawn")
+    finally:
+        # Ensure cleanup after multiprocessing
+        torch.cuda.empty_cache()
 
 def add_pythonpath_to_sys_path():
     if "PYTHONPATH" not in os.environ or not os.environ["PYTHONPATH"]:

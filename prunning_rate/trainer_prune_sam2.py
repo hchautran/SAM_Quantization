@@ -35,6 +35,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import os
+import gc
 from iopath.common.file_io import g_pathmgr
 import hydra
 from hydra.utils import instantiate
@@ -42,6 +43,7 @@ import time
 from collections import OrderedDict
 import math
 import wandb
+import json
 import logging
 from eval_sam2_hq44k import SAM2Evaluator, custom_collate_fn
 from data_utils import OnlineDataset
@@ -292,16 +294,17 @@ class TrainerPruneRate(Trainer):
         if self.distributed_rank == 0:  # Only log from main process
             # Extract model type and learning rate info
             model_type = self.processor_args.get('model_type', 'unknown')
+            ratio_lr = self.processor_args.get("ratio_to_final_lr", 'unknown')
             base_lr = self.optim_conf.options.get('lr', [{}])[0].get('scheduler', {}).get('start_value', 'unknown')
             vision_lr = None
             if len(self.optim_conf.options.get('lr', [])) > 1:
                 vision_lr = self.optim_conf.options['lr'][1].get('scheduler', {}).get('start_value', 'unknown')
             
             # Create project name
-            project_name = f"sam2_prune_{model_type}_base_{base_lr}" + "target_flop-" + str(self.target_flop) + f"_flopscale_{self.flops_scale}"
+            project_name = f"sam2_prune_{model_type}_base_{base_lr}" + "target_flop-" + str(self.target_flop) + f"_flopscale_{self.flops_scale}" + "number batch" + str(self.data_conf.get('train', {}).get('batch_sizes', [None])[0]) + "ratio_lr" + str(ratio_lr) + "max_epochs-" + str(self.max_epochs) 
             if vision_lr:
                 project_name += f"_vision_{vision_lr}"
-            
+            self.project_name = project_name
             wandb.init(
                 name = project_name,
                 project=f"SAM2_Pruning_Rate_Training_{model_type}",
@@ -555,11 +558,7 @@ class TrainerPruneRate(Trainer):
             try:
                 self._run_step(batch, phase, loss_mts, extra_loss_mts)
                 
-                # Explicit memory cleanup after each batch to prevent OOM
-                # This is especially important for variable batch sizes in SAM2
                 torch.cuda.empty_cache()
-                
-                # Delete batch reference to help with memory cleanup
                 del batch
                 
                 # compute gradient and do optim step
@@ -619,7 +618,7 @@ class TrainerPruneRate(Trainer):
                 mem_meter.update(reset_peak_usage=True)
 
                 # Log training time to wandb
-                if self.distributed_rank == 0 and data_iter % self.logging_conf.log_scalar_frequency == 0:
+                if self.distributed_rank == 0 and data_iter % 10 == 0:
                     wandb.log({
                         "time/batch_time": batch_time_meter.val,
                         "time/data_time": data_time_meter.val,
@@ -658,4 +657,42 @@ class TrainerPruneRate(Trainer):
         logging.info(f"Losses and meters: {out_dict}")
         self._reset_meters([phase])
         return out_dict
-    
+    def run_train(self):
+
+        while self.epoch < self.max_epochs:
+            dataloader = self.train_dataset.get_loader(epoch=int(self.epoch))
+            barrier()
+            outs = self.train_epoch(dataloader)
+            self.logger.log_dict(outs, self.epoch)  # Logged only on rank 0
+
+            # log train to text file.
+            if self.distributed_rank == 0:
+                with g_pathmgr.open(
+                    os.path.join(self.logging_conf.log_dir, "train_stats.json"),
+                    "a",
+                ) as f:
+                    f.write(json.dumps(outs) + "\n")
+
+            # Save checkpoint before validating
+            
+            self.save_checkpoint(self.epoch + 1,[self.project_name])
+
+            del dataloader
+            gc.collect()
+
+            # Run val, not running on last epoch since will run after the
+            # loop anyway
+            if self.is_intermediate_val_epoch(self.epoch):
+                self.run_val()
+
+            if self.distributed_rank == 0:
+                self.best_meter_values.update(self._get_trainer_state("train"))
+                with g_pathmgr.open(
+                    os.path.join(self.logging_conf.log_dir, "best_stats.json"),
+                    "a",
+                ) as f:
+                    f.write(json.dumps(self.best_meter_values) + "\n")
+
+            self.epoch += 1
+        # epoch was incremented in the loop but the val step runs out of the loop
+        self.epoch -= 1

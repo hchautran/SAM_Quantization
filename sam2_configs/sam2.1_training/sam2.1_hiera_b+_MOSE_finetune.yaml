@@ -7,12 +7,12 @@ scratch:
   num_frames: 2
   max_num_objects: 3
   base_lr: 5.0e-2
-  vision_lr: 5e-2
+  vision_lr: 5.0e-2
   phases_per_epoch: 1
-  num_epochs: 5
-  target_flop: 1 # *1e11
-  flops_scale: 10
-  ratio_to_final_lr: 1000
+  num_epochs: 4
+  target_flop: 0.8 # *1e11
+  flops_scale: 100
+  ratio_to_final_lr: 100
 
 dataset:
   # PATHS to Dataset
@@ -89,6 +89,7 @@ trainer:
     threshold: null
     model_type: hiera_b_plus
     train: True
+    ratio_to_final_lr: ${scratch.ratio_to_final_lr}
   model:
     _target_: training.model.sam2.SAM2Train
     image_encoder:
@@ -206,7 +207,7 @@ trainer:
 
     ####### Training specific params #######
     # box/point input and corrections
-    prob_to_use_pt_input_for_train: 0.5
+    prob_to_use_pt_input_for_train: 0.0
     prob_to_use_pt_input_for_eval: 0.0
     prob_to_use_box_input_for_train: 0.5  # 0.5*0.5 = 0.25 prob to use box instead of points
     prob_to_use_box_input_for_eval: 0.0
@@ -348,18 +349,18 @@ trainer:
       pred_obj_scores: true
       focal_gamma_obj_score: 0.0
       focal_alpha_obj_score: -1.0
-    all_valid:
-      _target_: training.loss_fns.MultiStepMultiMasksAndIous
-      weight_dict:
-        loss_mask: 20
-        loss_dice: 1
-        loss_iou: 1
-        loss_class: 1
-      supervise_all_iou: true
-      iou_use_l1_loss: true
-      pred_obj_scores: true
-      focal_gamma_obj_score: 0.0
-      focal_alpha_obj_score: -1.0
+    # all_valid:
+    #   _target_: training.loss_fns.MultiStepMultiMasksAndIous
+    #   weight_dict:
+    #     loss_mask: 20
+    #     loss_dice: 1
+    #     loss_iou: 1
+    #     loss_class: 1
+    #   supervise_all_iou: true
+    #   iou_use_l1_loss: true
+    #   pred_obj_scores: true
+    #   focal_gamma_obj_score: 0.0
+    #   focal_alpha_obj_score: -1.0
   distributed:
     backend: nccl
     find_unused_parameters: True
@@ -370,7 +371,7 @@ trainer:
       log_dir:  ${launcher.experiment_log_dir}/tensorboard
       flush_secs: 120
       should_log: True
-    log_dir: ${launcher.experiment_log_dir}/logs
+    log_dir: ./logssam2/logs
     log_freq: 1
 
   # initialize from a SAM 2 checkpoint
@@ -392,7 +393,7 @@ trainer:
 launcher:
   num_nodes: 1
   gpus_per_node: 1
-  experiment_log_dir: ./logssam2 # Path to log directory, defaults to ./sam2_logs/${config_name}
+  experiment_log_dir: ./sam2_ckts # Path to log directory, defaults to ./sam2_logs/${config_name}
 
 # SLURM args if running on a cluster
 submitit:
