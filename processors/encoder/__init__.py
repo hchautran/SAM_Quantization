@@ -2,6 +2,7 @@
 
 from .basic import EncoderAttentionProcessor, EncoderRecenterAttentionProcessor
 from .entropy import PositionalPruneProcessor, HeadPruneProcessor, PositionalQuantProcessor ,PruneRateProcessor
+from .entropy import PositionalPruneProcessor, HeadPruneProcessor, PositionalQuantProcessor
 from .entropy_sam2 import (
     PositionalPruneSAM2Processor,
     HeadPruneSAM2Processor,

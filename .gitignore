@@ -32,6 +32,10 @@ pretrained_checkpoint.zip
 sam2_logs/
 SageAttention_SM80/
 sam2_repo/
+logssam2/
+sam2_logs/
+pretrained_checkpoint/
+data/
 # Exclude Python cache files
 __pycache__/
 *.pyc
@@ -70,4 +74,6 @@ CMakeCache.txt
 Makefile
 *.so
 */CmakeFiles
+*.csv
+wandb/*
 

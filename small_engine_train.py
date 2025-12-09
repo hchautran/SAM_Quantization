@@ -16,6 +16,7 @@ import torch.optim as optim
 import argparse
 import random
 import itertools 
+import time
 
 from train.utils.dataloader import get_im_gt_name_dict, create_dataloaders, RandomHFlip, Resize, LargeScaleJitter
 from train.utils.loss_mask import loss_masks
@@ -35,12 +36,12 @@ from processors import (
     EncoderAttentionProcessor,
     DecoderDoNothingProcessor,
 )
-import time
+# from profiler import InferenceProfiler, compare_inference_speed
 from segment_anything.modeling.image_encoder import Attention as EncoderSamAttention
 from segment_anything.modeling.transformer import  Attention as  DecoderAttention
 from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention 
 from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining
-from small_engine import override_args, Evaluator , create_calib_dataloaders, setup_logger, get_default_datasets, plot_output
+from sam_engine import override_args, Evaluator , create_calib_dataloaders, setup_logger, get_default_datasets, plot_output
 from prunning_rate.samprune import DiffPruneRateAttention
 import wandb
 
@@ -149,15 +150,16 @@ def train(args, sam_hq, target_flop ,optimizer, train_dataloaders, valid_dataloa
     epoch_num = args.max_epoch_num
     train_num = len(train_dataloaders)
 
+    learning_rate = args.learning_rate
+    lr_drop = args.lr_drop_epoch
+    
     sam_hq.train()
     _ = sam_hq.to(device="cuda")
     sam_hq = torch.nn.parallel.DistributedDataParallel(sam_hq, device_ids=[args.gpu], find_unused_parameters=args.find_unused_params)
     
-    lr_start = str(args.learning_rate)
-    # Import time module for timing measurements
-    
-    total_training_time = 0
+    training_start_time = time.time()
     for epoch in range(epoch_start, epoch_num): 
+        epoch_start_time = time.time()
         print("epoch:   ", epoch, "  learning rate:  ", optimizer.param_groups[0]["lr"])
         metric_logger = misc.MetricLogger(delimiter="  ")
         train_dataloaders.batch_sampler.sampler.set_epoch(epoch)
@@ -255,20 +257,18 @@ def train(args, sam_hq, target_flop ,optimizer, train_dataloaders, valid_dataloa
         test_stats = evaluate(args, sam_hq, valid_dataloaders)
         train_stats.update(test_stats)
         
-        # Calculate epoch training time
-        epoch_training_time = time.time() - epoch_start_time
-        total_training_time += epoch_training_time
+        epoch_time = time.time() - epoch_start_time
+        total_training_time = time.time() - training_start_time
+        
         wandb_log_dict = {"epoch": epoch}
         wandb_log_dict.update({f"epoch/{k}": v for k, v in train_stats.items()})
-        
-        # Add training time to wandb log
-        wandb_log_dict["epoch/total_training_time"]= total_training_time
-        wandb_log_dict["epoch/training_time"] = epoch_training_time
+        wandb_log_dict["epoch/time_seconds"] = epoch_time
+        wandb_log_dict["epoch/total_training_time_seconds"] = total_training_time
         wandb.log(wandb_log_dict)
         sam_hq.train()  
 
-        if epoch>0 and epoch % args.model_save_fre == 0:
-            model_name = "/sam_hq_epoch_"+str(epoch)+"_"+args_yaml.model.model_type+"_target_flopsize_"+str(target_flop)+"_ratio_"+str(ratio)+"startlr"+lr_start +"_lr_drop_"+ str(args.lr_drop_epoch) +".pth"
+        if epoch % args.model_save_fre == 0:
+            model_name = "/sam_hq_epoch_"+str(epoch)+args_yaml.model.model_type+"target_flopsize_"+str(target_flop)+"_ratio_"+str(ratio)+"-lr"+str(learning_rate)+ "-lr_drop" + str(lr_drop) +".pth"
             print('come here save at', args.output + model_name)
             misc.save_on_master(sam_hq.module.state_dict(), args.output + model_name)
     
@@ -500,7 +500,8 @@ class training_engine:
             
         
         if self.train:
-            valid_im_gt_list = get_im_gt_name_dict([datasets[2]], flag="valid")
+            
+            valid_im_gt_list = get_im_gt_name_dict([datasets[0]], flag="valid")
             for dataset_dict in valid_im_gt_list:
                 dataset_dict["im_path"] = dataset_dict["im_path"][-10:]
                 dataset_dict["gt_path"] = dataset_dict["gt_path"][-10:]
@@ -523,7 +524,7 @@ class training_engine:
                 training= True
             )
         else:
-            valid_im_gt_list = get_im_gt_name_dict([datasets[0]], flag="valid")
+            valid_im_gt_list = get_im_gt_name_dict([datasets[1]], flag="valid")
             self.dataloaders, self.datasets = create_calib_dataloaders(
                 valid_im_gt_list,
                 my_transforms=[Resize([1024, 1024])],
@@ -588,7 +589,6 @@ class training_engine:
         # Collect ONLY selected_probability parameters for the optimizer
         trainable_params = []
         for name, param in sam.named_parameters():
-            # param.requires_grad = True
             if 'selected_probability' in name:
                 trainable_params.append(param)
                 print(f"Training parameter: {name}")
@@ -614,7 +614,7 @@ class training_engine:
         elif args_yaml.model.model_type == "vit_h":
             target_flop = 32
             ratio= 0.025 
-        wandb.init(project=f"sam-hq-training", name=f"experiment_{self.strategy_name}-model-{args_yaml.model.model_type}-targetflop-{target_flop}-ratio-{ratio}-lr-{args_yaml.train_prune_rate.learning_rate}-lr_drop-{args_yaml.train_prune_rate.lr_drop_epoch}")
+        wandb.init(project="sam-hq-training", name=f"experiment_{self.strategy_name}-model_{args_yaml.model.model_type}-targetflop_{target_flop}-ratio_{ratio}-lr-{args_yaml.train_prune_rate.learning_rate}-lr_drop_{args_yaml.train_prune_rate.lr_drop_epoch}")
         train(args_yaml.train_prune_rate, sam, target_flop, optimizer, self.train_dataloaders, self.valid_dataloaders, lr_scheduler, ratio)
 if __name__ == '__main__':
     

@@ -144,7 +144,6 @@ class DiffPruneRateAttention(EncoderAttention):
         qk_flops =  active_heads * seq_len * seq_len * head_dim
         
         # Softmax: approximately seq_len operations per element
-        # FLOPs = B * active_heads * seq_len * seq_len
     
         softmax_flops =  active_heads * seq_len * seq_len
         
@@ -581,8 +580,7 @@ def image_encoder_monkey_patch_train( model, processor=None,  device="cuda",  ar
             if 'selected_probability' in name:
                 param.requires_grad = True
                 print(f"Enabled training for: {name}")
-            else :
+            else:
                 param.requires_grad = False
-            
     
     

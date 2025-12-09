@@ -1,4 +1,0 @@
-# ninja log v7
-1	5554	1757753182436473547	/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/qgemm/build/temp.linux-x86_64-3.10/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/qgemm/kernels/quant.o	92dd03ccf162a7b8
-1	14118	1757753182436473547	/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/qgemm/build/temp.linux-x86_64-3.10/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/qgemm/kernels/gemm.o	2c347f7941cf196b
-0	21581	1757753182436473547	/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/qgemm/build/temp.linux-x86_64-3.10/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/quant/qgemm/kernels/bindings.o	5686c2a6caca424d

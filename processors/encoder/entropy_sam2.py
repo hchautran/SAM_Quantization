@@ -344,6 +344,71 @@ class BaseEntropySAM2Processor(AttentionProcessor):
 
         return x
 
+
+class PositionalTrainingPruneRateSAM2Processor(BaseEntropySAM2Processor):
+    def __init__(self, strategy_name: str = 'PositionalTrainingPruneRateSAM2Processor'):
+        super().__init__(strategy_name)
+    def set_params(self, args):
+        super().set_params(args)
+        self.global_percent = args.quantization.percent_entropy_global
+        self.model_type ='hiera_b_plus'
+    def calculate_entropy(self, attn ):
+    
+        # attn B, num_heads, H*W, H*W
+        eps = 1e-12
+        B , H, T, _ = attn.shape 
+        attn = torch.clamp(attn, min=eps).view(B, H, -1)
+        entropy = -torch.mean(attn * torch.log(attn), dim=-1)
+        return entropy
+    def _process_percent_mode(self, predictor):
+        """Process calibration in percent mode, sorting heads by entropy values."""
+        layer_heads = self._group_entropy_by_layer()
+        # Sort each layer's heads by entropy value in descending order
+        sorted_layer_heads = {}
+        for layer_name, heads_with_entropy in layer_heads.items():
+            sorted_heads = sorted(heads_with_entropy, key=lambda x: x[1])
+            sorted_layer_heads[layer_name] = [index for index, _ in sorted_heads]
+        self.final_entropy_stats = sorted_layer_heads
+        # Clean up the original entropy_stats to save memory
+        del self.entropy_stats
+
+    def _create_attention_hook(self, name):
+        """Create attention hook for positional pruning in SAM2."""
+        def attention_hook(module, input, output):
+            
+            x = input[0] if isinstance(input, tuple) else input
+            B, H, W, C = x.shape
+
+            # Compute QKV using SAM2 format
+            # Use -1 to automatically compute head_dim from dim_out
+            qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2,0,3,1,4)
+            q, k, v = torch.unbind(qkv, 0)
+
+            # Compute attention manually (SDPA is black box)
+            if module.q_pool:
+                q = do_pool(q.permute(0,2,1,3).reshape(B, H, W, -1), module.q_pool)
+                H, W = q.shape[1:3]  # downsampled shape
+                q = q.permute(0,2,1,3).reshape(B,  module.num_heads, H*W, -1)
+
+
+            scale = (q.size(-1)) ** -0.5
+            attn = (q * scale) @ k.transpose(-2, -1)
+            attn = attn.softmax(dim=-1)
+
+            # attn shape: (B, num_heads, H*W, H*W)
+            B_batch, n_heads, N, _ = attn.shape
+
+            # Iterate over batch and heads to compute entropy
+            attn_entropy = self.calculate_entropy(attn).reshape(-1,1)
+            for b in range(B_batch):
+                for head_idx in range(n_heads):
+                    global_head_idx = b * n_heads + head_idx
+                    
+                    head_key = f"{name}.head_{global_head_idx}"
+                    self.entropy_stats[head_key].append(attn_entropy[global_head_idx].item())
+
+        return attention_hook
+    
 class PositionalPruneSAM2Processor(BaseEntropySAM2Processor):
     """
     SAM2 version of PositionalPruneProcessor.
@@ -379,10 +444,10 @@ class PositionalPruneSAM2Processor(BaseEntropySAM2Processor):
 
     def _calculate_num_heads_to_select(self, total_heads):
         """Override to support global vs local percentages."""
-        if total_heads < 400:
-            return max(1, int(total_heads * self.global_percent))
+        if total_heads < 200:
+            return int(total_heads * self.global_percent)
         else:
-            return max(1, int(total_heads * self.percent))
+            return  int(total_heads * self.percent)
 
     def _create_attention_hook(self, name):
         """Create attention hook for positional pruning in SAM2."""
@@ -474,7 +539,6 @@ class PositionalPruneSAM2Processor(BaseEntropySAM2Processor):
         else:
             q_attn, k_attn, v_attn = q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1)
 
- 
         x_attn = F.scaled_dot_product_attention(q_attn, k_attn, v_attn)
         x_attn = x_attn.reshape(-1, H * W, x_attn.size(-1))
 

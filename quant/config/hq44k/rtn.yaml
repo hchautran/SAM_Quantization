@@ -25,7 +25,8 @@ quantization:
   channel: False
   percent: 100
   centerQ: False
-  percent_entropy: 0.618
-  percent_entropy_global: 0.84
+  percent_entropy: 0.3
+  percent_entropy_global: 0.145
   high_entropy: True 
   prune_global: True 
+  

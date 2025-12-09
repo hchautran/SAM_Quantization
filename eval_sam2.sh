@@ -7,16 +7,33 @@ PRED_ROOT=./outputs/sav_test_pred_pngs
 CONFIG_PATH=./sam2/sam2/configs/sam2.1
 
 
+# python eval_sam2_hq44k.py \
+#     --model-cfg //home/22chi.nh/project/SAMquantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
+#     --checkpoint ./sam2_ckts/sam2.1_hiera_base_plus.pt  \
+#     --num-samples 100 \
+#     --percent-entropy  0.594  \
+#     --percent-entropy-global 0.625 \
+#     --high-entropy \
+#     --processor POSITIONAL_PRUNE_SAM2 \
+#     --batch-size 1 \
+#     --num-calib-samples 16 \
+#     --prune-global \
+
+
+
 python eval_sam2_hq44k.py \
-    --model-cfg //home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
+    --model-cfg //home/22chi.nh/project/SAMquantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
     --checkpoint ./sam2_ckts/sam2.1_hiera_base_plus.pt  \
     --num-samples 100 \
-    --percent-entropy  0.0  \
-    --percent-entropy-global 0.0 \
+    --percent-entropy  0.5132  \
+    --percent-entropy-global 0.5833 \
     --high-entropy \
-    --processor POSITIONAL_PRUNE_SAM2 \
-    --batch-size 1
-    # --use-batch \
+    --processor TRAINING_PRUNE_RATE_SAM2 \
+    --batch-size 1 \
+    --num-calib-samples 16 \
+
+
+
 
 # python visualize_encoder_latency_sam2.py \
   # --model_config //home/chauht2/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml  \
