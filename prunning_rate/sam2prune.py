@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional  as F
+import copy
 from typing import List, Tuple, Union
 from .ddp import DiffPruneRate
 
@@ -53,20 +54,25 @@ class DiffPruneRateMultiScaleAttention(MultiScaleAttention):
         return B * H * W * self.dim_out * self.dim_out
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, H, W, _ = x.shape
+        # B, H, W, _ = x.shape
         
-        # qkv with shape (B, H * W, 3, nHead, C)
-        qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        qkv = qkv.reshape(3, B * self.num_heads, H * W, -1)
-        # Unbind to get q, k, v: each (B*nheads, H*W, head_dim)
-        q, k, v = qkv.unbind(0)
-        # Q pooling (for downsample at stage changes)
-        # if self.q_pool:
-        #     q = do_pool(q.reshape(B, H, W, -1), self.q_pool)
-        #     H, W = q.shape[1:3]  # downsampled shape
-        #     q = q.reshape(B, H * W, self.num_heads, -1)
+        # # qkv with shape (B, H * W, 3, nHead, C)
+        # qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        # qkv = qkv.reshape(3, B * self.num_heads, H * W, -1)
+        # # Unbind to get q, k, v: each (B*nheads, H*W, head_dim)
+        # q, k, v = qkv.unbind(0)
+
 
         if self.training:
+            B, H, W, _ = x.shape
+        
+            # qkv with shape (B, H * W, 3, nHead, C)
+            qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            qkv = qkv.reshape(3, B * self.num_heads, H * W, -1)
+            # Unbind to get q, k, v: each (B*nheads, H*W, head_dim)
+            q, k, v = qkv.unbind(0)
+
+
             prune_kept_num = self.prune_ddp.update_kept_head_number()
             # Get sorted head indices from processor
             sorted_indices = self.processor.final_entropy_stats.get(self.module_name, None)
@@ -103,7 +109,20 @@ class DiffPruneRateMultiScaleAttention(MultiScaleAttention):
             x = x_attn[inverse_indices, :, :]
             
         else:
-            nu_images = 1
+            if self.processor is not None and hasattr(self.processor, 'final_entropy_stats'):
+                if len(self.processor.final_entropy_stats) > 0:
+                    return self.processor.process_val(x, self, self.module_name) 
+
+            #########################################################
+            B, H, W, _ = x.shape
+        
+            # qkv with shape (B, H * W, 3, nHead, C)
+            qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            qkv = qkv.reshape(3, B * self.num_heads, H * W, -1)
+            # Unbind to get q, k, v: each (B*nheads, H*W, head_dim)
+            q, k, v = qkv.unbind(0)
+
+            nu_images = q.shape[0] // len(self.processor.final_entropy_stats.get(self.module_name, None))
             prune_kept_num = int(self.prune_ddp.update_kept_head_number())
             
             should_prune = True
@@ -115,25 +134,37 @@ class DiffPruneRateMultiScaleAttention(MultiScaleAttention):
             if should_prune:
                 non_prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)[:prune_kept_num]
                 prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)[prune_kept_num:]
+                multi_non_prune_mask = copy.deepcopy(self.processor.final_entropy_stats.get(self.module_name, None)[:prune_kept_num])
+                multi_prune_mask = copy.deepcopy(self.processor.final_entropy_stats.get(self.module_name, None)[prune_kept_num:])
+                if nu_images >1:
+                    for i in range(1,nu_images):
+                        offset = i * len(self.processor.final_entropy_stats.get(self.module_name, None))
+                        batch_non_prune_indices = [idx + offset for idx in non_prune_mask]
+                        batch_prune_indices = [idx + offset for idx in prune_mask]
+                        multi_non_prune_mask.extend(batch_non_prune_indices)
+                        multi_prune_mask.extend(batch_prune_indices)
+
+
                 
-                
-                q_attn = q[non_prune_mask, :, :].unsqueeze(1)
-                k_attn = k[non_prune_mask, :, :].unsqueeze(1)
-                v_attn = v[non_prune_mask, :, :].unsqueeze(1)
-                v_pruned = v[prune_mask, :, :]
+                q_attn = q[multi_non_prune_mask, :, :].unsqueeze(1)
+                k_attn = k[multi_non_prune_mask, :, :].unsqueeze(1)
+                v_attn = v[multi_non_prune_mask, :, :].unsqueeze(1)
+                v_pruned = v[multi_prune_mask, :, :]
                 
                 # Compute attention for non-pruned heads
-                x_attn = F.scaled_dot_product_attention(q_attn, k_attn, v_attn)
+                x_attn= self.processor.scaled_dot_product_attention_m(q_attn, k_attn, v_attn)
+                # x_attn = F.scaled_dot_product_attention(q_attn, k_attn, v_attn)
                 x_attn = x_attn.reshape(-1, H * W, x_attn.size(-1))
                 
                 # Initialize output tensor
                 x = torch.zeros_like(v).to(v.device)
                 # Fill pruned heads with mean of their values
-                x[prune_mask] = v_pruned.mean(-2, keepdim=True).expand(-1, x_attn.shape[-2], x_attn.shape[-1])
-                x[non_prune_mask] = x_attn
+                x[multi_prune_mask] = v_pruned.mean(-2, keepdim=True).expand(-1, x_attn.shape[-2], x_attn.shape[-1])
+                x[multi_non_prune_mask] = x_attn
             else:
                 # No pruning or invalid masks
-                x_attn = F.scaled_dot_product_attention(q.unsqueeze(1),k.unsqueeze(1),v.unsqueeze(1))
+                x_attn= self.processor.scaled_dot_product_attention_m(q.unsqueeze(1),k.unsqueeze(1),v.unsqueeze(1))
+                # x_attn = F.scaled_dot_product_attention(q.unsqueeze(1),k.unsqueeze(1),v.unsqueeze(1))
                 x_attn = x_attn.reshape(-1, H * W, x_attn.size(-1))
                 x = x_attn
          

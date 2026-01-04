@@ -36,6 +36,7 @@ logssam2/
 sam2_logs/
 pretrained_checkpoint/
 data/
+sam2_ckts/
 # Exclude Python cache files
 __pycache__/
 *.pyc

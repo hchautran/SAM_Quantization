@@ -89,7 +89,7 @@ def get_args_parser():
 
 def setup_logger(path_log,state):
     if not os.path.exists(path_log):
-        os.makedirs(path_log)
+        os.makedirs(path_log)setup_logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     fh = logging.FileHandler(os.path.join(path_log, f'{state}.log'))

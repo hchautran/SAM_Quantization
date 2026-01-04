@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
-from .Smooth import smooth_ln_fcs
+# from .Smooth import smooth_ln_fcs
 from matplotlib import pyplot as plt
 import os
 import sys
 import numpy as np
 from dataclasses import dataclass
 from segment_anything.modeling.image_encoder import Attention
-from .per_tensor_channel_group import quantize_activation_low_high_density_activation_index, quantize_activation_per_token_absmax, quantize_weight_per_channel_absmax
+# from .per_tensor_channel_group import quantize_activation_low_high_density_activation_index, quantize_activation_per_token_absmax, quantize_weight_per_channel_absmax
 # Add the sam-hq directory to Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)  # Go up to SAM_Quantization

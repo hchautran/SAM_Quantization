@@ -6,31 +6,46 @@ GT_ROOT=./data/sav/sav_test/Annotations_6fps
 PRED_ROOT=./outputs/sav_test_pred_pngs
 CONFIG_PATH=./sam2/sam2/configs/sam2.1
 
+CUDA_VISIBLE_DEVICES=4 python eval_sam2_hq44k.py \
+    --model-cfg //home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
+    --checkpoint ./sam2_ckts/sam2.1_hiera_base_plus.pt  \
+    --num-samples 400 \
+    --percent-8heads   0.5 \
+    --percent-200heads  0.4775 \
+    --percent-400heads  0.6188 \
+    --percent-2048heads  0.6370\
+    --percent-4096heads  0.6045 \
+    --high-entropy \
+    --processor POSITIONAL_PRUNE_SAM2 \
+    --batch-size  4 \
+    --num-calib-samples 16 \
+    --use-batch \
+    # --prune-global \
+    # --use-batch \
 
-# python eval_sam2_hq44k.py \
-#     --model-cfg //home/22chi.nh/project/SAMquantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
+# POSITIONAL_PRUNE_SAM2
+
+# CUDA_VISIBLE_DEVICES=2 python eval_sam2_hq44k.py \
+#     --model-cfg //home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
 #     --checkpoint ./sam2_ckts/sam2.1_hiera_base_plus.pt  \
-#     --num-samples 100 \
-#     --percent-entropy  0.594  \
-#     --percent-entropy-global 0.625 \
-#     --high-entropy \
-#     --processor POSITIONAL_PRUNE_SAM2 \
-#     --batch-size 1 \
+#     --num-samples 400 \
+#     --threshold 0.5 \
+#     --threshold-global 0.00001 \
+#     --processor TRAINING_PRUNE_RATE_SAM2_DUO \
+#     --batch-size 4 \
 #     --num-calib-samples 16 \
 #     --prune-global \
 
-
-
-python eval_sam2_hq44k.py \
-    --model-cfg //home/22chi.nh/project/SAMquantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
+CUDA_VISIBLE_DEVICES=1 python eval_sam2_hq44k.py \
+    --model-cfg //home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_configs/sam2.1/sam2.1_hiera_b+.yaml \
     --checkpoint ./sam2_ckts/sam2.1_hiera_base_plus.pt  \
-    --num-samples 100 \
-    --percent-entropy  0.5132  \
-    --percent-entropy-global 0.5833 \
+    --num-samples 400 \
     --high-entropy \
     --processor TRAINING_PRUNE_RATE_SAM2 \
     --batch-size 1 \
     --num-calib-samples 16 \
+    # --prune-global \
+
 
 
 

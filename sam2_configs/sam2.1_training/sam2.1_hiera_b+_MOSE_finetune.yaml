@@ -2,22 +2,24 @@
 
 scratch:
   resolution: 1024
-  train_batch_size: 4
+  train_batch_size: 2
   num_train_workers: 10
   num_frames: 2
   max_num_objects: 3
-  base_lr: 5.0e-2
-  vision_lr: 5.0e-2
+  target_flop: 0.85 # *1e11 _GFLOPS
   phases_per_epoch: 1
-  num_epochs: 4
-  target_flop: 0.8 # *1e11
-  flops_scale: 100
-  ratio_to_final_lr: 100
-
+  num_epochs: 5
+  flops_scale: 1000
+  regression_weight: 2
+  ratio_to_final_lr: 10
+  # base_lr: ${times:${subtract:50,${times:${subtract:${times:${scratch.target_flop},100}, 85}, 2}}, 0.01}
+  # vision_lr: ${times:${subtract:50,${times:${subtract:${times:${scratch.target_flop},100}, 85}, 2}}, 0.01} #${subtract:0.5,${times:${subtract:${scratch.target_flop}, 85}, 0.02}} 
+  base_lr: 0.2
+  vision_lr: 0.2
 dataset:
   # PATHS to Dataset
-  img_folder: /home/22chi.nh/project/SAMquantization/SAM_Quantization/data/subtrain/JPEGImages # PATH to MOSE JPEGImages folder
-  gt_folder: /home/22chi.nh/project/SAMquantization/SAM_Quantization/data/subtrain/Annotations  # PATH to MOSE Annotations folder
+  img_folder: /home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/data/subtrain_/JPEGImages # PATH to MOSE JPEGImages folder
+  gt_folder: /home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/data/subtrain_/Annotations  # PATH to MOSE Annotations folder
   # img_folder: /home/22chi.nh/project/SAMquantization/SAM_Quantization/data/DIS5K/DIS-TR-restructured/im
   # gt_folder: /home/22chi.nh/project/SAMquantization/SAM_Quantization/data/DIS5K/DIS-TR-restructured/gt
   file_list_txt: null # Optional PATH to filelist containing a subset of videos to be used for training
@@ -72,11 +74,13 @@ vos:
 trainer:
   _target_: prunning_rate.trainer_prune_sam2.TrainerPruneRate
   mode: train_only
+  train_method: diff # duo or diff
   max_epochs: ${times:${scratch.num_epochs},${scratch.phases_per_epoch}}
   accelerator: cuda
   seed_value: 123
   target_flop: ${scratch.target_flop} # *1e11
   flops_scale: ${scratch.flops_scale}
+  regression_weight: ${scratch.regression_weight}
   
   processor_args:
     processor: "TRAINING_PRUNE_RATE_SAM2"
@@ -90,6 +94,12 @@ trainer:
     model_type: hiera_b_plus
     train: True
     ratio_to_final_lr: ${scratch.ratio_to_final_lr}
+
+    # this config for duo training
+    batch_size_train: ${scratch.train_batch_size}
+    threshold_duo: 0.5
+    globale_prune_duo: 0.5
+
   model:
     _target_: training.model.sam2.SAM2Train
     image_encoder:
@@ -176,7 +186,7 @@ trainer:
     # apply scaled sigmoid on mask logits for memory encoder, and directly feed input mask as output mask
     sigmoid_scale_for_mem_enc: 20.0
     sigmoid_bias_for_mem_enc: -10.0
-    use_mask_input_as_output_without_sam: true
+    use_mask_input_as_output_without_sam: false
     # Memory
     directly_add_no_mem_embed: true
     no_obj_embed_spatial: true
@@ -207,9 +217,9 @@ trainer:
 
     ####### Training specific params #######
     # box/point input and corrections
-    prob_to_use_pt_input_for_train: 0.0
+    prob_to_use_pt_input_for_train: 0.7
     prob_to_use_pt_input_for_eval: 0.0
-    prob_to_use_box_input_for_train: 0.5  # 0.5*0.5 = 0.25 prob to use box instead of points
+    prob_to_use_box_input_for_train: 0.4  # 0.5*0.5 = 0.25 prob to use box instead of points
     prob_to_use_box_input_for_eval: 0.0
     prob_to_sample_from_gt_for_train: 0.1  # with a small prob, sampling correction points from GT mask instead of prediction errors
     num_frames_to_correct_for_train: 2  # iteratively sample on random 1~2 frames (always include the first frame)
@@ -335,6 +345,7 @@ trainer:
             value: 0.0  # No weight decay for probability parameters
           param_names:
             - '*selected_probability*'
+            # - '*full_attention_heads*'
 
   loss:
     all:
@@ -344,6 +355,17 @@ trainer:
         loss_dice: 1
         loss_iou: 1
         loss_class: 1
+      supervise_all_iou: true
+      iou_use_l1_loss: true
+      pred_obj_scores: true
+      focal_gamma_obj_score: 0.0
+      focal_alpha_obj_score: -1.0
+    all_distill:
+      _target_: prunning_rate.utils.DuoDistillationLoss
+      weight_dict:
+        loss_mask_distill: 20
+        loss_dice_distill: 1
+        loss_iou_distill: 1
       supervise_all_iou: true
       iou_use_l1_loss: true
       pred_obj_scores: true

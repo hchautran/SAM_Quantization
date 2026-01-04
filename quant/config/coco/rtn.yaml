@@ -2,21 +2,21 @@ model:
   name: sam
   use_hq: True
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
-  model_type: 'vit_b'
-  hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
-  # model_type: vit_l 
-  # hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  # model_type: 'vit_b'
+  # hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
+  model_type: vit_l 
+  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
   # model_type: 'vit_h'
   # hq_checkpoint: './ckts/sam_hq_vit_h.pth'
   
   device: cpu
 train_prune_rate:
-  learning_rate: 1e-1
+  learning_rate: 5e-2
   lr_drop_epoch: 2
   start_epoch: 0
   output: './pretrained_checkpoint/prune_rate/'
-  max_epoch_num: 11
-  batch_size_train: 1
+  max_epoch_num: 12
+  batch_size_train: 2
   batch_size_valid: 1
   model_save_fre: 5
   seed: 42
@@ -27,7 +27,12 @@ train_prune_rate:
   local_rank: 0           
   distributed: false     
   dist_url: "env://"   
-  training: False 
+  # training: False 
+  # this parameter for duo
+  reg_weight: 5
+  threshold: 0.000000001
+  threshold_globle: 0.99977
+  #0.001 0.1 0.8 0.93  0.99977
 data:
   config_file: ./GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py
   checkpoint_path: ./ckts/groundingdino_swint_ogc.pth

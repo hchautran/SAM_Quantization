@@ -5,11 +5,11 @@ import torch.nn as nn
 from collections import defaultdict
 from tqdm.auto import tqdm
 import torch.nn.functional  as F
-
+import math
 
 
 from ..base import AttentionProcessor, setup_logger
-from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
+# from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
 
 
 def do_pool(x: torch.Tensor, pool: nn.Module, norm: nn.Module = None) -> torch.Tensor:
@@ -220,7 +220,7 @@ class BaseEntropySAM2Processor(AttentionProcessor):
                 )
 
                 # Calculate number of heads to select
-                num_heads_to_select = self._calculate_num_heads_to_select(len(heads_with_entropy))
+                num_heads_to_select = self._calculate_num_heads_to_select(len(heads_with_entropy),layer_name)
                 selected_heads = heads_with_entropy[:num_heads_to_select]
 
                 # Create mask
@@ -316,6 +316,33 @@ class BaseEntropySAM2Processor(AttentionProcessor):
         # x: (B, num_heads, H*W, dim) -> (B, H, W, C)
         dim = x.size(-1)
         return x.transpose(1, 2).reshape(B, H, W, num_heads * dim)
+    def scaled_dot_product_attention_m(self,query, key, value, attn_mask=None, dropout_p=0.0,
+            is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
+       
+        L, S = query.size(-2), key.size(-2)
+        scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+        attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+        if is_causal:
+            assert attn_mask is None
+            temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
+            attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+            else:
+                attn_bias = attn_mask + attn_bias
+
+        if enable_gqa:
+            key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
+            value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
+
+        attn_weight = query @ key.transpose(-2, -1) * scale_factor
+        attn_weight += attn_bias
+        attn_weight = torch.softmax(attn_weight, dim=-1)
+        attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+        return attn_weight @ value
+         
 
     def process(self, x: torch.Tensor, module, module_name: str = None) -> torch.Tensor:
         B, H, W, _ = x.shape
@@ -351,6 +378,7 @@ class PositionalTrainingPruneRateSAM2Processor(BaseEntropySAM2Processor):
     def set_params(self, args):
         super().set_params(args)
         self.global_percent = args.quantization.percent_entropy_global
+        self.train_state= args.quantization.train_state
         self.model_type ='hiera_b_plus'
     def calculate_entropy(self, attn ):
     
@@ -361,16 +389,101 @@ class PositionalTrainingPruneRateSAM2Processor(BaseEntropySAM2Processor):
         entropy = -torch.mean(attn * torch.log(attn), dim=-1)
         return entropy
     def _process_percent_mode(self, predictor):
-        """Process calibration in percent mode, sorting heads by entropy values."""
-        layer_heads = self._group_entropy_by_layer()
-        # Sort each layer's heads by entropy value in descending order
-        sorted_layer_heads = {}
-        for layer_name, heads_with_entropy in layer_heads.items():
-            sorted_heads = sorted(heads_with_entropy, key=lambda x: x[1])
-            sorted_layer_heads[layer_name] = [index for index, _ in sorted_heads]
-        self.final_entropy_stats = sorted_layer_heads
-        # Clean up the original entropy_stats to save memory
+        if self.train_state :
+            """Process calibration in percent mode, sorting heads by entropy values."""
+            layer_heads = self._group_entropy_by_layer()
+            # Sort each layer's heads by entropy value in descending order
+            sorted_layer_heads = {}
+            for layer_name, heads_with_entropy in layer_heads.items():
+                sorted_heads = sorted(heads_with_entropy, key=lambda x: x[1])
+                sorted_layer_heads[layer_name] = [index for index, _ in sorted_heads]
+            self.final_entropy_stats = sorted_layer_heads
+            # Clean up the original entropy_stats to save memory
+            del self.entropy_stats
+        else :
+            # layer_heads = self._group_entropy_by_layer()
+            # # Sort each layer's heads by entropy value in descending order
+            # sorted_layer_heads = {}
+            # for layer_name, heads_with_entropy in layer_heads.items():
+            #     sorted_heads = sorted(heads_with_entropy, key=lambda x: x[1])
+            #     sorted_layer_heads[layer_name] = [index for index, _ in sorted_heads]
+            # self.final_entropy_stats = sorted_layer_heads
+            # # Clean up the original entropy_stats to save memory
+            # del self.entropy_stats
+
+
+            """Process calibration in percent mode."""
+            self.layer_heads = self._group_entropy_by_layer()
+            self.final_entropy_stats = {}
+            
+    def _calculate_num_heads_to_select(self, module ):
+        return module.prune_ddp.update_kept_head_number()
+
+    def recompute_masks(self,predictor):
+        mask_size_fn = lambda layer_name, heads: len(heads)
+
+        ###TODO: implement recalculate mask follow the number of kept head take from predictor here
+        self.final_entropy_stats = self._select_heads_by_ddp(predictor, self.layer_heads, mask_size_fn)
+
+        self._log_final_stats()
+
         del self.entropy_stats
+        del self.layer_heads
+    def _select_heads_by_ddp(self, predictor, layer_heads, mask_size_fn):
+        """
+        Select heads based on the number of heads to keep from each layer's prune_ddp module.
+
+        Args:
+            predictor: Model predictor
+            layer_heads: Dictionary of layer_name -> [(head_idx, entropy_mean)]
+            mask_size_fn: Function that takes layer_name and heads_with_entropy to compute mask size
+        """
+        final_stats = {}
+        
+        # Map layer names to actual module paths to access prune_ddp
+        for layer_name, heads_with_entropy in layer_heads.items():
+            if len(heads_with_entropy) > 0:
+                # Sort heads by entropy
+                heads_with_entropy.sort(
+                    key=lambda x: x[1],
+                    reverse=self.prunehighentropy
+                )
+                if any(suffix in layer_name for suffix in [".2.", ".5.", ".21."]):# dont prune q_pool layer
+                    number_of_head_to_keep = len( heads_with_entropy)
+                else:
+                    # Extract block index from layer_name (e.g., 'image_encoder.trunk.blocks.0.attn' -> 0)
+                    block_index = int(layer_name.split('.')[3])
+                    
+                    
+                    # Get the corresponding module from the predictor
+                    attention_module = predictor.model.image_encoder.trunk.blocks[block_index].attn
+                    
+                    # Get number of heads to keep from the prune_ddp module
+                    number_of_head_to_keep = int(attention_module.prune_ddp.update_kept_head_number())
+                
+                # If we need to keep all heads, no pruning is needed
+                if number_of_head_to_keep >= len(heads_with_entropy):
+                    # Keep all heads - create mask with all False values (no heads pruned)
+                    mask_size = mask_size_fn(layer_name, heads_with_entropy)
+                    mask = torch.zeros(mask_size, dtype=torch.bool).to(predictor.device)
+                    final_stats[layer_name] = mask
+                    continue
+                    
+                # Determine which heads to prune (those with highest entropy if prunehighentropy=True)
+                # We keep the first number_of_head_to_keep heads after sorting
+                number_heads_to_prune = len(heads_with_entropy) - number_of_head_to_keep
+                selected_heads = heads_with_entropy[:number_heads_to_prune]
+                
+                # Create mask
+                mask_size = mask_size_fn(layer_name, heads_with_entropy)
+                selected_indices = [head_idx for head_idx, _ in selected_heads]
+                mask = torch.isin(
+                    torch.arange(mask_size),
+                    torch.tensor(selected_indices)
+                ).to(predictor.device)
+                final_stats[layer_name] = mask
+        return final_stats
+
 
     def _create_attention_hook(self, name):
         """Create attention hook for positional pruning in SAM2."""
@@ -408,6 +521,75 @@ class PositionalTrainingPruneRateSAM2Processor(BaseEntropySAM2Processor):
                     self.entropy_stats[head_key].append(attn_entropy[global_head_idx].item())
 
         return attention_hook
+    def process_val(self, x: torch.Tensor, module, module_name: str = None):
+        """
+        Standard attention processing with optional head pruning for SAM2.
+
+        Args:
+            x: Input tensor (B, H, W, C)
+            module: MultiScaleAttention module
+            module_name: Name of the module for mask lookup
+        """
+        # Skip pruning for layers with Q pooling (stage transition layers)
+        if module.q_pool:
+            return super(PositionalPruneSAM2Processor, self).process(x, module, module_name)
+
+        # Determine if we should prune this layer
+        if not self.prune_global:
+            if not any(num in module_name for num in ["12", "16", "20"]):
+                prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+            else:
+                prune_mask = None
+        else:
+            prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+
+        B, H, W, _ = x.shape
+
+        # Compute QKV using SAM2 format
+        # qkv with shape (B, H * W, 3, nHead, head_dim)
+        qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1)
+        # Permute to (3, B, nheads, H*W, head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        # Reshape to (3, B*nheads, H*W, head_dim) for easier masking
+        qkv = qkv.reshape(3, B * module.num_heads, H * W, -1)
+        # Unbind to get q, k, v: each (B*nheads, H*W, head_dim)
+        q, k, v = qkv.unbind(0)
+
+        # Apply pruning mask if available (same as SAM1)
+
+        if prune_mask is not None and isinstance(prune_mask, torch.Tensor):
+            # Repeat mask for batch dimension
+            prune_mask = prune_mask.repeat(q.shape[0] // prune_mask.shape[0])
+            # Select heads based on mask
+            q_attn = q[~prune_mask, :, :].unsqueeze(1)
+            k_attn = k[~prune_mask, :, :].unsqueeze(1)
+            v_attn = v[~prune_mask, :, :].unsqueeze(1)
+            v_pruned = v[prune_mask, :, :]
+        else:
+            q_attn, k_attn, v_attn = q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1)
+    
+        # x_attn = F.scaled_dot_product_attention(q_attn, k_attn, v_attn)
+        x_attn = self.scaled_dot_product_attention_m(q_attn, k_attn, v_attn)
+        x_attn = x_attn.reshape(-1, H * W, x_attn.size(-1))
+
+        # Merge outputs if pruning was applied
+        if prune_mask is not None and isinstance(prune_mask, torch.Tensor):
+            x = torch.zeros_like(v).to(v.device)
+            # Fill pruned heads with mean of V
+            x[prune_mask] = v_pruned.mean(-2, keepdim=True).expand(-1, x_attn.shape[-2], x_attn.shape[-1])
+            # Fill kept heads with attention output
+            x[~prune_mask] = x_attn
+        else:
+            x = x_attn
+
+        x = x.reshape(B, module.num_heads, H * W, -1)
+        x = x.transpose(1, 2)
+        x = x.reshape(B, H, W, -1)
+
+        # Apply output projection
+        x = module.proj(x)
+        flops = 0
+        return x ,flops
     
 class PositionalPruneSAM2Processor(BaseEntropySAM2Processor):
     """
@@ -432,7 +614,11 @@ class PositionalPruneSAM2Processor(BaseEntropySAM2Processor):
     def set_params(self, args):
         super().set_params(args)
         self.global_percent = args.quantization.percent_entropy_global
-
+        self.percent_8heads = args.quantization.percent_8heads
+        self.percent_200heads = args.quantization.percent_200heads
+        self.percent_400heads = args.quantization.percent_400heads
+        self.percent_2048heads = args.quantization.percent_2048heads
+        self.percent_4096heads = args.quantization.percent_4096heads
     def calculate_entropy(self, attn ):
 
         # attn B, num_heads, H*W, H*W
@@ -442,12 +628,22 @@ class PositionalPruneSAM2Processor(BaseEntropySAM2Processor):
         entropy = -torch.mean(attn * torch.log(attn), dim=-1)
         return entropy
 
-    def _calculate_num_heads_to_select(self, total_heads):
-        """Override to support global vs local percentages."""
-        if total_heads < 200:
-            return int(total_heads * self.global_percent)
-        else:
-            return  int(total_heads * self.percent)
+    
+    def _calculate_num_heads_to_select(self, total_heads,layer_name ):
+        
+        """Calculate number of heads to select based on percentage."""
+        if any(suffix in layer_name for suffix in [".2.", ".5.", ".21."]):# dont prune q_pool layer
+            return 0
+        if total_heads == 8:
+            return int(total_heads * self.percent_8heads)
+        elif total_heads == 200:
+            return int(total_heads * self.percent_200heads)
+        elif total_heads == 400:
+            return int(total_heads * self.percent_400heads)
+        elif total_heads == 2048:
+            return int(total_heads * self.percent_2048heads)
+        elif total_heads == 4096:
+            return int(total_heads * self.percent_4096heads)
 
     def _create_attention_hook(self, name):
         """Create attention hook for positional pruning in SAM2."""
@@ -538,8 +734,9 @@ class PositionalPruneSAM2Processor(BaseEntropySAM2Processor):
             v_pruned = v[prune_mask, :, :]
         else:
             q_attn, k_attn, v_attn = q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1)
-
+    
         x_attn = F.scaled_dot_product_attention(q_attn, k_attn, v_attn)
+        # x_attn = self.scaled_dot_product_attention_m(q_attn, k_attn, v_attn)
         x_attn = x_attn.reshape(-1, H * W, x_attn.size(-1))
 
         # Merge outputs if pruning was applied

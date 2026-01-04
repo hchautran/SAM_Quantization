@@ -2,15 +2,17 @@
 
 # python profile_encoder_latency.py --model_type vit_l --checkpoint ./ckts/sam_hq_vit_l.pth --runs 10 --warmup 3
 
-CUDA_VISIBLE_DEVICES=1 python benchmark_batch_inference.py \
-    --batch-sizes 1 2 4 8 16 \
-    --num-samples 100 \
-    --processor POSITIONAL_QUANT \
-    --percent 0.7  \
-    --percent-global 0.8 \
+CUDA_VISIBLE_DEVICES=2 python benchmark_batch_inference.py \
+    --batch-sizes  4 \
+    --num-samples 400 \
+    --processor POSITIONAL_PRUNE \
+    --percent 0.9963  \
+    --percent-global 0.5625 \
     --prune-global \
     --n-bits 16 \
     --high-entropy  \
+    --model-type vit_l \
+    --model-ckt ./pretrained_checkpoint/sam_hq_vit_l.pth \
     --quantize-encoder \
     # --svdq-rank 32 \
     # --svdq-precision int4 \

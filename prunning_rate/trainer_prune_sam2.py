@@ -31,6 +31,7 @@ from processors.encoder.entropy_sam2 import (
 from sam2.modeling.backbones.hieradet import MultiScaleAttention
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from prunning_rate.sam2prune import monkey_patch_train_sam2
+from prunning_rate.sam2pruneduo import monkey_patch_train_sam2_duo
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -47,7 +48,7 @@ import json
 import logging
 from eval_sam2_hq44k import SAM2Evaluator, custom_collate_fn
 from data_utils import OnlineDataset
-from .utils import get_default_datasets
+from .utils import get_default_datasets, get_full_attention_heads, l1_loss
 from train.utils.dataloader import get_im_gt_name_dict, Resize
 from torchvision import transforms
 
@@ -170,6 +171,7 @@ class TrainerPruneRate(Trainer):
         checkpoint: Dict[str, Any],
         max_epochs: int,
         mode: str = "train",
+        train_method: str = "diff",
         accelerator: str = "cuda",
         seed_value: int = 123,
         val_epoch_freq: int = 1,
@@ -183,6 +185,7 @@ class TrainerPruneRate(Trainer):
         processor_args: Optional[Dict[str, Any]] = None,
         target_flop: int = 1,   # 1e11
         flops_scale: int = 1, 
+        regression_weight: int = 1,
     ):
 
         self._setup_env_variables(env_variables)
@@ -190,12 +193,14 @@ class TrainerPruneRate(Trainer):
         
         self.flops_scale = flops_scale
         self.target_flop = target_flop
+        self.regression_weight =regression_weight
         self.data_conf = data
         self.model_conf = model
         self.logging_conf = LoggingConf(**logging)
         self.checkpoint_conf = CheckpointConf(**checkpoint).infer_missing()
         self.max_epochs = max_epochs
         self.mode = mode
+        self.train_method = train_method
         self.val_epoch_freq = val_epoch_freq
         self.optim_conf = OptimConf(**optim) if optim is not None else None
         self.meters_conf = meters
@@ -257,7 +262,7 @@ class TrainerPruneRate(Trainer):
         barrier()
     def verify_gradient_calculation(self, step):
         """Verify that gradients are calculated only for selected_probability parameters. Add this method after backward in _run_tep method  to check"""
-        if step % 10 == 0:  # Log every 10 steps to avoid spam
+        if step % 1 == 0:  # Log every 10 steps to avoid spam
             print(f"\n=== GRADIENT VERIFICATION - Step {step} ===")
             
             params_with_grad = []
@@ -268,7 +273,7 @@ class TrainerPruneRate(Trainer):
                 if param.requires_grad:
                     has_gradient = param.grad is not None and torch.any(param.grad != 0)
                     
-                    if "selected_probability" in name:
+                    if "selected_probability" in name or "full_attention_heads" in name:
                         params_should_have_grad.append(name)
                         if has_gradient:
                             params_with_grad.append(name)
@@ -301,25 +306,57 @@ class TrainerPruneRate(Trainer):
                 vision_lr = self.optim_conf.options['lr'][1].get('scheduler', {}).get('start_value', 'unknown')
             
             # Create project name
-            project_name = f"sam2_prune_{model_type}_base_{base_lr}" + "target_flop-" + str(self.target_flop) + f"_flopscale_{self.flops_scale}" + "number batch" + str(self.data_conf.get('train', {}).get('batch_sizes', [None])[0]) + "ratio_lr" + str(ratio_lr) + "max_epochs-" + str(self.max_epochs) 
+            if self.train_method =="diff":
+                project_name = f"set_0.5_for_pt_box_sam2_prune_{model_type}_base_{base_lr}" + "target_flop-" + str(self.target_flop) + f"_flopscale_{self.flops_scale}" + "number batch" + str(self.data_conf.get('train', {}).get('batch_sizes', [None])[0]) + "ratio_lr" + str(ratio_lr) + "max_epochs-" + str(self.max_epochs) 
+                project=f"SAM2_Pruning_Rate_Training_{model_type}_diff"
+            elif self.train_method =="duo":
+                project_name = f"sam2_duo_{model_type}_base_{base_lr}" + "number batch" + str(self.data_conf.get('train', {}).get('batch_sizes', [None])[0]) + "max_epochs-" + str(self.max_epochs) + "ratio_lr" + str(ratio_lr) + "regression_weight" + str(self.regression_weight)
+                project=f"SAM2_Pruning_Rate_Training_{model_type}_duo"
             if vision_lr:
                 project_name += f"_vision_{vision_lr}"
             self.project_name = project_name
-            wandb.init(
-                name = project_name,
-                project=f"SAM2_Pruning_Rate_Training_{model_type}",
-                config={
-                    "model_type": model_type,
-                    "base_lr": base_lr,
-                    "vision_lr": vision_lr,
-                    "target_flop": self.target_flop,
-                    "flops_scale": self.flops_scale,
-                    "max_epochs": self.max_epochs,
-                    "batch_size": self.data_conf.get('train', {}).get('batch_sizes', [None])[0]
-                }
-            )
+            # wandb.init(
+            #     name = project_name,
+            #     project=project,
+            #     config={
+            #         "model_type": model_type,
+            #         "base_lr": base_lr,
+            #         "vision_lr": vision_lr,
+            #         "target_flop": self.target_flop,
+            #         "flops_scale": self.flops_scale,
+            #         "max_epochs": self.max_epochs,
+            #         "batch_size": self.data_conf.get('train', {}).get('batch_sizes', [None])[0]
+            #     }
+            # )
             print(f"Wandb initialized with project: {project_name}")
+    
     def setup_processor(self, args):
+        if self.train_method == "diff":
+            self.setup_diff_processor(args)
+        if self.train_method == "duo":
+            self.setup_duo_processor(args)
+    def setup_duo_processor(self, args):
+        if args.config_file:
+            config = OmegaConf.load(args.config_file)
+        else:
+            # Create minimal config
+            config = OmegaConf.create({
+                    'batch_size_train': args.batch_size_train,
+                    'threshold': args.threshold_duo,
+                    'threshold_globle': args.globale_prune_duo,
+                    'model_type': args.model_type
+                })
+        print("Applying monkey patch to SAM2 image encoder...")
+        monkey_patch_train_sam2_duo(
+            model=self.model,
+            processor=None,
+            model_type= args.model_type,
+            args = config,
+            train=args.train,
+        )
+        print("Monkey patch applied.")
+    
+    def setup_diff_processor(self, args):
         print(f"\n{'='*80}")
         print(f"Setting up {args.processor}")
         print(f"{'='*80}\n")
@@ -340,6 +377,7 @@ class TrainerPruneRate(Trainer):
                     'high_entropy': args.high_entropy,
                     'prune_global': args.prune_global,
                     'threshold': args.threshold,
+                    'train_state': args.train
                 }
             })
 
@@ -371,32 +409,47 @@ class TrainerPruneRate(Trainer):
         )
         print("Monkey patch applied.")
         
-    
     def _step(
         self,
         batch: BatchedVideoDatapoint,
         model: nn.Module,
         phase: str,
     ):
-        
-        outputs, flops = model(batch)
+        if self.train_method == "diff":
+            return self._step_diff(batch, model, phase)
+        if self.train_method == "duo":
+            return self._step_duo(batch, model, phase) 
+
+    def _step_duo(
+        self,
+        batch: BatchedVideoDatapoint,
+        model: nn.Module,
+        phase: str,
+    ): 
+        outputs = model(batch)
         targets = batch.masks
         batch_size = len(batch.img_batch)
 
         key = batch.dict_key  # key for dataset
-        
-        loss_flops = (flops/1e11 - self.target_flop)**2
+
+        ######################### regression loss ##########################
+        full_attention_heads = get_full_attention_heads(model)
+        full_attention_heads = [
+            h.to(model.device)
+            for h in full_attention_heads
+        ]
+
+        reg_loss = l1_loss(torch.cat(full_attention_heads).float())
+        #####################################################################
+
         loss = self.loss[key](outputs, targets)
-        loss_str = f"Losses/{phase}_{key}_loss"
-        
+
         # Log to wandb
         if self.distributed_rank == 0:
             wandb_log = {
                 "step": self.steps[phase],
                 "epoch": self.epoch,
-                "flops": flops/1e11,
-                "flops_loss": self.flops_scale * loss_flops.item(),
-                "target_flop": self.target_flop
+                "loss/reg_loss": reg_loss.item()
             }
             
             # Log individual loss components if loss is a dict
@@ -407,6 +460,8 @@ class TrainerPruneRate(Trainer):
                 wandb_log["loss/total"] = loss.item() if hasattr(loss, 'item') else loss
             
             wandb.log(wandb_log)
+
+        loss_str = f"Losses/{phase}_{key}_loss"
 
         loss_log_str = os.path.join("Step_Losses", loss_str)
 
@@ -428,13 +483,90 @@ class TrainerPruneRate(Trainer):
             )
 
         self.steps[phase] += 1
+
+        ############## Distillation loss ################
+        loss = loss + self.regression_weight * reg_loss
         
-        ################ add flops loss ################
-        loss = loss + self.flops_scale*loss_flops
         if self.distributed_rank == 0 :
             wandb.log({
-                "loss/total_with_flops": loss.item() if hasattr(loss, 'item') else loss,
+                "loss/total_with_reg": loss.item() if hasattr(loss, 'item') else loss,
             })
+        ###############################################
+
+        ret_tuple = {loss_str: loss}, batch_size, step_losses
+
+        if phase in self.meters and key in self.meters[phase]:
+            meters_dict = self.meters[phase][key]
+            if meters_dict is not None:
+                for _, meter in meters_dict.items():
+                    meter.update(
+                        find_stages=outputs,
+                        find_metadatas=batch.metadata,
+                    )
+        
+        return ret_tuple
+    def _step_diff(
+        self,
+        batch: BatchedVideoDatapoint,
+        model: nn.Module,
+        phase: str,
+    ):
+        
+        outputs, flops = model(batch)
+        targets = batch.masks
+        batch_size = len(batch.img_batch)
+
+        key = batch.dict_key  # key for dataset
+        
+        loss_flops = (flops/1e11 - self.target_flop)**2
+        loss = self.loss[key](outputs, targets)
+        loss_str = f"Losses/{phase}_{key}_loss"
+        
+        # Log to wandb
+        # if self.distributed_rank == 0:
+        #     wandb_log = {
+        #         "step": self.steps[phase],
+        #         "epoch": self.epoch,
+        #         "flops": flops/1e11,
+        #         "flops_loss": self.flops_scale * loss_flops.item(),
+        #         "target_flop": self.target_flop
+        #     }
+            
+        #     # Log individual loss components if loss is a dict
+        #     if isinstance(loss, dict):
+        #         for loss_name, loss_val in loss.items():
+        #             wandb_log[f"loss/{loss_name}"] = loss_val.item() if hasattr(loss_val, 'item') else loss_val
+        #     else:
+        #         wandb_log["loss/total"] = loss.item() if hasattr(loss, 'item') else loss
+            
+        #     wandb.log(wandb_log)
+
+        loss_log_str = os.path.join("Step_Losses", loss_str)
+
+        # loss contains multiple sub-components we wish to log
+        step_losses = {}
+        if isinstance(loss, dict):
+            step_losses.update(
+                {f"Losses/{phase}_{key}_{k}": v for k, v in loss.items()}
+            )
+            loss = self._log_loss_detailed_and_return_core_loss(
+                loss, loss_log_str, self.steps[phase]
+            )
+
+        if self.steps[phase] % self.logging_conf.log_scalar_frequency == 0:
+            self.logger.log(
+                loss_log_str,
+                loss,
+                self.steps[phase],
+            )
+
+        self.steps[phase] += 1
+        ################ add flops loss ################
+        loss = loss + self.flops_scale*loss_flops
+        # if self.distributed_rank == 0 :
+        #     wandb.log({
+        #         "loss/total_with_flops": loss.item() if hasattr(loss, 'item') else loss,
+        #     })
         ################################################
         ret_tuple = {loss_str: loss}, batch_size, step_losses
 
@@ -452,9 +584,14 @@ class TrainerPruneRate(Trainer):
 
         param_allowlist=[]
         for name, param in self.model.named_parameters():
-            if 'selected_probability' in name:
-                param_allowlist.append(name)
-                print(f"Training parameter: {name}")
+            if self.train_method == "diff":
+                if 'selected_probability'  in name:
+                    param_allowlist.append(name)
+                    print(f"Training parameter: {name}")
+            elif self.train_method == "duo":
+                if 'full_attention_heads' in name:
+                    param_allowlist.append(name)
+                    print(f"Training parameter: {name}")
         self.optim = construct_optimizer(
             self.model,
             self.optim_conf.optimizer,
@@ -597,13 +734,15 @@ class TrainerPruneRate(Trainer):
                 if self.gradient_logger is not None:
                     self.gradient_logger(
                         self.model, rank=self.distributed_rank, where=self.where
-                    )
-
-                # Optimizer step: the scaler will make sure gradients are not
+                    )                # Optimizer step: the scaler will make sure gradients are not
                 # applied if the gradients are infinite
-             
+         
                 self.scaler.step(self.optim.optimizer)
                 self.scaler.update()
+                
+                # # Verify gradient calculation after backward pass
+                # if self.train_method == "duo":
+                # self.verify_gradient_calculation(self.steps[phase])
 
                 
 
@@ -618,14 +757,14 @@ class TrainerPruneRate(Trainer):
                 mem_meter.update(reset_peak_usage=True)
 
                 # Log training time to wandb
-                if self.distributed_rank == 0 and data_iter % 10 == 0:
-                    wandb.log({
-                        "time/batch_time": batch_time_meter.val,
-                        "time/data_time": data_time_meter.val,
-                        "time/elapsed_time": self.time_elapsed_meter.val,
-                        "memory/gpu_memory_gb": mem_meter.val,
-                        "step": self.steps[phase]
-                    })
+                # if self.distributed_rank == 0 and data_iter % 10 == 0:
+                #     wandb.log({
+                #         "time/batch_time": batch_time_meter.val,
+                #         "time/data_time": data_time_meter.val,
+                #         "time/elapsed_time": self.time_elapsed_meter.val,
+                #         "memory/gpu_memory_gb": mem_meter.val,
+                #         "step": self.steps[phase]
+                #     })
 
                 if data_iter % self.logging_conf.log_freq == 0:
                     progress.display(data_iter)
@@ -682,8 +821,9 @@ class TrainerPruneRate(Trainer):
 
             # Run val, not running on last epoch since will run after the
             # loop anyway
-            if self.is_intermediate_val_epoch(self.epoch):
-                self.run_val()
+            # if self.is_intermediate_val_epoch(self.epoch):
+            #     if not self.train_method == 'duo':
+            #         self.run_val()
 
             if self.distributed_rank == 0:
                 self.best_meter_values.update(self._get_trainer_state("train"))
