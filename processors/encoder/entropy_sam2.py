@@ -401,20 +401,20 @@ class PositionalTrainingPruneRateSAM2Processor(BaseEntropySAM2Processor):
             # Clean up the original entropy_stats to save memory
             del self.entropy_stats
         else :
-            # layer_heads = self._group_entropy_by_layer()
-            # # Sort each layer's heads by entropy value in descending order
-            # sorted_layer_heads = {}
-            # for layer_name, heads_with_entropy in layer_heads.items():
-            #     sorted_heads = sorted(heads_with_entropy, key=lambda x: x[1])
-            #     sorted_layer_heads[layer_name] = [index for index, _ in sorted_heads]
-            # self.final_entropy_stats = sorted_layer_heads
-            # # Clean up the original entropy_stats to save memory
-            # del self.entropy_stats
+            layer_heads = self._group_entropy_by_layer()
+            # Sort each layer's heads by entropy value in descending order
+            sorted_layer_heads = {}
+            for layer_name, heads_with_entropy in layer_heads.items():
+                sorted_heads = sorted(heads_with_entropy, key=lambda x: x[1])
+                sorted_layer_heads[layer_name] = [index for index, _ in sorted_heads]
+            self.final_entropy_stats = sorted_layer_heads
+            # Clean up the original entropy_stats to save memory
+            del self.entropy_stats
 
 
-            """Process calibration in percent mode."""
-            self.layer_heads = self._group_entropy_by_layer()
-            self.final_entropy_stats = {}
+            # """Process calibration in percent mode."""
+            # self.layer_heads = self._group_entropy_by_layer()
+            # self.final_entropy_stats = {}
             
     def _calculate_num_heads_to_select(self, module ):
         return module.prune_ddp.update_kept_head_number()

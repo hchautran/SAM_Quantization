@@ -4,17 +4,17 @@
 ## run bash for this file
 YAML_FILE="./quant/config/coco/rtn.yaml"
 PYTHON_SCRIPT="small_engine_train_duo.py"
-CUDA_DEVICE=1
+CUDA_DEVICE=5
 MASTER_PORT=29502
-CHECKPOINT_EVALUATION="./pretrained_checkpoint/prune_rate/duo_sam_hq_epoch_torchnograd_distill10_vit_l_reg-weight_5_lr0.05_lr_drop2.pth"
+CHECKPOINT_EVALUATION="./pretrained_checkpoint/prune_rate/diffduo_sam_hq_epoch_torchnograd_distill10_vit_l_reg-weight_5_lr0.05_lr_drop2.pth"
 
 # threshold combinations: "local,global"
 
 # local thresholds
-LOCAL_THRESHOLDS=(0.5  0.0000001 0.00000001 0.000000001)
+LOCAL_THRESHOLDS=( 0.0001 0.00005 0.00004 0.00003 0.00002 0.000018  0.000015 0.000013 0.00001 0.5 0.001 0.000005  )
 
 # global thresholds
-GLOBAL_THRESHOLDS=(  0.8 0.93  0.99977)
+GLOBAL_THRESHOLDS=(   0.999911 )
 # Update YAML (only inside train_prune_rate: block)
 update_yaml_thresholds() {
     local thr_local="$1"
@@ -43,6 +43,7 @@ for thr_global in "${GLOBAL_THRESHOLDS[@]}"; do
             --master_port=$MASTER_PORT \
             "$PYTHON_SCRIPT" --config-file "$YAML_FILE" \
             --checkpoint-evaluation "$CHECKPOINT_EVALUATION" \
-            --num-samples 400
+            --num-samples 400 \
+            --num-calib-samples 16
     done
 done

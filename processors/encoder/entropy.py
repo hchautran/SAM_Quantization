@@ -437,12 +437,12 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
                 else:
                     prune_mask = None
             elif self.model_type =="vit_l":
-                if not any(num in module_name for num in ["5", "11", "17", "23"]):
+                if not any(num in module_name for num in [".5", "11", "17", "23"]):
                     prune_mask = module.processor.final_entropy_stats.get(module_name, None)
                 else:
                     prune_mask = None
             elif self.model_type == "vit_h":
-                if not any(num in module_name for num in ["7", "15", "23", "31"]):
+                if not any(num in module_name for num in [".7", "15", "23", "31"]):
                     prune_mask = module.processor.final_entropy_stats.get(module_name, None)
                 else:
                     prune_mask = None

@@ -32,6 +32,7 @@ from sam2.modeling.backbones.hieradet import MultiScaleAttention
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from prunning_rate.sam2prune import monkey_patch_train_sam2
 from prunning_rate.sam2pruneduo import monkey_patch_train_sam2_duo
+from prunning_rate.sam2prunediff_duo import monkey_patch_train_sam2_diff_duo
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -48,7 +49,7 @@ import json
 import logging
 from eval_sam2_hq44k import SAM2Evaluator, custom_collate_fn
 from data_utils import OnlineDataset
-from .utils import get_default_datasets, get_full_attention_heads, l1_loss
+from .utils import get_default_datasets, get_full_attention_heads, l1_loss, get_head_probability
 from train.utils.dataloader import get_im_gt_name_dict, Resize
 from torchvision import transforms
 
@@ -296,45 +297,97 @@ class TrainerPruneRate(Trainer):
             print("=" * 50)
     def _initialize_wandb(self):
         """Initialize wandb logging"""
-        if self.distributed_rank == 0:  # Only log from main process
-            # Extract model type and learning rate info
-            model_type = self.processor_args.get('model_type', 'unknown')
-            ratio_lr = self.processor_args.get("ratio_to_final_lr", 'unknown')
-            base_lr = self.optim_conf.options.get('lr', [{}])[0].get('scheduler', {}).get('start_value', 'unknown')
-            vision_lr = None
-            if len(self.optim_conf.options.get('lr', [])) > 1:
-                vision_lr = self.optim_conf.options['lr'][1].get('scheduler', {}).get('start_value', 'unknown')
-            
-            # Create project name
-            if self.train_method =="diff":
-                project_name = f"set_0.5_for_pt_box_sam2_prune_{model_type}_base_{base_lr}" + "target_flop-" + str(self.target_flop) + f"_flopscale_{self.flops_scale}" + "number batch" + str(self.data_conf.get('train', {}).get('batch_sizes', [None])[0]) + "ratio_lr" + str(ratio_lr) + "max_epochs-" + str(self.max_epochs) 
-                project=f"SAM2_Pruning_Rate_Training_{model_type}_diff"
-            elif self.train_method =="duo":
-                project_name = f"sam2_duo_{model_type}_base_{base_lr}" + "number batch" + str(self.data_conf.get('train', {}).get('batch_sizes', [None])[0]) + "max_epochs-" + str(self.max_epochs) + "ratio_lr" + str(ratio_lr) + "regression_weight" + str(self.regression_weight)
-                project=f"SAM2_Pruning_Rate_Training_{model_type}_duo"
-            if vision_lr:
-                project_name += f"_vision_{vision_lr}"
-            self.project_name = project_name
-            # wandb.init(
-            #     name = project_name,
-            #     project=project,
-            #     config={
-            #         "model_type": model_type,
-            #         "base_lr": base_lr,
-            #         "vision_lr": vision_lr,
-            #         "target_flop": self.target_flop,
-            #         "flops_scale": self.flops_scale,
-            #         "max_epochs": self.max_epochs,
-            #         "batch_size": self.data_conf.get('train', {}).get('batch_sizes', [None])[0]
-            #     }
-            # )
-            print(f"Wandb initialized with project: {project_name}")
+          # Only log from main process
+        # Extract model type and learning rate info
+        model_type = self.processor_args.get('model_type', 'unknown')
+        ratio_lr = self.processor_args.get("ratio_to_final_lr", 'unknown')
+        base_lr = self.optim_conf.options.get('lr', [{}])[0].get('scheduler', {}).get('start_value', 'unknown')
+        vision_lr = None
+        if len(self.optim_conf.options.get('lr', [])) > 1:
+            vision_lr = self.optim_conf.options['lr'][1].get('scheduler', {}).get('start_value', 'unknown')
+        
+        # Create project name
+        if self.train_method =="diff":
+            project_name = f"set_0.5_for_pt_box_sam2_prune_{model_type}_base_{base_lr}" + "target_flop-" + str(self.target_flop) + f"_flopscale_{self.flops_scale}" + "number batch" + str(self.data_conf.get('train', {}).get('batch_sizes', [None])[0]) + "ratio_lr" + str(ratio_lr) + "max_epochs-" + str(self.max_epochs) 
+            project=f"SAM2_Pruning_Rate_Training_{model_type}_diff"
+        elif self.train_method =="duo":
+            project_name = f"sam2_duo_{model_type}_base_{base_lr}" + "number batch" + str(self.data_conf.get('train', {}).get('batch_sizes', [None])[0]) + "max_epochs-" + str(self.max_epochs) + "ratio_lr" + str(ratio_lr) + "regression_weight" + str(self.regression_weight)
+            project=f"SAM2_Pruning_Rate_Training_{model_type}_duo"
+        elif self.train_method =="diffduo":
+            project_name = f"sam2_diffduo_{model_type}_base_{base_lr}" + "number batch" + str(self.data_conf.get('train', {}).get('batch_sizes', [None])[0]) + "max_epochs-" + str(self.max_epochs) + "ratio_lr" + str(ratio_lr) + "regression_weight" + str(self.regression_weight)
+            project=f"SAM2_Pruning_Rate_Training_{model_type}_diffduo"
+        if vision_lr:
+            project_name += f"_vision_{vision_lr}"
+        self.project_name = project_name
+        if self.distributed_rank == 0:
+            wandb.init(
+                name = self.project_name,
+                project=project,
+                config={
+                    "model_type": model_type,
+                    "base_lr": base_lr,
+                    "vision_lr": vision_lr,
+                    # "target_flop": self.target_flop,
+                    # "flops_scale": self.flops_scale,
+                    # "max_epochs": self.max_epochs,
+                    # "batch_size": self.data_conf.get('train', {}).get('batch_sizes', [None])[0]
+                }
+            )
+            print(f"Wandb initialized with project: {self.project_name}")
     
     def setup_processor(self, args):
         if self.train_method == "diff":
             self.setup_diff_processor(args)
         if self.train_method == "duo":
             self.setup_duo_processor(args)
+        if self.train_method == "diffduo":
+            self.setup_diff_duo_processor(args)
+    def setup_diff_duo_processor(self, args):
+        print(f"\n{'='*80}")
+        print(f"Setting up {args.processor}")
+        print(f"{'='*80}\n")
+        predictor = SAM2ImagePredictor(self.model)
+        # Get processor
+        print(args.processor)
+        processor = get_sam2_processor(args.processor)
+
+        # Create mock args for set_params (if config file not provided)
+        if args.config_file:
+            config = OmegaConf.load(args.config_file)
+        else:
+            # Create minimal config
+            config = OmegaConf.create({
+                'quantization': {
+                    'percent_entropy': args.percent_entropy,
+                    'percent_entropy_global': args.percent_entropy_global,
+                    'high_entropy': args.high_entropy,
+                    'prune_global': args.prune_global,
+                    'threshold': args.threshold,
+                    'train_state': args.train
+                },
+                'batch_size_train': args.batch_size_train,
+                'threshold': args.threshold_duo,
+                'threshold_globle': args.globale_threshold_duo,
+                'model_type': args.model_type,
+                'prune_global': args.prune_global,
+                })
+
+        # Set processor parameters
+        processor.set_params(config)
+        print(f"✓ Processor parameters set")
+        # Calibrate processor
+        print("Calibrating processor...")
+       
+        processor.calibrate(
+            predictor=predictor,
+            modules=MultiScaleAttention,
+            num_samples=args.num_calib_samples
+        )
+        print("✓ Processor calibrated\n")
+
+        monkey_patch_train_sam2_diff_duo(model=self.model, processor=processor, model_type ='hiera_b_plus',args = config, train=args.train)
+
+        
     def setup_duo_processor(self, args):
         if args.config_file:
             config = OmegaConf.load(args.config_file)
@@ -419,7 +472,93 @@ class TrainerPruneRate(Trainer):
             return self._step_diff(batch, model, phase)
         if self.train_method == "duo":
             return self._step_duo(batch, model, phase) 
+        if self.train_method == "diffduo":
+            return self._step_diff_duo(batch, model, phase)
+    def _step_diff_duo(
+        self,
+        batch: BatchedVideoDatapoint,
+        model: nn.Module,
+        phase: str,
+    ): 
+        outputs = model(batch)
+        targets = batch.masks
+        batch_size = len(batch.img_batch)
 
+        key = batch.dict_key  # key for dataset
+
+        ######################### regression loss ##########################
+        head_probability = get_head_probability(model)
+
+        head_probability = [
+            h.to(model.device)
+            for h in head_probability
+        ]
+        reg_loss = l1_loss(torch.cat(head_probability).float())
+        #####################################################################
+
+        loss = self.loss[key](outputs, targets)
+
+        # Log to wandb
+        if self.distributed_rank == 0:
+            wandb_log = {
+                "step": self.steps[phase],
+                "epoch": self.epoch,
+                "loss/reg_loss": reg_loss.item()
+            }
+            
+            # Log individual loss components if loss is a dict
+            if isinstance(loss, dict):
+                for loss_name, loss_val in loss.items():
+                    wandb_log[f"loss/{loss_name}"] = loss_val.item() if hasattr(loss_val, 'item') else loss_val
+            else:
+                wandb_log["loss/total"] = loss.item() if hasattr(loss, 'item') else loss
+            
+            wandb.log(wandb_log)
+
+        loss_str = f"Losses/{phase}_{key}_loss"
+
+        loss_log_str = os.path.join("Step_Losses", loss_str)
+
+        # loss contains multiple sub-components we wish to log
+        step_losses = {}
+        if isinstance(loss, dict):
+            step_losses.update(
+                {f"Losses/{phase}_{key}_{k}": v for k, v in loss.items()}
+            )
+            loss = self._log_loss_detailed_and_return_core_loss(
+                loss, loss_log_str, self.steps[phase]
+            )
+
+        if self.steps[phase] % self.logging_conf.log_scalar_frequency == 0:
+            self.logger.log(
+                loss_log_str,
+                loss,
+                self.steps[phase],
+            )
+
+        self.steps[phase] += 1
+
+        ############## Distillation loss ################
+        loss = loss + self.regression_weight * reg_loss
+        
+        if self.distributed_rank == 0 :
+            wandb.log({
+                "loss/total_with_reg": loss.item() if hasattr(loss, 'item') else loss,
+            })
+        ###############################################
+
+        ret_tuple = {loss_str: loss}, batch_size, step_losses
+
+        if phase in self.meters and key in self.meters[phase]:
+            meters_dict = self.meters[phase][key]
+            if meters_dict is not None:
+                for _, meter in meters_dict.items():
+                    meter.update(
+                        find_stages=outputs,
+                        find_metadatas=batch.metadata,
+                    )
+        
+        return ret_tuple
     def _step_duo(
         self,
         batch: BatchedVideoDatapoint,
@@ -523,23 +662,23 @@ class TrainerPruneRate(Trainer):
         loss_str = f"Losses/{phase}_{key}_loss"
         
         # Log to wandb
-        # if self.distributed_rank == 0:
-        #     wandb_log = {
-        #         "step": self.steps[phase],
-        #         "epoch": self.epoch,
-        #         "flops": flops/1e11,
-        #         "flops_loss": self.flops_scale * loss_flops.item(),
-        #         "target_flop": self.target_flop
-        #     }
+        if self.distributed_rank == 0:
+            wandb_log = {
+                "step": self.steps[phase],
+                "epoch": self.epoch,
+                "flops": flops/1e11,
+                "flops_loss": self.flops_scale * loss_flops.item(),
+                "target_flop": self.target_flop
+            }
             
-        #     # Log individual loss components if loss is a dict
-        #     if isinstance(loss, dict):
-        #         for loss_name, loss_val in loss.items():
-        #             wandb_log[f"loss/{loss_name}"] = loss_val.item() if hasattr(loss_val, 'item') else loss_val
-        #     else:
-        #         wandb_log["loss/total"] = loss.item() if hasattr(loss, 'item') else loss
+            # Log individual loss components if loss is a dict
+            if isinstance(loss, dict):
+                for loss_name, loss_val in loss.items():
+                    wandb_log[f"loss/{loss_name}"] = loss_val.item() if hasattr(loss_val, 'item') else loss_val
+            else:
+                wandb_log["loss/total"] = loss.item() if hasattr(loss, 'item') else loss
             
-        #     wandb.log(wandb_log)
+            wandb.log(wandb_log)
 
         loss_log_str = os.path.join("Step_Losses", loss_str)
 
@@ -563,10 +702,10 @@ class TrainerPruneRate(Trainer):
         self.steps[phase] += 1
         ################ add flops loss ################
         loss = loss + self.flops_scale*loss_flops
-        # if self.distributed_rank == 0 :
-        #     wandb.log({
-        #         "loss/total_with_flops": loss.item() if hasattr(loss, 'item') else loss,
-        #     })
+        if self.distributed_rank == 0 :
+            wandb.log({
+                "loss/total_with_flops": loss.item() if hasattr(loss, 'item') else loss,
+            })
         ################################################
         ret_tuple = {loss_str: loss}, batch_size, step_losses
 
@@ -584,7 +723,7 @@ class TrainerPruneRate(Trainer):
 
         param_allowlist=[]
         for name, param in self.model.named_parameters():
-            if self.train_method == "diff":
+            if self.train_method == "diff" or self.train_method == "diffduo":
                 if 'selected_probability'  in name:
                     param_allowlist.append(name)
                     print(f"Training parameter: {name}")
@@ -757,14 +896,14 @@ class TrainerPruneRate(Trainer):
                 mem_meter.update(reset_peak_usage=True)
 
                 # Log training time to wandb
-                # if self.distributed_rank == 0 and data_iter % 10 == 0:
-                #     wandb.log({
-                #         "time/batch_time": batch_time_meter.val,
-                #         "time/data_time": data_time_meter.val,
-                #         "time/elapsed_time": self.time_elapsed_meter.val,
-                #         "memory/gpu_memory_gb": mem_meter.val,
-                #         "step": self.steps[phase]
-                #     })
+                if self.distributed_rank == 0 and data_iter % 10 == 0:
+                    wandb.log({
+                        "time/batch_time": batch_time_meter.val,
+                        "time/data_time": data_time_meter.val,
+                        "time/elapsed_time": self.time_elapsed_meter.val,
+                        "memory/gpu_memory_gb": mem_meter.val,
+                        "step": self.steps[phase]
+                    })
 
                 if data_iter % self.logging_conf.log_freq == 0:
                     progress.display(data_iter)

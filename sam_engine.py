@@ -87,13 +87,6 @@ def get_default_datasets():
             "im_ext": ".jpg",
             "gt_ext": ".png"
         },
-        {
-            "name": "DIS5K-TR",
-            "im_dir": "./data/DIS5K/DIS-TR/im",
-            "gt_dir": "./data/DIS5K/DIS-TR/gt",
-            "im_ext": ".jpg",
-            "gt_ext": ".png"
-            },
         
     ]
 

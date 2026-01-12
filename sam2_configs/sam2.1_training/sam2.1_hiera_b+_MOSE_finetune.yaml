@@ -8,9 +8,9 @@ scratch:
   max_num_objects: 3
   target_flop: 0.85 # *1e11 _GFLOPS
   phases_per_epoch: 1
-  num_epochs: 5
+  num_epochs: 10
   flops_scale: 1000
-  regression_weight: 2
+  regression_weight: 0.5
   ratio_to_final_lr: 10
   # base_lr: ${times:${subtract:50,${times:${subtract:${times:${scratch.target_flop},100}, 85}, 2}}, 0.01}
   # vision_lr: ${times:${subtract:50,${times:${subtract:${times:${scratch.target_flop},100}, 85}, 2}}, 0.01} #${subtract:0.5,${times:${subtract:${scratch.target_flop}, 85}, 0.02}} 
@@ -74,7 +74,7 @@ vos:
 trainer:
   _target_: prunning_rate.trainer_prune_sam2.TrainerPruneRate
   mode: train_only
-  train_method: diff # duo or diff
+  train_method: diffduo # duo or diff or diffduo
   max_epochs: ${times:${scratch.num_epochs},${scratch.phases_per_epoch}}
   accelerator: cuda
   seed_value: 123
@@ -98,7 +98,7 @@ trainer:
     # this config for duo training
     batch_size_train: ${scratch.train_batch_size}
     threshold_duo: 0.5
-    globale_prune_duo: 0.5
+    globale_threshold_duo: 0.5
 
   model:
     _target_: training.model.sam2.SAM2Train
@@ -217,9 +217,9 @@ trainer:
 
     ####### Training specific params #######
     # box/point input and corrections
-    prob_to_use_pt_input_for_train: 0.7
+    prob_to_use_pt_input_for_train: 0.5
     prob_to_use_pt_input_for_eval: 0.0
-    prob_to_use_box_input_for_train: 0.4  # 0.5*0.5 = 0.25 prob to use box instead of points
+    prob_to_use_box_input_for_train: 0.5  # 0.5*0.5 = 0.25 prob to use box instead of points
     prob_to_use_box_input_for_eval: 0.0
     prob_to_sample_from_gt_for_train: 0.1  # with a small prob, sampling correction points from GT mask instead of prediction errors
     num_frames_to_correct_for_train: 2  # iteratively sample on random 1~2 frames (always include the first frame)

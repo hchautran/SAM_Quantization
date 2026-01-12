@@ -11,6 +11,7 @@ model:
   
   device: cpu
 train_prune_rate:
+  training_method: diffduo # duo or diffduo --> this parameter is used in training duo
   learning_rate: 5e-2
   lr_drop_epoch: 2
   start_epoch: 0
@@ -30,9 +31,9 @@ train_prune_rate:
   # training: False 
   # this parameter for duo
   reg_weight: 5
-  threshold: 0.000000001
-  threshold_globle: 0.99977
-  #0.001 0.1 0.8 0.93  0.99977
+  threshold: 0.000005
+  threshold_globle: 0.999911
+  #0.0045 0.11 0.995 0.999 0.99974
 data:
   config_file: ./GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py
   checkpoint_path: ./ckts/groundingdino_swint_ogc.pth

@@ -36,7 +36,7 @@ import wandb
 from segment_anything import SamPredictor, sam_model_registry
 
 # Local imports
-from sam_engine import Engine, override_args, get_default_datasets
+from sam_engine import Engine, override_args, get_default_datasets,  setup_logger
 from processors import get_encoder_processor, DecoderDoNothingProcessor
 from train.utils.dataloader import get_im_gt_name_dict, Resize
 from data_utils import OnlineDataset
@@ -191,6 +191,11 @@ class BatchEvaluator:
         print(f"Benchmarking batch_size = {batch_size}")
         print(f"{'='*80}\n")
 
+        # Add logging
+        logger.info(f"{'='*80}")
+        logger.info(f"Benchmarking batch_size = {batch_size}")
+        logger.info(f"{'='*80}")
+
         self.reset_memory()
 
         # Track metrics
@@ -199,6 +204,10 @@ class BatchEvaluator:
         ious = []
         boundary_ious = []
         total_images = 0
+
+        # Calculate actual number of samples
+        actual_num_samples = min(len(dataloader.dataset), num_samples)
+        logger.info(f"Processing {actual_num_samples} samples (requested: {num_samples})")
 
         progress_bar = tqdm(
             total=min(len(dataloader), num_samples // batch_size),
@@ -241,6 +250,8 @@ class BatchEvaluator:
 
             except Exception as e:
                 print(f"Error processing batch {batch_idx}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
 
             total_images += current_batch_size
@@ -303,6 +314,20 @@ class BatchEvaluator:
         print(f"  Peak reserved memory: {memory_stats.get('peak_memory_reserved_mb', 0):.2f} MB")
         print(f"  mIoU: {np.mean(ious):.4f} ± {np.std(ious):.4f}")
 
+        # Add logging for all the same information
+        logger.info(f"\n✓ Results for batch_size={batch_size}:")
+        logger.info(f"  Throughput: {throughput:.2f} images/sec")
+        logger.info(f"  Encoder time (batch): {np.mean(encoder_times):.2f} ± {np.std(encoder_times):.2f} ms")
+        logger.info(f"  Encoder time (per image): {np.mean(encoder_times_per_image):.2f} ± {np.std(encoder_times_per_image):.2f} ms")
+        logger.info(f"  Peak memory: {memory_stats.get('peak_memory_allocated_mb', 0):.2f} MB")
+        logger.info(f"  Peak reserved memory: {memory_stats.get('peak_memory_reserved_mb', 0):.2f} MB")
+        logger.info(f"  mIoU: {np.mean(ious):.4f} ± {np.std(ious):.4f}")
+
+        # Log additional details
+        logger.info(f"  Number of images processed: {total_images}")
+        logger.info(f"  Total time: {overall_time:.2f} seconds")
+        logger.info(f"  Boundary IoU: {np.mean(boundary_ious):.4f} ± {np.std(boundary_ious):.4f}")
+
         # Log to wandb
         # wandb.log({
         #     f'batch_{batch_size}/throughput_imgs_per_sec': throughput,
@@ -325,44 +350,67 @@ class BatchEvaluator:
         predictor: SamPredictor,
         batch_sizes: List[int],
         num_samples: int,
-        datasets_config: List[Dict]
+        datasets_config: List[Dict],
+        logger,  # Make sure logger is passed here
     ) -> List[Dict]:
- 
-        all_results = []
 
-        for batch_size in batch_sizes:
-            # Create dataloader with specific batch size
-            valid_im_gt_list = get_im_gt_name_dict([datasets_config[0]], flag="valid")
+        all_results = dict()
 
-            gos_dataset = OnlineDataset(
-                [valid_im_gt_list[0]],
-                transform=transforms.Compose([Resize([1024, 1024])]),
-                eval_ori_resolution=True
-            )
+        for i in range(len(datasets_config)):
+            logger.info(f"{'='*250}")
+            dataname= datasets_config[i]["name"]
+            print(f"Running benchmark for dataset {dataname}...")
+            logger.info(f"Running benchmark for dataset {dataname}...")
 
-            dataloader = DataLoader(
-                gos_dataset,
-                batch_size=batch_size,
-                shuffle=False,
-                drop_last=False,
-                num_workers=2,
-                pin_memory=True,
-                collate_fn=custom_collate_fn
-            )
+            all_results[datasets_config[i]["name"]] = []
+            
+            # Log dataset information
+            logger.info(f"Dataset: {datasets_config[i]['name']}")
+            logger.info(f"Dataset path: {datasets_config[i]['im_dir']}")
+            
+            for batch_size in batch_sizes:
+                # Create dataloader with specific batch size
+                valid_im_gt_list = get_im_gt_name_dict([datasets_config[i]], flag="valid")
 
-            # Run benchmark
-            result = self.benchmark_batch_size(
-                predictor=predictor,
-                batch_size=batch_size,
-                dataloader=dataloader,
-                num_samples=num_samples
-            )
+                gos_dataset = OnlineDataset(
+                    [valid_im_gt_list[0]],
+                    transform=transforms.Compose([Resize([1024, 1024])]),
+                    eval_ori_resolution=True
+                )
 
-            all_results.append(result)
+                dataloader = DataLoader(
+                    gos_dataset,
+                    batch_size=batch_size,
+                    shuffle=False,
+                    drop_last=False,
+                    num_workers=2,
+                    pin_memory=True,
+                    collate_fn=custom_collate_fn
+                )
 
-            # Cleanup
-            del dataloader, gos_dataset
-            self.reset_memory()
+                # Log batch size before processing
+                logger.info(f"Processing batch_size={batch_size} for dataset {datasets_config[i]['name']}")
+                
+                # Run benchmark
+                result = self.benchmark_batch_size(
+                    predictor=predictor,
+                    batch_size=batch_size,
+                    dataloader=dataloader,
+                    num_samples=num_samples
+                )
+
+                all_results[datasets_config[i]["name"]].append(result)
+
+                # Log completion of batch size
+                logger.info(f"Completed benchmark for batch_size={batch_size}, dataset={datasets_config[i]['name']}")
+                logger.info(f"  - Images processed: {result['num_images']}")
+                logger.info(f"  - Throughput: {result['throughput_imgs_per_sec']:.2f} images/sec")
+                logger.info(f"  - mIoU: {result['miou']:.4f}")
+                logger.info(f"  - Peak memory: {result.get('peak_memory_allocated_mb', 0):.2f} MB")
+
+                # Cleanup
+                del dataloader, gos_dataset
+                self.reset_memory()
 
         return all_results
 
@@ -413,6 +461,16 @@ def run_single_benchmark(args):
         quantize_decoder=args.quantize_decoder
     )
 
+
+    if args.processor == "BASE":
+        states = "Baseline"
+    elif args.processor == "POSITIONAL_PRUNE":
+        states = "Manual_positional_prune"
+    elif args.processor == "POSITIONAL_QUANT":
+        states = "Manual_positional_quant"
+    
+    logger = setup_logger("./logs", states)  # Use the states variable to create logger
+
     # Get processor
     enc_processor = get_encoder_processor(args.processor)
 
@@ -458,8 +516,27 @@ def run_single_benchmark(args):
         predictor=predictor,
         batch_sizes=args.batch_sizes,
         num_samples=args.num_samples,
-        datasets_config=datasets
+        datasets_config=datasets,
+        logger=logger
     )
+
+    # In the main run_single_benchmark function, after printing the summary, add:
+    logger.info(f"\n{'='*80}")
+    logger.info("BENCHMARK COMPLETE")
+    logger.info(f"{'='*80}")
+    logger.info(f"Results saved to: {csv_filename}")
+
+    logger.info("Summary:")
+    for result in results:
+        logger.info(f"Batch Size {result['batch_size']}: "
+                    f"Throughput={result['throughput_imgs_per_sec']:.2f} imgs/sec, "
+                    f"Encoder/img={result['encoder_per_image_mean_ms']:.2f}ms, "
+                    f"Memory={result.get('peak_memory_allocated_mb', 0):.0f}MB, "
+                    f"mIoU={result['miou']:.4f}")
+
+    best_throughput_result = max(results, key=lambda x: x['throughput_imgs_per_sec'])
+    logger.info(f"Best throughput: {best_throughput_result['throughput_imgs_per_sec']:.2f} imgs/sec "
+                f"at batch_size={best_throughput_result['batch_size']}")
 
     # Save results
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')

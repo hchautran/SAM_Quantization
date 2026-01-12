@@ -28,6 +28,7 @@ import train.utils.misc as misc
 
 from utils.utils import show_mask_image
 from prunning_rate.sampruneduo import image_encoder_monkey_patch_train_duo
+from prunning_rate.samprunediff_duo import image_encoder_monkey_patch_train_duo_diff
 from utils.quant_utils import (
     quantize_activation_per_token_absmax,
 )
@@ -40,6 +41,13 @@ from train.segment_anything_training.modeling.image_encoder import Attention as 
 from sam_engine import override_args, Evaluator , create_calib_dataloaders, setup_logger, get_default_datasets, plot_output
 import wandb
 
+from processors import (
+    get_encoder_processor,
+    EncoderRecenterAttentionProcessor,
+    EncoderAttentionProcessor,
+    DecoderDoNothingProcessor,
+)
+
 
 def get_full_attention_heads(model):
     full_attention_heads = []
@@ -50,6 +58,16 @@ def get_full_attention_heads(model):
             continue
         full_attention_heads.append(module.full_attention_heads)
     return full_attention_heads
+
+def get_head_probability(model):
+    full_head_probability=[]
+    for layer in model.module.image_encoder.blocks:
+        module = layer.attn
+        if not hasattr(module, "prune_ddp"):
+            continue
+        head_probability = module.prune_ddp.get_head_probability_diff_duo()
+        full_head_probability.append(head_probability)
+    return full_head_probability
 def print_model_structure(model, title="Model Structure"):
     print(f"\n{title}")
     print("=" * len(title))
@@ -123,35 +141,27 @@ def distill_loss_masks_bce(
     return distill_loss
 
 
-def print_pruned_heads_info(model, threshold, global_threshold,logger, model_type="vit_b"):
+def print_pruned_heads_info(model, threshold, global_threshold, logger, model_type="vit_b"):
     """
     Print information about pruned heads and compute average pruned heads
     for local-threshold layers vs global-threshold layers.
 
-    Args:
-        model: The SAM model with DuoPruneRateAttention modules (may be DDP-wrapped).
-        threshold: Local threshold for most layers.
-        global_threshold: Global threshold for selected "sensitive" layers.
-        model_type: "vit_b", "vit_l", or "vit_h".
-
-    Returns:
-        (total_pruned_heads, total_heads, stats_dict)
-        where stats_dict contains local/global layer counts and averages.
+    Supports two cases:
+    (A) Existing: module.full_attention_heads (values in [0,1])  -> pruned if < threshold
+    (B) New Duo: module.prune_ddp.get_head_probability_diff_duo() -> kept if > threshold
+             so pruned if <= threshold (or < threshold, choose one consistently)
     """
-    # Handle DDP wrapper if present
-    # Handle DDP wrapper if present
+
     actual_model = model.module if hasattr(model, "module") else model
 
     total_pruned_heads = 0
     total_heads = 0
 
-    # Local vs Global counters
     local_pruned_heads = 0
     global_pruned_heads = 0
     local_layers = 0
     global_layers = 0
 
-    # For average prune percentage
     local_prune_percent_sum = 0.0
     global_prune_percent_sum = 0.0
 
@@ -161,17 +171,16 @@ def print_pruned_heads_info(model, threshold, global_threshold,logger, model_typ
     print(f"Model type: {model_type}")
     print(f"{'='*60}\n")
 
-    
     for name, module in actual_model.named_modules():
-        if not hasattr(module, "full_attention_heads"):
-            continue
-        print(module.full_attention_heads)
-        head_weights = module.full_attention_heads.clamp(0, 1)
-        num_total = int(head_weights.numel())
-        alpha_value =head_weights.detach().cpu().numpy()
 
-        # Decide threshold type
-        use_global = False
+        # --- NEW: decide if this module is eligible by either mechanism ---
+        has_full = hasattr(module, "full_attention_heads")
+        has_duo  = hasattr(module, "prune_ddp") and hasattr(module.prune_ddp, "get_head_probability_diff_duo")
+
+        if not (has_full or has_duo):
+            continue
+
+        # Decide threshold type (same as before)
         if model_type == "vit_b":
             use_global = any(tok in name for tok in [".2", ".5", "8", "11"])
         elif model_type == "vit_l":
@@ -181,31 +190,63 @@ def print_pruned_heads_info(model, threshold, global_threshold,logger, model_typ
         else:
             raise ValueError(f"Unsupported model_type: {model_type}")
 
-        # Apply threshold
+        thr_used = global_threshold if use_global else threshold
+        tag = "GLOBAL" if use_global else "LOCAL"
+
+        # =========================
+        # (A) OLD PATH: full_attention_heads
+        # =========================
+        if has_full and not has_duo:
+            head_weights = module.full_attention_heads.clamp(0, 1)
+            num_total = int(head_weights.numel())
+
+            # old meaning: pruned if head weight is below threshold
+            pruned_mask = head_weights < thr_used
+
+        # =========================
+        # (B) NEW PATH: Duo probability diff
+        # =========================
+        else:
+            # new meaning: kept if prob_diff > threshold -> pruned otherwise
+            single_mask_probability = module.prune_ddp.get_head_probability_diff_duo()
+
+            # make sure it's a tensor on CPU-friendly dtype
+            if not torch.is_tensor(single_mask_probability):
+                single_mask_probability = torch.tensor(single_mask_probability)
+
+            single_mask_probability = single_mask_probability.detach()
+            # logger.info(f"single_mask_probability: {single_mask_probability} ")
+            num_total = int(single_mask_probability.numel())
+
+            # kept mask is > thr, so pruned is NOT kept
+            kept_mask = single_mask_probability > thr_used
+            pruned_mask = ~kept_mask
+
+        # layer counters
         if use_global:
-            pruned_mask = head_weights < global_threshold
             global_layers += 1
         else:
-            pruned_mask = head_weights < threshold
             local_layers += 1
 
-        pruned_indices = torch.where(pruned_mask)[0].detach().cpu().numpy()
-        num_pruned = int(len(pruned_indices))
+        # compute stats
+        # NOTE: pruned_mask is expected to be 1D; if not, flatten safely
+        pruned_mask_flat = pruned_mask.reshape(-1)
+
+        num_pruned = int(pruned_mask_flat.sum().item())
         prune_percent = num_pruned / num_total if num_total > 0 else 0.0
 
-        # Print per-module info
-        if num_pruned > 0:
-            tag = "GLOBAL" if use_global else "LOCAL"
-            thr_used = global_threshold if use_global else threshold
-            print(f"Module: {name}  [{tag} thr={thr_used}]")
-            print(f"  Total heads: {num_total}")
-            print(f"  Pruned heads: {num_pruned} ({prune_percent*100:.1f}%)")
-            
-            logger.info(f"Module: {name}  [{tag} thr={thr_used}]")
-            logger.info(f"  Total heads: {num_total}")
-            logger.info(f"  Pruned heads: {num_pruned} ({prune_percent*100:.1f}%)")
+        # indices (optional)
+        pruned_indices = torch.where(pruned_mask_flat)[0].detach().cpu().numpy()
 
-            print()
+        # Print per-module info
+        print(f"Module: {name}  [{tag} thr={thr_used}]")
+        print(f"  Total heads: {num_total}")
+        print(f"  Pruned heads: {num_pruned} ({prune_percent*100:.1f}%)")
+        print()
+
+        logger.info(f"Module: {name}  [{tag} thr={thr_used}]")
+        logger.info(f"  Total heads: {num_total}")
+        logger.info(f"  Pruned heads: {num_pruned} ({prune_percent*100:.1f}%)")
 
         # Accumulate totals
         total_pruned_heads += num_pruned
@@ -217,7 +258,7 @@ def print_pruned_heads_info(model, threshold, global_threshold,logger, model_typ
         else:
             local_pruned_heads += num_pruned
             local_prune_percent_sum += prune_percent
-    exit()
+
     # Compute averages
     avg_local_heads = local_pruned_heads / local_layers if local_layers > 0 else 0.0
     avg_global_heads = global_pruned_heads / global_layers if global_layers > 0 else 0.0
@@ -467,15 +508,25 @@ def train(args, sam_hq, optimizer, train_dataloaders, valid_dataloaders, lr_sche
                 masks_hq = masks_hq.float()
             masks_hq = masks_hq.unsqueeze(1)  # [batch, 1, H, W]
             
-            full_attention_heads = get_full_attention_heads(sam_hq)
+            if args.training_method == "duo":
+                full_attention_heads = get_full_attention_heads(sam_hq)
 
-            full_attention_heads = [
-                h.to(sam_hq.device)
-                for h in full_attention_heads
-            ]
+                full_attention_heads = [
+                    h.to(sam_hq.device)
+                    for h in full_attention_heads
+                ]
 
-            reg_loss = l1_loss(torch.cat(full_attention_heads).float())
-            
+                reg_loss = l1_loss(torch.cat(full_attention_heads).float())
+
+            elif args.training_method == "diffduo" :
+                head_probability = get_head_probability(sam_hq)
+                head_probability = [
+                    h.to(sam_hq.device)
+                    for h in head_probability
+                ]
+                reg_loss = l1_loss(torch.cat(head_probability).float())
+          
+
             ############################################################
             ### Calculate loss of pruning output from the lable
 
@@ -505,7 +556,6 @@ def train(args, sam_hq, optimizer, train_dataloaders, valid_dataloaders, lr_sche
                 masks_hq_prune,
                 T=2.0,
             )
-
             loss = loss_distill  +  args.reg_weight * reg_loss
             # wandb.log({
             #     "train_step/loss": loss.item(),
@@ -552,7 +602,11 @@ def train(args, sam_hq, optimizer, train_dataloaders, valid_dataloaders, lr_sche
         sam_hq.train()  
 
         if epoch % args.model_save_fre == 0 and epoch != 0:
-            model_name = "/duo_sam_hq_epoch_torchnograd_distill" + str(epoch) + "_" + str(args_yaml.model.model_type) + "_reg-weight_" + str(args.reg_weight) + "_lr" + str(learning_rate) + "_lr_drop" + str(lr_drop) + ".pth"
+            if args.training_method == "diffduo" :
+                model_name = "/diffduo_sam_hq_epoch_torchnograd_distill" + str(epoch) + "_" + str(args_yaml.model.model_type) + "_reg-weight_" + str(args.reg_weight) + "_lr" + str(learning_rate) + "_lr_drop" + str(lr_drop) + ".pth"
+            elif  args.training_method == "duo" :
+                model_name = "/duo_sam_hq_epoch_torchnograd_distill" + str(epoch) + "_" + str(args_yaml.model.model_type) + "_reg-weight_" + str(args.reg_weight) + "_lr" + str(learning_rate) + "_lr_drop" + str(lr_drop) + ".pth"
+
             print('come here save at', args.output + model_name)
             misc.save_on_master(sam_hq.module.state_dict(), args.output + model_name)
     
@@ -610,15 +664,23 @@ class training_engine:
        
        
         
-    def monkey_patch(self, predictor, encoder_config=None,train=False):
-        print("Applying encoder quantization...")
-        image_encoder_monkey_patch_train_duo(
-            predictor.model,
-            processor=None,
-            args_yaml= self.args,
-            train = train,
-        )
-   
+    def monkey_patch(self, predictor,processor, encoder_config=None,train=False):
+        if self.args.train_prune_rate.training_method == "duo":
+            print("Applying encoder quantization...")
+            image_encoder_monkey_patch_train_duo(
+                predictor.model,
+                processor=processor,
+                args_yaml= self.args,
+                train = train,
+            )
+        elif self.args.train_prune_rate.training_method == "diffduo":
+            image_encoder_monkey_patch_train_duo_diff(
+                predictor.model,
+                processor=processor,
+                args_yaml= self.args,
+                train = train,
+            )
+
     def eval_hq44k(self, predictor: SamPredictor, num_samples=None, checkpoint_evaluation=None, plot_figures=False):
         """Delegate to evaluator component"""
         
@@ -633,6 +695,8 @@ class training_engine:
             states='distillation'+self.args.model.model_type
         else:
             states='torch_nograd'
+        if self.args.train_prune_rate.training_method == "diffduo":
+            states = "diffduo" + states
         logger = setup_logger("./logs", states)
 
         threshold = self.args.train_prune_rate.threshold
@@ -666,7 +730,7 @@ class training_engine:
         # Collect ONLY selected_probability parameters for the optimizer
         trainable_params = []
         for name, param in sam.named_parameters():
-            if 'full_attention_heads' in name:
+            if 'full_attention_heads' in name or "selected_probability" in name:
                 trainable_params.append(param)
                 print(f"Training parameter: {name}")
             # DON'T set requires_grad=False for other parameters!
@@ -730,9 +794,18 @@ if __name__ == '__main__':
     engine = training_engine('hq44k',args.train, args_yaml)
     
     
-   
+    processor = None
+    if args_yaml.train_prune_rate.training_method == "diffduo":
+        processor = get_encoder_processor("PRUNE_RATE")
+        processor.calibrate(
+            predictor=predictor,
+            modules=( EncoderAttentionTraining, EncoderAttention, EncoderSamAttention),
+            num_samples=args.num_calib_samples
+        )
+
+
     encoder_config =  None
-    engine.monkey_patch(predictor, encoder_config, args.train)
+    engine.monkey_patch(predictor,processor, encoder_config, args.train)
     # print_model_structure(predictor.model,"Final structure ")
     # exit()
     if args.train:

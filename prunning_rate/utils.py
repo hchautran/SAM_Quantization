@@ -57,7 +57,15 @@ def l1_loss(x):
     numel = x.numel()
     l1 = x.abs().sum()
     return l1 / numel
-
+def get_head_probability(model):
+    full_head_probability=[]
+    for layer in model.module.image_encoder.trunk.blocks:
+        module = layer.attn
+        if not hasattr(module, "prune_ddp"):
+            continue
+        head_probability = module.prune_ddp.get_head_probability_diff_duo()
+        full_head_probability.append(head_probability)
+    return full_head_probability
 
 class DuoDistillationLoss(nn.Module):
     def __init__(

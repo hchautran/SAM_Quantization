@@ -41,7 +41,8 @@ import train.utils.misc as misc
 from train.train import compute_iou, compute_boundary_iou
 from prunning_rate.sam2prune import monkey_patch_train_sam2
 from prunning_rate.sam2pruneduo import monkey_patch_train_sam2_duo, DuoPruneRateMultiScaleAttention
-from utils.eval_sam2_utils import analyze_model_head_pruning_and_flops, print_duo_head_pruning_info, print_head_pruning_and_flops_info
+from prunning_rate.sam2prunediff_duo import monkey_patch_train_sam2_diff_duo
+from utils.eval_sam2_utils import analyze_model_head_pruning_and_flops, print_duo_head_pruning_info, print_head_pruning_and_flops_info, print_diff_duo_head_prunning_info
 from sam_engine import  setup_logger
 
 # SAM2 entropy processors
@@ -87,6 +88,7 @@ SAM2_PROCESSOR_REGISTRY = {
     "POSITIONAL_QUANT_SAM2": PositionalQuantSAM2Processor,
     "TRAINING_PRUNE_RATE_SAM2": PositionalTrainingPruneRateSAM2Processor,
     "TRAINING_PRUNE_RATE_SAM2_DUO": None,  # No processor needed for duo training
+    "TRAINING_PRUNE_RATE_SAM2_DIFF_DUO": PositionalTrainingPruneRateSAM2Processor,
     "BASE": BaseEntropySAM2Processor,
 }
 
@@ -328,7 +330,7 @@ def main():
 
     # Entropy processor parameters
     parser.add_argument('--processor', type=str, default=None,
-                       choices=[None, "BASE", 'POSITIONAL_PRUNE_SAM2', 'HEAD_PRUNE_SAM2', 'POSITIONAL_QUANT_SAM2',"TRAINING_PRUNE_RATE_SAM2", "TRAINING_PRUNE_RATE_SAM2_DUO"],
+                       choices=[None, "BASE", 'POSITIONAL_PRUNE_SAM2', 'HEAD_PRUNE_SAM2', 'POSITIONAL_QUANT_SAM2',"TRAINING_PRUNE_RATE_SAM2", "TRAINING_PRUNE_RATE_SAM2_DUO","TRAINING_PRUNE_RATE_SAM2_DIFF_DUO"],
                        help='SAM2 entropy processor to use (None = no processing)')
     parser.add_argument('--config-file', type=str, default=None,
                        help='Path to config YAML file for processor parameters')
@@ -397,7 +399,6 @@ def main():
         print(f"\n{'='*80}")
         print(f"Setting up {args.processor}")
         print(f"{'='*80}\n")
-
         if args.processor == 'TRAINING_PRUNE_RATE_SAM2_DUO':
             # Special handling for DUO processor - no calibration needed, just monkey patch
             print("Setting up DUO processor (no calibration required)...")
@@ -448,8 +449,11 @@ def main():
                         "percent_400heads" : args.percent_400heads,
                         "percent_2048heads" : args.percent_2048heads,
                         "percent_4096heads" : args.percent_4096heads,
-                        
-                    }
+                    },
+                'threshold': args.threshold,
+                'threshold_globle': args.threshold_global,
+                'model_type': 'hiera_b_plus',
+                'prune_global': args.prune_global,
                 })
             
             # Set processor parameters
@@ -476,6 +480,14 @@ def main():
                     model=sam2_model,
                     processor=processor,
                     model_type ='hiera_b_plus',
+                )
+            elif args.processor == 'TRAINING_PRUNE_RATE_SAM2_DIFF_DUO':
+                monkey_patch_train_sam2_diff_duo(
+                    model=sam2_model,
+                    processor=processor,
+                    model_type ='hiera_b_plus',
+                    args =config,
+                    
                 )
             else :
                 sam2_image_encoder_monkey_patch(
@@ -504,7 +516,7 @@ def main():
     if args.processor == 'TRAINING_PRUNE_RATE_SAM2':
         state="Diff_prune_rate"
         logger = setup_logger(log_path,state)
-        ckpt_prune_rate_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_ckts/sam2_ckts/set_0.5_for_pt_box_sam2_prune_hiera_b_plus_base_0.1target_flop-1.05_flopscale_1000number batch2ratio_lr10max_epochs-5_vision_0.1.pt"
+        ckpt_prune_rate_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_ckts/sam2_ckts/set_0.5_for_pt_box_sam2_prune_hiera_b_plus_base_0.2target_flop-0.9_flopscale_1000number batch2ratio_lr10max_epochs-5_vision_0.2.pt"
         logger.info(ckpt_prune_rate_path)
         sam2_model.load_state_dict(torch.load(ckpt_prune_rate_path)['model'])
         print_head_pruning_and_flops_info(predictor.model, logger)
@@ -513,7 +525,12 @@ def main():
         ckpt_prune_rate_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_ckts/sam2_ckts/sam2_duo_hiera_b_plus_base_0.05number batch2max_epochs-10ratio_lr10regression_weight0.5_vision_0.05.pt"
         sam2_model.load_state_dict(torch.load(ckpt_prune_rate_path)['model'])
         print_duo_head_pruning_info(predictor.model)
-
+    elif args.processor == 'TRAINING_PRUNE_RATE_SAM2_DIFF_DUO':
+        state="Diff_duo_sam2_prune_rate"
+        logger = setup_logger(log_path,state)
+        ckpt_prune_rate_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_ckts/sam2_ckts/sam2_diffduo_hiera_b_plus_base_0.1number batch2max_epochs-10ratio_lr10regression_weight0.5_vision_0.1.pt"
+        sam2_model.load_state_dict(torch.load(ckpt_prune_rate_path)['model'])
+        print_diff_duo_head_prunning_info(predictor.model, logger)
     if not isinstance(args.batch_size, list):
         args.batch_size = [args.batch_size]
     

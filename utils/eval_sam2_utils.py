@@ -384,3 +384,144 @@ def print_duo_head_pruning_info(predictor_model):
     print(f"Total heads to keep: {total_heads_across_all - total_pruned_across_all} ({1-overall_prune_rate:.2%})")
 
     print("===========================\n")
+
+def print_diff_duo_head_prunning_info(model, logger):
+    """
+    Print detailed head pruning information for DuoDiffPruneRateMultiScaleAttention modules.
+    Shows which heads will be pruned based on probability values and thresholds.
+
+    Args:
+        model: The SAM model with DuoDiffPruneRateMultiScaleAttention modules
+        logger: Logger instance for logging information
+    """
+    def pl(msg):
+        print(msg)
+        logger.info(msg)
+
+    pl("\n=== Diff Duo Training Head Pruning Analysis ===")
+
+    layer_info = []
+    group_stats = {}
+
+    # Iterate through all modules to find DuoDiffPruneRateMultiScaleAttention
+    for name, module in model.named_modules():
+        if hasattr(module, 'prune_ddp') and hasattr(module.prune_ddp, 'get_head_probability_diff_duo'):
+            # Get probability values from DiffPruneRate
+            try:
+                probability_values = module.prune_ddp.get_head_probability_diff_duo()
+                total_heads = len(probability_values)
+            except Exception as e:
+                pl(f"Warning: Layer {name} could not get probability values: {e}")
+                continue
+
+            # Determine threshold based on layer type and global/local logic
+            is_global_layer = any(num in name for num in [".12.", ".20.", ".16."])
+            
+            if hasattr(module, 'model_type') and module.model_type == "hiera_b_plus":
+                if is_global_layer:
+                    threshold = getattr(module, 'global_threshold', 0.5)
+                    threshold_type = "global"
+                else:
+                    threshold = getattr(module, 'threshold', 0.5)
+                    threshold_type = "local"
+            else:
+                threshold = getattr(module, 'threshold', 0.5)
+                threshold_type = "local"
+
+            # Create pruning mask based on threshold
+            # In diff duo logic, heads with probability > threshold are kept
+            keep_mask = probability_values > threshold
+            heads_to_keep = keep_mask.sum().item()
+            heads_to_prune = total_heads - heads_to_keep
+
+            # Store layer information
+            layer_info.append({
+                'name': name,
+                'total_heads': total_heads,
+                'heads_to_prune': heads_to_prune,
+                'heads_to_keep': heads_to_keep,
+                'threshold': threshold,
+                'threshold_type': threshold_type,
+                'is_global_layer': is_global_layer,
+                'probability_values': probability_values.detach().cpu().numpy(),
+            })
+
+            # Update group statistics
+            if total_heads not in group_stats:
+                group_stats[total_heads] = {
+                    'layer_count': 0,
+                    'total_heads_to_prune': 0,
+                    'total_heads_to_keep': 0,
+                    'total_heads': 0,
+                    'global_layers': 0,
+                    'local_layers': 0
+                }
+
+            stats = group_stats[total_heads]
+            stats['layer_count'] += 1
+            stats['total_heads_to_prune'] += heads_to_prune
+            stats['total_heads_to_keep'] += heads_to_keep
+            stats['total_heads'] += total_heads
+            
+            if is_global_layer:
+                stats['global_layers'] += 1
+            else:
+                stats['local_layers'] += 1
+
+    if not layer_info:
+        pl("No DuoDiffPruneRateMultiScaleAttention modules found with probability values")
+        return
+
+    # Print per-layer information
+    pl("--- Per Layer Details ---")
+    for layer in layer_info:
+        pl(f"\nLayer {layer['name']}:")
+        pl(f"  Total heads: {layer['total_heads']}")
+        pl(f"  Heads to prune: {layer['heads_to_prune']} ({layer['heads_to_prune']/layer['total_heads']:.2%})")
+        pl(f"  Heads to keep: {layer['heads_to_keep']} ({layer['heads_to_keep']/layer['total_heads']:.2%})")
+        pl(f"  Threshold: {layer['threshold']:.4f} ({layer['threshold_type']})")
+    
+
+        # Show probability values for first few heads as example
+        prob_sample = layer['probability_values'][:min(10, len(layer['probability_values']))]
+        pl(f"  Probability values (first {len(prob_sample)}): {prob_sample}")
+
+    # Print group statistics divided by head count (8, 200, 400, 2048, 4096)
+    pl("\n--- Group Statistics by Head Count ---")
+
+    # Define the standard head groups
+    standard_heads = [8, 200, 400, 2048, 4096]
+
+    for head_count in standard_heads:
+        if head_count in group_stats:
+            stats = group_stats[head_count]
+            avg_pruned_per_layer = stats['total_heads_to_prune'] / stats['layer_count'] if stats['layer_count'] > 0 else 0
+            avg_kept_per_layer = stats['total_heads_to_keep'] / stats['layer_count'] if stats['layer_count'] > 0 else 0
+            prune_rate = stats['total_heads_to_prune'] / stats['total_heads'] if stats['total_heads'] > 0 else 0
+
+            pl(f"\n=== Group: {head_count} heads ===")
+            pl(f"  Number of layers: {stats['layer_count']}")
+        
+            pl(f"  Total heads: {stats['total_heads']}")
+            pl(f"  Total heads to prune: {stats['total_heads_to_prune']} ({prune_rate:.2%})")
+            pl(f"  Total heads to keep: {stats['total_heads_to_keep']} ({1-prune_rate:.2%})")
+            pl(f"  Average per layer - Prune: {avg_pruned_per_layer:.1f}, Keep: {avg_kept_per_layer:.1f}")
+
+    
+
+    # Print overall statistics
+    total_pruned_across_all = sum(stats['total_heads_to_prune'] for stats in group_stats.values())
+    total_heads_across_all = sum(stats['total_heads'] for stats in group_stats.values())
+    total_global_layers = sum(stats['global_layers'] for stats in group_stats.values())
+    total_local_layers = sum(stats['local_layers'] for stats in group_stats.values())
+    overall_prune_rate = total_pruned_across_all / total_heads_across_all if total_heads_across_all > 0 else 0
+
+    pl(f"\n--- Overall Statistics ---")
+    pl(f"Total layers: {total_global_layers + total_local_layers}")
+    pl(f"  - Global threshold layers (.12., .20., .16.): {total_global_layers}")
+    pl(f"  - Local threshold layers: {total_local_layers}")
+    pl(f"Total heads across all layers: {total_heads_across_all}")
+    pl(f"Total heads to prune: {total_pruned_across_all} ({overall_prune_rate:.2%})")
+    pl(f"Total heads to keep: {total_heads_across_all - total_pruned_across_all} ({1-overall_prune_rate:.2%})")
+
+    pl("===========================\n")
