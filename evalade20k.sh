@@ -1,6 +1,6 @@
 export PYTHONPATH=$PYTHONPATH:$(pwd)/sam-hq:$(pwd)/Semantic-Segmentation-Anything/scripts
 
-CUDA_VISIBLE_DEVICES=2 python benchmark_inference_ade20k.py \
+CUDA_VISIBLE_DEVICES=5 python benchmark_inference_ade20k.py \
     --config-file quant/config/coco/rtn.yaml \
     --quantize-encoder \
     --n-bits 16 \

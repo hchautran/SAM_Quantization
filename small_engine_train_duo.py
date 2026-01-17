@@ -655,7 +655,7 @@ class training_engine:
                 training= True
             )
         else:
-            valid_im_gt_list = get_im_gt_name_dict([datasets[0]], flag="valid")
+            valid_im_gt_list = get_im_gt_name_dict(datasets[2:], flag="valid")
             self.dataloaders, self.datasets = create_calib_dataloaders(
                 valid_im_gt_list,
                 my_transforms=[Resize([1024, 1024])],
@@ -719,8 +719,9 @@ class training_engine:
         
         results= self.evaluator.eval_hq44k(predictor, num_samples, plot_figures)
         logger.info(f"{'='*120}")
-        logger.info('val_iou_0: {}'.format(results['val_iou_0']))
-        logger.info('val_boundary_iou_0: {}'.format(results['val_boundary_iou_0']))
+        keys_list = list(results.keys()) 
+        for i in range(len(results)):
+            logger.info(f'{keys_list[i]}: {results[keys_list[i]]}')
         logger.info(f"{'='*250}")
         return results
     def train_model(self, predictor, args_yaml):

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Tuple
 from segment_anything.modeling import Sam
 import torch
 import torch.nn as nn
+from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
 
 
 class DuoDiffPruneRateAttention(EncoderAttention):
@@ -29,6 +30,7 @@ class DuoDiffPruneRateAttention(EncoderAttention):
         self.global_threshold = args.train_prune_rate.threshold_globle
         self.model_type = args.model.model_type
         self.prune_global = args.quantization.prune_global
+        self.positional_quant = args.quantization.positional_quant
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         if self.training:
@@ -145,23 +147,48 @@ class DuoDiffPruneRateAttention(EncoderAttention):
                 non_prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)[:kept_head_num]
                 prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)[kept_head_num:]
                 
-             
+            
             if prune_mask is not None:
-                q_attn = q[non_prune_mask, :, :]
-                k_attn = k[non_prune_mask, :, :]
-                v_attn = v[non_prune_mask, :, :]
-                v_pruned = v[prune_mask, :, :]
+                if not self.positional_quant :
+                    q_attn = q[non_prune_mask, :, :]
+                    k_attn = k[non_prune_mask, :, :]
+                    v_attn = v[non_prune_mask, :, :]
+                    v_pruned = v[prune_mask, :, :]
 
-                attn = (q_attn * self.scale) @ k_attn.transpose(-2, -1)
-                if self.use_rel_pos:
-                    attn = add_decomposed_rel_pos(attn, q_attn, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
-                
-                attn= attn.softmax(dim=-1)
-                x_attn = attn @ v_attn
-                x = torch.zeros_like(v).to(v.device)
-                x[prune_mask] = v_pruned.mean(-2, keepdim=True).expand(-1, x_attn.shape[-2], x_attn.shape[-1])
-                x[non_prune_mask] = x_attn
-                
+                    attn = (q_attn * self.scale) @ k_attn.transpose(-2, -1)
+                    if self.use_rel_pos:
+                        attn = add_decomposed_rel_pos(attn, q_attn, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+                    
+                    attn= attn.softmax(dim=-1)
+                    x_attn = attn @ v_attn
+                    x = torch.zeros_like(v).to(v.device)
+                    x[prune_mask] = v_pruned.mean(-2, keepdim=True).expand(-1, x_attn.shape[-2], x_attn.shape[-1])
+                    x[non_prune_mask] = x_attn
+                else:
+                    if self.model_type == "vit_b" :  
+                        n_bits = 4 if not single_mask_probability.shape[0] == 300 else 2
+                    elif  self.model_type == "vit_l" :
+                        n_bits = 4 if not single_mask_probability.shape[0] == 400 else 2
+                    elif  self.model_type == "vit_h" :
+                        n_bits = 4 if not single_mask_probability.shape[0] == 400 else 2
+                    q_attn = q[non_prune_mask, :, :]
+                    k_attn = k[non_prune_mask, :, :]
+                    v_attn = v[non_prune_mask, :, :]
+                    q_prune = quantize_activation_per_token_absmax(q[prune_mask, :, :], n_bits)
+                    k_prune = quantize_activation_per_token_absmax(k[prune_mask, :, :], n_bits)
+                    v_prune = quantize_activation_per_channel_absmax(v[prune_mask, :, :], n_bits)
+
+                    attn = (q_attn * self.scale) @ k_attn.transpose(-2, -1)
+                    if self.use_rel_pos:
+                        attn = add_decomposed_rel_pos(attn, q_attn, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+                    
+                    attn= attn.softmax(dim=-1)
+                    x_attn = attn @ v_attn
+                    x = torch.zeros_like(v).to(v.device)
+                    attn_prune = ((q_prune * self.scale) @ k_prune.transpose(-2, -1)).softmax(dim=-1)
+                    x_prune = quantize_activation_per_token_absmax(attn_prune, n_bits) @ v_prune
+                    x[prune_mask] = x_prune
+                    x[non_prune_mask] = x_attn
             else:
                 attn = (q * self.scale) @ k.transpose(-2, -1)
                 if self.use_rel_pos:

@@ -8,8 +8,14 @@ from tqdm.auto import tqdm
 from segment_anything.modeling.image_encoder import add_decomposed_rel_pos
 from ..base import AttentionProcessor, setup_logger
 from torch.distributions import Exponential
-# from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
+from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
 
+from omegaconf import OmegaConf
+
+def exists(cfg, key):
+    if OmegaConf.is_config(cfg):
+        return OmegaConf.select(cfg, key, default=None) is not None
+    return hasattr(cfg, key)
 
 class BaseEntropyProcessor(AttentionProcessor):
     """
@@ -35,11 +41,35 @@ class BaseEntropyProcessor(AttentionProcessor):
     def set_params(self, args):
         """Set parameters from args. Override in subclasses for custom params."""
         self.threshold = 5.0
-        self.percent = args.percent
-        self.percent_global = args.percent_global
-        self.prunehighentropy = args.high_entropy
-        self.prune_global = args.prune_global
-        self.model_type = args.model_type
+        self.percent = (
+            args.percent
+            if exists(args, "percent")
+            else args.quantization.percent_entropy
+        )
+
+        self.global_percent = (
+            args.percent_global
+            if exists(args, "percent_global")
+            else args.quantization.percent_entropy_global
+        )
+
+        self.prunehighentropy = (
+            args.high_entropy
+            if exists(args, "high_entropy")
+            else args.quantization.high_entropy
+        )
+
+        self.prune_global = (
+            args.prune_global
+            if exists(args, "prune_global")
+            else args.quantization.prune_global
+        )
+
+        self.model_type = (
+            args.model_type
+            if exists(args, "model_type")
+            else args.model.model_type
+        )
     def calculate_entropy(self, attn_head):
         """
         Calculate entropy for attention head.
@@ -370,7 +400,6 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
 
     def set_params(self, args):
         super().set_params(args)
-        self.global_percent = args.percent_global
 
     def calculate_entropy(self, attn_head):
         """Calculate mean entropy of the entire attention matrix."""
@@ -625,7 +654,6 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
 
     def set_params(self, args):
         super().set_params(args)
-        self.global_percent = args.percent_global
 
     def calculate_entropy(self, attn_head):
         """Calculate global entropy of the entire attention matrix."""
@@ -641,15 +669,15 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
         """Override to support global vs local percentages."""
         if self.model_type == "vit_b" :
             if total_heads < 300:
-                return max(1, int(total_heads * self.global_percent))
+                return int(total_heads * self.global_percent)
         elif self.model_type == "vit_l" :
             if total_heads < 400:
-                return max(1, int(total_heads * self.global_percent))
+                return int(total_heads * self.global_percent)
         elif self.model_type == "vit_h" :
             if total_heads < 400:
-                return max(1, int(total_heads * self.global_percent))
+                return int(total_heads * self.global_percent)
         
-        return max(1, int(total_heads * self.percent))
+        return int(total_heads * self.percent)
 
     def _create_attention_hook(self, name):
         """Create attention hook for positional quantization."""
@@ -689,7 +717,7 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
 
                 num_heads_to_select = self._calculate_num_heads_to_select(len(heads_with_entropy))
                 selected_heads = heads_with_entropy[:num_heads_to_select]
-
+                print("remain heads/ total heads:", len(heads_with_entropy)-num_heads_to_select, "/", len(heads_with_entropy))
                 # mask = torch.isin(
                 #     torch.arange(len(heads_with_entropy)),
                 #     torch.tensor([head_idx for head_idx, _ in selected_heads])

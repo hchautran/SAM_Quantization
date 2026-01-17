@@ -2,10 +2,10 @@ model:
   name: sam
   use_hq: True
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
-  # model_type: 'vit_b'
-  # hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
-  model_type: vit_l 
-  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  model_type: 'vit_b'
+  hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
+  # model_type: vit_l 
+  # hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
   # model_type: 'vit_h'
   # hq_checkpoint: './ckts/sam_hq_vit_h.pth'
   
@@ -31,8 +31,8 @@ train_prune_rate:
   # training: False 
   # this parameter for duo
   reg_weight: 5
-  threshold: 0.000005
-  threshold_globle: 0.999911
+  threshold: 0.000045
+  threshold_globle: 0.99982
   #0.0045 0.11 0.995 0.999 0.99974
 data:
   config_file: ./GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py
@@ -70,8 +70,9 @@ quantization:
   channel: False
   percent: 100
   centerQ: False
-  percent_entropy: 0.85
-  percent_entropy_global: 0.75
+  percent_entropy: 0.7
+  percent_entropy_global: 0.5
   high_entropy: True 
   prune_global: True 
   train_rate_prune: True
+  positional_quant: True

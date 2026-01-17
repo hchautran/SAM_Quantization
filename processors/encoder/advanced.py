@@ -10,7 +10,7 @@ from RTN_quantization.per_tensor_channel_group import (
     quantize_activation_low_high_density_activation_index,
 )
 # from utils.utils import quantize_activation_per_highblock_abmax, find_O_qha
-from quarot import rotation_utils
+# from quarot import rotation_utils
 
 
 class EncoderAttentionProcessorCompensate(EncoderAttentionProcessorSmoothMeanQ):

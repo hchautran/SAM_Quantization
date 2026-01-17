@@ -173,7 +173,8 @@ class BatchEvaluator:
         predictor: SamPredictor,
         batch_size: int,
         dataloader: DataLoader,
-        num_samples: int
+        num_samples: int,
+        logger
     ) -> Dict:
         """
         Benchmark a specific batch size.
@@ -356,7 +357,7 @@ class BatchEvaluator:
 
         all_results = dict()
 
-        for i in range(len(datasets_config)):
+        for i in range(2,len(datasets_config)):
             logger.info(f"{'='*250}")
             dataname= datasets_config[i]["name"]
             print(f"Running benchmark for dataset {dataname}...")
@@ -396,7 +397,8 @@ class BatchEvaluator:
                     predictor=predictor,
                     batch_size=batch_size,
                     dataloader=dataloader,
-                    num_samples=num_samples
+                    num_samples=num_samples,
+                    logger = logger
                 )
 
                 all_results[datasets_config[i]["name"]].append(result)

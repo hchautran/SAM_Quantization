@@ -11,10 +11,10 @@ CHECKPOINT_EVALUATION="./pretrained_checkpoint/prune_rate/diffduo_sam_hq_epoch_t
 # threshold combinations: "local,global"
 
 # local thresholds
-LOCAL_THRESHOLDS=( 0.0001 0.00005 0.00004 0.00003 0.00002 0.000018  0.000015 0.000013 0.00001 0.5 0.001 0.000005  )
+LOCAL_THRESHOLDS=(  0.000045  )
 
 # global thresholds
-GLOBAL_THRESHOLDS=(   0.999911 )
+GLOBAL_THRESHOLDS=(   0.99982 )
 # Update YAML (only inside train_prune_rate: block)
 update_yaml_thresholds() {
     local thr_local="$1"
@@ -43,7 +43,7 @@ for thr_global in "${GLOBAL_THRESHOLDS[@]}"; do
             --master_port=$MASTER_PORT \
             "$PYTHON_SCRIPT" --config-file "$YAML_FILE" \
             --checkpoint-evaluation "$CHECKPOINT_EVALUATION" \
-            --num-samples 400 \
+            --num-samples 5000 \
             --num-calib-samples 16
     done
 done

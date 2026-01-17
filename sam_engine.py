@@ -67,9 +67,9 @@ def get_default_datasets():
     """Get default dataset configurations"""
     return [
         {
-            "name": "DIS5K-VD",
-            "im_dir": "./data/DIS5K/DIS-VD/im",
-            "gt_dir": "./data/DIS5K/DIS-VD/gt",
+            "name": "ThinObject5k-TR",
+            "im_dir": "./data/thin_object_detection/ThinObject5K/images_train",
+            "gt_dir": "./data/thin_object_detection/ThinObject5K/masks_train",
             "im_ext": ".jpg",
             "gt_ext": ".png"
         },
@@ -81,13 +81,33 @@ def get_default_datasets():
             "gt_ext": ".png"
         },
         {
-            "name": "ThinObject5k-TR",
-            "im_dir": "./data/thin_object_detection/ThinObject5K/images_train",
-            "gt_dir": "./data/thin_object_detection/ThinObject5K/masks_train",
+            "name": "DIS5K-VD",
+            "im_dir": "./data/DIS5K/DIS-VD/im",
+            "gt_dir": "./data/DIS5K/DIS-VD/gt",
             "im_ext": ".jpg",
             "gt_ext": ".png"
         },
-        
+        {
+            "name": "COIFT",
+            "im_dir": "./data/thin_object_detection/COIFT/images",
+            "gt_dir": "./data/thin_object_detection/COIFT/masks",
+            "im_ext": ".jpg",
+            "gt_ext": ".png"
+        },
+        {
+            "name": "HRSOD",
+            "im_dir": "./data/thin_object_detection/HRSOD/images",
+            "gt_dir": "./data/thin_object_detection/HRSOD/masks",
+            "im_ext": ".jpg",
+            "gt_ext": ".png"
+        },
+        {
+            "name": "ThinObject5k-TE",
+            "im_dir": "./data/thin_object_detection/ThinObject5K/images_test",
+            "gt_dir": "./data/thin_object_detection/ThinObject5K/masks_test",
+            "im_ext": ".jpg",
+            "gt_ext": ".png"
+        }
     ]
 
 

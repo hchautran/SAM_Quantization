@@ -590,7 +590,49 @@ class PositionalTrainingPruneRateSAM2Processor(BaseEntropySAM2Processor):
         x = module.proj(x)
         flops = 0
         return x ,flops
-    
+
+
+class PositionalPruneSAM2ProcessorMemoryAttention(BaseEntropySAM2Processor):
+    def __init__(self, strategy_name: str = 'PositionalPruneSAM2ProcessorMemoryAttention'):
+        super().__init__(strategy_name)
+    def set_params(self, args):
+        super().set_params(args)
+    def _create_attention_hook(self, name):
+        """Create attention hook for positional pruning in SAM2."""
+        def attention_hook(module, input, output):
+            
+            x = input[0] if isinstance(input, tuple) else input
+            B, H, W, C = x.shape
+
+            # Compute QKV using SAM2 format
+            # Use -1 to automatically compute head_dim from dim_out
+            qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2,0,3,1,4)
+            q, k, v = torch.unbind(qkv, 0)
+
+            # Compute attention manually (SDPA is black box)
+            if module.q_pool:
+                q = do_pool(q.permute(0,2,1,3).reshape(B, H, W, -1), module.q_pool)
+                H, W = q.shape[1:3]  # downsampled shape
+                q = q.permute(0,2,1,3).reshape(B,  module.num_heads, H*W, -1)
+
+
+            scale = (q.size(-1)) ** -0.5
+            attn = (q * scale) @ k.transpose(-2, -1)
+            attn = attn.softmax(dim=-1)
+
+            # attn shape: (B, num_heads, H*W, H*W)
+            B_batch, n_heads, N, _ = attn.shape
+
+            # Iterate over batch and heads to compute entropy
+            attn_entropy = self.calculate_entropy(attn).reshape(-1,1)
+            for b in range(B_batch):
+                for head_idx in range(n_heads):
+                    global_head_idx = b * n_heads + head_idx
+                    
+                    head_key = f"{name}.head_{global_head_idx}"
+                    self.entropy_stats[head_key].append(attn_entropy[global_head_idx].item())
+
+        return attention_hook
 class PositionalPruneSAM2Processor(BaseEntropySAM2Processor):
     """
     SAM2 version of PositionalPruneProcessor.
@@ -607,7 +649,7 @@ class PositionalPruneSAM2Processor(BaseEntropySAM2Processor):
     Adapted for SAM2's MultiScaleAttention architecture.
     """
 
-    def __init__(self, strategy_name: str = 'PositionalHeadPruneSAM2Processor'):
+    def __init__(self, strategy_name: str = 'PositionalPruneSAM2Processor'):
         super().__init__(strategy_name)
         self.global_percent = 0.5
 

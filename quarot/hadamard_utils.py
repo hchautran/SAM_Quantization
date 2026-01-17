@@ -1,5 +1,5 @@
 import torch, math
-import fast_hadamard_transform
+# import fast_hadamard_transform
 
 # Adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
 
