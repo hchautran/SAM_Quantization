@@ -163,6 +163,9 @@ def train(args, sam_hq, target_flop ,optimizer, train_dataloaders, valid_dataloa
         print("epoch:   ", epoch, "  learning rate:  ", optimizer.param_groups[0]["lr"])
         metric_logger = misc.MetricLogger(delimiter="  ")
         train_dataloaders.batch_sampler.sampler.set_epoch(epoch)
+        
+        # Start timing for this epoch
+        epoch_start_time = time.time()
 
         for data in metric_logger.log_every(train_dataloaders, 1000):
             inputs, labels = data['image'], data['label']
@@ -483,7 +486,7 @@ def print_head_pruning_and_flops_info(predictor_model):
 class training_engine:
     """Main engine class for orchestrating quantization experiments"""
 
-    def __init__(self, strategy_name: str, mode_train: bool, datasets=None) -> None:
+    def __init__(self, strategy_name: str, mode_train: bool,args, datasets=None) -> None:
         
         # if misc.is_main_process():
         #     print("chiiii")
@@ -491,6 +494,7 @@ class training_engine:
         self.stat = {}
         self.strategy_name = strategy_name
         self.train = mode_train
+        self.args= args
         # Setup datasets
         if datasets is None:
             datasets = get_default_datasets()
@@ -505,19 +509,19 @@ class training_engine:
             self.valid_dataloaders, self.vals_datasets = create_dataloaders(
                 valid_im_gt_list,
                 my_transforms=[Resize([1024, 1024])],
-                batch_size=1,
+                batch_size=self.args.train_prune_rate.batch_size_valid,
                 training= False
             )
             
             train_im_gt_list = get_im_gt_name_dict([datasets[0]], flag="train")
             for dataset_dict in train_im_gt_list:
-                dataset_dict["im_path"] = dataset_dict["im_path"][:-10]
-                dataset_dict["gt_path"] = dataset_dict["gt_path"][:-10]
+                dataset_dict["im_path"] = dataset_dict["im_path"][:500]
+                dataset_dict["gt_path"] = dataset_dict["gt_path"][:500]
             self.train_dataloaders, self.train_datasets = create_dataloaders(
                 train_im_gt_list,
                 my_transforms=[RandomHFlip(),
                                LargeScaleJitter()],
-                batch_size=2,
+                batch_size=self.args.train_prune_rate.batch_size_train,
                 training= True
             )
         else:
@@ -563,7 +567,7 @@ class training_engine:
         return encoder_processor
     def eval_hq44k(self, predictor: SamPredictor, num_samples=None, plot_figures=False):
         """Delegate to evaluator component"""
-        checkpoint_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/pretrained_checkpoint/prune_rate/sam_hq_epoch_40vit_btarget_flopsize_2.3_ratio_5.pth"
+        checkpoint_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/pretrained_checkpoint/prune_rate/sam_hq_epoch_40_vit_b_target_flopsize_1.5_ratio_5startlr0.1_lr_drop_10.pth"
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
         predictor.model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
@@ -613,6 +617,32 @@ class training_engine:
             ratio= 0.025 
         wandb.init(project="sam-hq-training", name=f"experiment_{self.strategy_name}-model_{args_yaml.model.model_type}-targetflop_{target_flop}-ratio_{ratio}-lr-{args_yaml.train_prune_rate.learning_rate}-lr_drop_{args_yaml.train_prune_rate.lr_drop_epoch}")
         train(args_yaml.train_prune_rate, sam, target_flop, optimizer, self.train_dataloaders, self.valid_dataloaders, lr_scheduler, ratio)
+    def train_model_minimize_entropy_scores(self, predictor, args_yaml):
+        sam = predictor.model
+        
+        print("--- define optimizer ---")
+        # Collect ONLY selected_probability parameters for the optimizer
+        trainable_params = []
+        for name, param in sam.named_parameters():
+            if 'selected_probability' in name:
+                trainable_params.append(param)
+                print(f"Training parameter: {name}")
+            # DON'T set requires_grad=False for other parameters!
+        
+        if not trainable_params:
+            raise ValueError("No selected_probability parameters found!")
+        
+        # Create optimizer with ONLY selected_probability parameters
+        # This ensures only these parameters get updated, even though others have gradients
+        optimizer = optim.Adam(trainable_params, 
+                            lr=args_yaml.train_prune_rate.learning_rate, 
+                            betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
+        
+        lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args_yaml.train_prune_rate.lr_drop_epoch)
+        lr_scheduler.last_epoch = args_yaml.train_prune_rate.start_epoch
+        
+        wandb.init(project="sam-hq-training", name=f"experiment_{self.strategy_name}-model_{args_yaml.model.model_type}-lr-{args_yaml.train_prune_rate.learning_rate}-lr_drop_{args_yaml.train_prune_rate.lr_drop_epoch}")
+        train(args_yaml.train_prune_rate, sam, target_flop, optimizer, self.train_dataloaders, self.valid_dataloaders, lr_scheduler, ratio)
 if __name__ == '__main__':
     
     
@@ -654,7 +684,7 @@ if __name__ == '__main__':
     predictor = SamPredictor(sam)
 
     # Initialize engine
-    engine = training_engine('hq44k',args.train)
+    engine = training_engine('hq44k',args.train, args_yaml)
     print(args.processor)
     enc_processor = get_encoder_processor(args.processor)
     encoder_processor = engine.setup_and_calibrate_processors(

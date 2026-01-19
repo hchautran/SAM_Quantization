@@ -37,7 +37,7 @@ class DiffPruneRate(nn.Module):
         self.kept_head_candidate =  nn.Parameter(torch.arange(head_number, 0,-1*granularity).float())
         self.kept_head_candidate.requires_grad_(False)
         self.selected_probability =  nn.Parameter(torch.zeros_like(self.kept_head_candidate))   
-        # self.selected_probability.data[0] = 10.0  # initialize to keep all heads
+        self.selected_probability.data[0] = 10.0  # initialize to keep all heads
         self.selected_probability.requires_grad_(True)
         
         # the learn target, which can be directly applied to the off-the-shlef pre-trained models
@@ -71,4 +71,21 @@ class DiffPruneRate(nn.Module):
             head_mask[int(self.kept_head_number):] = 0
         head_mask = head_mask - head_probability.detach() + head_probability   # ste trick, similar to gumbel softmax
         return head_mask
-    
+    def get_head_probability_diff_duo(self):
+        """
+        Duo-safe head probability:
+        - Never relies on self.selected_probability_softmax (can be stale CPU tensor)
+        - Always builds everything from self.selected_probability (correct device + grad)
+        """
+        prob = torch.softmax(self.selected_probability, dim=-1)  # stays on param device
+        device = self.selected_probability.device
+
+        head_probability = torch.zeros(self.head_number, device=device)
+
+        # kept_head_candidate is requires_grad=False, but is a Parameter -> same device after .to()
+        # Use .item() to avoid device issues when converting to int
+        for kept_head_number, p in zip(self.kept_head_candidate, prob):
+            k = int(kept_head_number.item())
+            head_probability[:k] += p
+
+        return head_probability

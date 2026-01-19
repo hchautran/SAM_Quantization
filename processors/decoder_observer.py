@@ -29,9 +29,9 @@ from .encoder import (
 )
 from RTN_quantization import per_tensor_channel_group
 from RTN_quantization.utils import QuantizationConfig, replace_linear_with_quantized
-from utils.utils import inference_image
+# from utils.utils import inference_image
 
-from utils.utils import quantize_activation_per_highblock_abmax, find_O_qha
+# from utils.utils import quantize_activation_per_highblock_abmax, find_O_qha
 
 # ============================================================================
 # Utility Functions

@@ -15,7 +15,7 @@ from segment_anything.modeling.image_encoder import (
     ImageEncoderViT,
 )
 from RTN_quantization.utils import replace_linear_with_quantized, QuantizationConfig
-from utils.utils import inference_image, to_numpy
+# from utils.utils import inference_image, to_numpy
 from segment_anything.modeling.image_encoder import (
     window_partition,
     window_unpartition,

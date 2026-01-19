@@ -10,6 +10,7 @@ from .encoder import (
     EncoderAttentionProcessor,
     EncoderRecenterAttentionProcessor,
     PositionalPruneProcessor,
+    EntropyValueCheck,
     PruneRateProcessor,
     HeadPruneProcessor,
     PositionalQuantProcessor,
@@ -77,6 +78,7 @@ register_encoder_processor("BASE")(EncoderAttentionProcessor)
 register_encoder_processor("RECENTER")(EncoderRecenterAttentionProcessor)
 register_encoder_processor("POSITIONAL_PRUNE")(PositionalPruneProcessor)
 register_encoder_processor("PRUNE_RATE")(PruneRateProcessor)
+register_encoder_processor("ENTROPY_VALUE_CHECK")(EntropyValueCheck)
 register_encoder_processor("HEAD_PRUNE")(HeadPruneProcessor)
 register_encoder_processor("POSITIONAL_QUANT")(PositionalQuantProcessor)
 register_encoder_processor("SMOOTH_MEAN_Q")(EncoderAttentionProcessorSmoothMeanQ)
@@ -98,6 +100,7 @@ __all__ = [
     "HeadPruneProcessor",
     "PositionalPruneProcessor",
     "PruneRateProcessor",
+    "EntropyValueCheck",
     "PositionalQuantProcessor",
     "EncoderAttentionProcessorSmoothMeanQ",
     "EncoderAttentionProcessorCompensate",

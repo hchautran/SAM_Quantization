@@ -31,7 +31,7 @@ from processors import (
     EncoderAttentionProcessor,
     DecoderDoNothingProcessor,
 )
-# from profiler import InferenceProfiler, compare_inference_speed
+
 from segment_anything.modeling.image_encoder import Attention as EncoderSamAttention
 from segment_anything.modeling.transformer import  Attention as  DecoderAttention
 from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining

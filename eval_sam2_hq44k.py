@@ -20,6 +20,7 @@ Usage:
 """
 
 import os
+import gc
 import argparse
 import numpy as np
 import torch
@@ -39,6 +40,10 @@ from data_utils import OnlineDataset
 import train.utils.misc as misc
 from train.train import compute_iou, compute_boundary_iou
 from prunning_rate.sam2prune import monkey_patch_train_sam2
+from prunning_rate.sam2pruneduo import monkey_patch_train_sam2_duo, DuoPruneRateMultiScaleAttention
+from prunning_rate.sam2prunediff_duo import monkey_patch_train_sam2_diff_duo
+from utils.eval_sam2_utils import analyze_model_head_pruning_and_flops, print_duo_head_pruning_info, print_head_pruning_and_flops_info, print_diff_duo_head_prunning_info
+from sam_engine import  setup_logger
 
 # SAM2 entropy processors
 from processors.encoder.entropy_sam2 import (
@@ -46,10 +51,9 @@ from processors.encoder.entropy_sam2 import (
     HeadPruneSAM2Processor,
     PositionalQuantSAM2Processor,
     PositionalTrainingPruneRateSAM2Processor,
+    BaseEntropySAM2Processor,
 )
 from processors.sam2_observer import sam2_image_encoder_monkey_patch
-from prunning_rate.sam2prune import DiffPruneRateMultiScaleAttention
-
 def custom_collate_fn(batch):
     """
     Custom collate function to handle variable-sized ori_im fields.
@@ -83,9 +87,18 @@ SAM2_PROCESSOR_REGISTRY = {
     "HEAD_PRUNE_SAM2": HeadPruneSAM2Processor,
     "POSITIONAL_QUANT_SAM2": PositionalQuantSAM2Processor,
     "TRAINING_PRUNE_RATE_SAM2": PositionalTrainingPruneRateSAM2Processor,
+    "TRAINING_PRUNE_RATE_SAM2_DUO": None,  # No processor needed for duo training
+    "TRAINING_PRUNE_RATE_SAM2_DIFF_DUO": PositionalTrainingPruneRateSAM2Processor,
+    "BASE": BaseEntropySAM2Processor,
 }
 
-
+def reset_memory():
+        """Reset CUDA memory"""
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
 def get_sam2_processor(name: str, **kwargs):
     """Get SAM2 processor by name."""
     if name not in SAM2_PROCESSOR_REGISTRY:
@@ -93,233 +106,7 @@ def get_sam2_processor(name: str, **kwargs):
         raise ValueError(f"Unknown SAM2 processor '{name}'. Available: {available}")
     return SAM2_PROCESSOR_REGISTRY[name](**kwargs)
 
-def analyze_model_head_pruning_and_flops(predictor_model, manual_local_heads=None, manual_global_heads=None):
-    """
-    Analyze head pruning ratios and calculate FLOPs for attention operations.
-    
-    Args:
-        predictor_model: The SAM model with DiffPruneRateMultiScaleAttention modules
-        manual_local_heads: Number of local heads to keep manually (optional)
-        manual_global_heads: Number of global heads to keep manually (optional)
-        
-    Returns:
-        dict: Dictionary containing head statistics and FLOPs information
-    """
-    # Initialize counters
-    total_kept_heads_local = 0
-    total_original_heads_local = 0
-    total_kept_heads_global = 0
-    total_original_heads_global = 0
-    
-    # For FLOPs calculation
-    total_flops = 0
-    total_baseline_flops = 0  # FLOPs without pruning
-    
-    nu_layer_global = 0
-    nu_layer_local = 0
-    
-    # Collect per-layer information
-    layer_info = []
-    
-    # Iterate through all modules to find DiffPruneRateMultiScaleAttention modules
-    for name, module in predictor_model.named_modules():
-        if isinstance(module, DiffPruneRateMultiScaleAttention):
-            # Get head information
-            kept_heads = int(module.prune_ddp.update_kept_head_number())
-            original_heads = module.prune_ddp.head_number
-            
-            # Determine if this is a local or global attention
-            if original_heads ==8:
-                is_local = False
-            else:
-                is_local = True
-            
-            # For FLOPs calculation, we assume fixed dimensions
-           
-            if original_heads == 8:
-                batch_factor =1 
-            elif original_heads %100 ==0:
-                batch_factor =25
-            else:
-                batch_factor =1024
-            
 
-            if is_local: 
-                nu_layer_local += 1
-            else: 
-                nu_layer_global += 1
-            # Using typical attention map dimensions for SAM
-            H, W = (14, 14) if is_local else (64, 64)
-            
-            # Calculate FLOPs for this attention module
-            qkv_flops = module._calculate_qkv_flops(batch_factor, H, W)
-            proj_flops = module._calculate_projection_flops(batch_factor, H, W)
-            attention_flops = module._calculate_attention_flops(H, W, kept_heads)
-            baseline_attention_flops = module._calculate_attention_flops(H, W, original_heads)
-            
-            module_flops = qkv_flops + proj_flops + attention_flops
-            module_baseline_flops = qkv_flops + proj_flops + baseline_attention_flops
-            
-            # Update totals
-            total_flops += module_flops
-            total_baseline_flops += module_baseline_flops
-            
-            # Store layer information
-            layer_info.append({
-                'name': name,
-                'kept_heads': kept_heads,
-                'original_heads': original_heads,
-                'is_local': is_local,
-                'flops': module_flops,
-                'baseline_flops': module_baseline_flops
-            })
-            
-            # Update head counters
-            if is_local:
-                total_kept_heads_local += kept_heads
-                total_original_heads_local += original_heads
-            else:
-                total_kept_heads_global += kept_heads
-                total_original_heads_global += original_heads
-    
-    # Calculate overall ratios
-    overall_local_ratio = total_kept_heads_local / total_original_heads_local if total_original_heads_local > 0 else 0
-    overall_global_ratio = total_kept_heads_global / total_original_heads_global if total_original_heads_global > 0 else 0
-    flops_reduction = (1 - total_flops / total_baseline_flops) * 100 if total_baseline_flops > 0 else 0
-    
-    # Calculate manual heads if not provided
-    avg_local_heads = total_kept_heads_local / nu_layer_local if nu_layer_local > 0 else 0
-    avg_global_heads = total_kept_heads_global / nu_layer_global if nu_layer_global > 0 else 0
-    
-    # Round up to nearest integer (ceiling)
-    if manual_local_heads is None:
-        manual_local_heads = int(avg_local_heads + 0.999)  # Equivalent to math.ceil()
-    if manual_global_heads is None:
-        manual_global_heads = int(avg_global_heads + 0.999)  # Equivalent to math.ceil()
-    
-    # Recalculate manual FLOPs
-    total_manual_flops = 0
-    layer_idx_local = 0
-    layer_idx_global = 0
-    
-    for name, module in predictor_model.named_modules():
-        if isinstance(module, DiffPruneRateMultiScaleAttention):
-            original_heads = module.prune_ddp.head_number
-            if original_heads ==8:
-                is_local = False
-            else:
-                is_local = True
-            
-            if original_heads == 8:
-                batch_factor =1 
-            elif original_heads %100 ==0:
-                batch_factor =25
-            else:
-                batch_factor =1024
-            H, W = (14, 14) if is_local else (64, 64)
-            
-            # Calculate FLOPs with manual head counts
-            qkv_flops = module._calculate_qkv_flops(batch_factor, H, W)
-            proj_flops = module._calculate_projection_flops(batch_factor, H, W)
-            
-            # Use manual head counts
-            if is_local:
-                manual_attention_flops = module._calculate_attention_flops(H, W, manual_local_heads)
-                layer_idx_local += 1
-            else:
-                manual_attention_flops = module._calculate_attention_flops(H, W, manual_global_heads)
-                layer_idx_global += 1
-            
-            manual_module_flops = qkv_flops + proj_flops + manual_attention_flops
-            total_manual_flops += manual_module_flops
-    
-    # Calculate manual FLOPs reduction
-    manual_flops_reduction = None
-    if total_baseline_flops > 0:
-        manual_flops_reduction = (1 - total_manual_flops / total_baseline_flops) * 100
-    
-    return {
-        'layer_info': layer_info,
-        'head_stats': {
-            'local_kept': total_kept_heads_local,
-            'local_total': total_original_heads_local,
-            'local_ratio': overall_local_ratio,
-            'global_kept': total_kept_heads_global,
-            'global_total': total_original_heads_global,
-            'global_ratio': overall_global_ratio
-        },
-        'flops_stats': {
-            'total_flops': total_flops,
-            'baseline_flops': total_baseline_flops,
-            'reduction_percent': flops_reduction,
-            'manual_flops': total_manual_flops,
-            'manual_reduction_percent': manual_flops_reduction
-        },
-        'manual_settings': {
-            'manual_local_heads': manual_local_heads,
-            'manual_global_heads': manual_global_heads,
-            'avg_local_heads': avg_local_heads,
-            'avg_global_heads': avg_global_heads
-        }
-    }
-def print_head_pruning_and_flops_info(predictor_model):
-    """
-    Print detailed head pruning ratios and FLOPs information for the model.
-    
-    Args:
-        predictor_model: The SAM model with DiffPruneRateMultiScaleAttention modules
-    """
-    print("\n=== Head Pruning Ratios ===")
-    
-    # Analyze model
-    analysis = analyze_model_head_pruning_and_flops(predictor_model)
-    
-    # Print per-layer information
-    for layer in analysis['layer_info']:
-        layer_type = "Local" if layer['is_local'] else "Global"
-        print(f"Layer {layer['name']}: {layer['kept_heads']}/{layer['original_heads']} ({layer_type})")
-    
-    # Print overall head statistics
-    head_stats = analysis['head_stats']
-    if head_stats['local_total'] > 0:
-        print(f"\nOverall Local: {head_stats['local_kept']}/{head_stats['local_total']} heads kept "
-              f"({head_stats['local_ratio']:.2%}) pruning rate: {1-head_stats['local_ratio']:.2%}")
-    
-    if head_stats['global_total'] > 0:
-        print(f"\nOverall Global: {head_stats['global_kept']}/{head_stats['global_total']} heads kept "
-              f"({head_stats['global_ratio']:.2%}) pruning rate: {1-head_stats['global_ratio']:.2%}")
-    
-    # Print manual head information
-    manual_settings = analysis['manual_settings']
-    print(f"\nManual Settings:")
-    print(f"Average Local Heads: {manual_settings['avg_local_heads']:.2f}")
-    print(f"Average Global Heads: {manual_settings['avg_global_heads']:.2f}")
-    print(f"Manual Local Heads (rounded): {manual_settings['manual_local_heads']}")
-    print(f"Manual Global Heads (rounded): {manual_settings['manual_global_heads']}")
-    
-    # Print FLOPs information
-    flops_stats = analysis['flops_stats']
-    print("\n=== FLOPs Information (Attention Only) ===")
-    print(f"Total Attention FLOPs (with parameter pruning): {flops_stats['total_flops']/1e9:.2f} GFLOPs")
-    print(f"Total Attention FLOPs (baseline): {flops_stats['baseline_flops']/1e9:.2f} GFLOPs")
-    if flops_stats['reduction_percent'] >= 0:
-        print(f"Attention FLOPs Reduction (parameter pruning): {flops_stats['reduction_percent']:.2f}%")
-    
-    # Print manual pruning FLOPs information if provided
-    if flops_stats['manual_flops'] is not None:
-        print(f"\nTotal Attention FLOPs (with manual pruning): {flops_stats['manual_flops']/1e9:.2f} GFLOPs")
-        if flops_stats['manual_reduction_percent'] >= 0:
-            print(f"Attention FLOPs Reduction (manual pruning): {flops_stats['manual_reduction_percent']:.2f}%")
-        
-        # Compare the two pruning approaches
-        if flops_stats['total_flops'] and flops_stats['manual_flops']:
-            flops_diff = flops_stats['manual_flops'] - flops_stats['total_flops']
-            if flops_diff > 0:
-                print(f"Manual pruning uses {flops_diff/1e9:.2f} GFLOPs more than parameter pruning")
-            else:
-                print(f"Manual pruning uses {abs(flops_diff)/1e9:.2f} GFLOPs less than parameter pruning")
-    
-    print("===========================\n")
 class SAM2Evaluator:
     """Evaluate SAM2 on HQ44k dataset"""
 
@@ -487,7 +274,13 @@ class SAM2Evaluator:
             progress_bar.update(1)
 
         progress_bar.close()
-
+        memory_stats = {}
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            memory_stats = {
+                'peak_memory_allocated_mb': torch.cuda.max_memory_allocated() / 1024**2,
+                'peak_memory_reserved_mb': torch.cuda.max_memory_reserved() / 1024**2,
+            }
         # Calculate statistics
         results = {
             'miou': np.mean(ious),
@@ -495,6 +288,7 @@ class SAM2Evaluator:
             'boundary_iou': np.mean(boundary_ious),
             'boundary_iou_std': np.std(boundary_ious),
             'num_samples': len(ious),
+            'peak memory': memory_stats['peak_memory_allocated_mb'] if 'peak_memory_allocated_mb' in memory_stats else None,
         }
 
         # Print results
@@ -504,6 +298,8 @@ class SAM2Evaluator:
         print(f"  mIoU: {results['miou']:.4f} ± {results['miou_std']:.4f}")
         print(f"  Boundary IoU: {results['boundary_iou']:.4f} ± {results['boundary_iou_std']:.4f}")
         print(f"  Samples evaluated: {results['num_samples']}")
+        print(f"  Peak memory allocated: {memory_stats.get('peak_memory_allocated_mb', 0):.2f} MB")
+        print(f"  Peak memory reserved: {memory_stats.get('peak_memory_reserved_mb', 0):.2f} MB")
         print(f"{'='*80}\n")
 
         return results
@@ -523,8 +319,8 @@ def main():
                        help='Path to SAM2 checkpoint')
 
     # Evaluation parameters
-    parser.add_argument('--batch-size', type=int, default=1,
-                       help='Batch size for dataloader')
+    parser.add_argument('--batch-size', type=int, nargs='+', default=[1],
+                   help='Batch size(s) for dataloader (can specify multiple values)')
     parser.add_argument('--use-batch', action='store_true',
                        help='Use SAM2 native batch processing (faster for batch > 1)')
     parser.add_argument('--num-samples', type=int, default=None,
@@ -534,7 +330,7 @@ def main():
 
     # Entropy processor parameters
     parser.add_argument('--processor', type=str, default=None,
-                       choices=[None, 'POSITIONAL_PRUNE_SAM2', 'HEAD_PRUNE_SAM2', 'POSITIONAL_QUANT_SAM2',"TRAINING_PRUNE_RATE_SAM2"],
+                       choices=[None, "BASE", 'POSITIONAL_PRUNE_SAM2', 'HEAD_PRUNE_SAM2', 'POSITIONAL_QUANT_SAM2',"TRAINING_PRUNE_RATE_SAM2", "TRAINING_PRUNE_RATE_SAM2_DUO","TRAINING_PRUNE_RATE_SAM2_DIFF_DUO"],
                        help='SAM2 entropy processor to use (None = no processing)')
     parser.add_argument('--config-file', type=str, default=None,
                        help='Path to config YAML file for processor parameters')
@@ -544,12 +340,20 @@ def main():
                        help='Percentage of heads to prune/quantize')
     parser.add_argument('--percent-entropy-global', type=float, default=0.3,
                        help='Percentage of heads to prune/quantize')
-    parser.add_argument('--threshold', type=float, default=None,
+    parser.add_argument('--threshold', type=float, default=0.5,
                        help='Percentage of heads to prune/quantize')
+    parser.add_argument('--threshold-global', type=float, default=0.5 )
     parser.add_argument('--high-entropy', action='store_true',
                        help='Prune high entropy heads (default: prune low entropy)')
     parser.add_argument('--prune-global', action='store_true',
                        help='Apply global pruning across all layers')
+
+    # prunning percent for each kind of heads
+    parser.add_argument('--percent-8heads', type=float, default=0.0, dest='percent_8heads')
+    parser.add_argument('--percent-200heads', type=float, default=0.0, dest='percent_200heads')
+    parser.add_argument('--percent-400heads', type=float, default=0.0, dest='percent_400heads')
+    parser.add_argument('--percent-2048heads', type=float, default=0.0, dest='percent_2048heads')
+    parser.add_argument('--percent-4096heads', type=float, default=0.0, dest='percent_4096heads')
 
     # Dataset
     parser.add_argument('--data-dir', type=str, default='./data',
@@ -595,58 +399,103 @@ def main():
         print(f"\n{'='*80}")
         print(f"Setting up {args.processor}")
         print(f"{'='*80}\n")
-
-        # Get processor
-        print(args.processor)
-        processor = get_sam2_processor(args.processor)
-
-        # Create mock args for set_params (if config file not provided)
-        if args.config_file:
-            config = OmegaConf.load(args.config_file)
+        if args.processor == 'TRAINING_PRUNE_RATE_SAM2_DUO':
+            # Special handling for DUO processor - no calibration needed, just monkey patch
+            print("Setting up DUO processor (no calibration required)...")
+            
+            # Create config for duo processor
+            if args.config_file:
+                config = OmegaConf.load(args.config_file)
+            else:
+                # Create minimal config for duo processor
+                config = OmegaConf.create({
+                    'batch_size_train': 1,  # Default batch size for evaluation
+                    'threshold': args.threshold if args.threshold is not None else 0.5,
+                    'threshold_globle': args.threshold_global if args.threshold_global is not None else 0.3,
+                    'model_type': 'hiera_b_plus'
+                })
+            
+            print("Applying monkey patch for DUO training...")
+            monkey_patch_train_sam2_duo(
+                model=sam2_model,
+                processor=None,  # No processor needed for duo
+                model_type='hiera_b_plus',
+                args=config,
+                train=False  # Evaluation mode
+            )
+            print("✓ DUO monkey patch applied\n")
+            
         else:
-            # Create minimal config
-            config = OmegaConf.create({
-                'quantization': {
-                    'percent_entropy': args.percent_entropy,
-                    'percent_entropy_global': args.percent_entropy_global,
-                    'high_entropy': args.high_entropy,
-                    'prune_global': args.prune_global,
-                    'threshold': args.threshold,
-                }
-            })
+            # Standard processor handling
+            # Get processor
+            print(args.processor)
+            processor = get_sam2_processor(args.processor)
 
-        # Set processor parameters
-        processor.set_params(config)
-        print(f"✓ Processor parameters set")
-        print(f"  Percent: {processor.percent}")
-        print(f"  Global Percent: {processor.global_percent}")
-        print(f"  High entropy: {processor.prunehighentropy}")
-        print(f"  Global: {processor.prune_global}\n")
+            # Create mock args for set_params (if config file not provided)
+            if args.config_file:
+                config = OmegaConf.load(args.config_file)
+            else:
+                # Create minimal config
+                config = OmegaConf.create({
+                    'quantization': {
+                        'percent_entropy': args.percent_entropy,
+                        'percent_entropy_global': args.percent_entropy_global,
+                        'high_entropy': args.high_entropy,
+                        'prune_global': args.prune_global,
+                        'threshold': args.threshold,
+                        'train_state': False,
+                        "percent_8heads" : args.percent_8heads,
+                        "percent_200heads" : args.percent_200heads,
+                        "percent_400heads" : args.percent_400heads,
+                        "percent_2048heads" : args.percent_2048heads,
+                        "percent_4096heads" : args.percent_4096heads,
+                    },
+                'threshold': args.threshold,
+                'threshold_globle': args.threshold_global,
+                'model_type': 'hiera_b_plus',
+                'prune_global': args.prune_global,
+                })
+            
+            # Set processor parameters
+            processor.set_params(config)
+            print(f"✓ Processor parameters set")
+            print(f"  Percent: {processor.percent}")
+            print(f"  Global Percent: {processor.global_percent}")
+            print(f"  High entropy: {processor.prunehighentropy}")
+            print(f"  Global: {processor.prune_global}\n")
 
-        # Calibrate processor
-        print("Calibrating processor...")
-        processor.calibrate(
-            predictor=predictor,
-            modules=MultiScaleAttention,
-            num_samples=args.num_calib_samples
-        )
-        print("✓ Processor calibrated\n")
-
-        # Apply monkey patch to integrate processor into model
-        print("Applying monkey patch to SAM2 image encoder...")
-        if args.processor == 'TRAINING_PRUNE_RATE_SAM2':
-            monkey_patch_train_sam2(
-                model=sam2_model,
-                processor=processor,
-                model_type ='hiera_b_plus',
+            # Calibrate processor
+            print("Calibrating processor...")
+            processor.calibrate(
+                predictor=predictor,
+                modules=MultiScaleAttention,
+                num_samples=args.num_calib_samples
             )
-        else :
-            sam2_image_encoder_monkey_patch(
-                model=sam2_model,
-                processor=processor,
-                verbose=True
-            )
-        print("✓ Monkey patch applied\n")
+            print("✓ Processor calibrated\n")
+
+            # Apply monkey patch to integrate processor into model
+            print("Applying monkey patch to SAM2 image encoder...")
+            if args.processor == 'TRAINING_PRUNE_RATE_SAM2':
+                monkey_patch_train_sam2(
+                    model=sam2_model,
+                    processor=processor,
+                    model_type ='hiera_b_plus',
+                )
+            elif args.processor == 'TRAINING_PRUNE_RATE_SAM2_DIFF_DUO':
+                monkey_patch_train_sam2_diff_duo(
+                    model=sam2_model,
+                    processor=processor,
+                    model_type ='hiera_b_plus',
+                    args =config,
+                    
+                )
+            else :
+                sam2_image_encoder_monkey_patch(
+                    model=sam2_model,
+                    processor=processor,
+                    verbose=True
+                )
+            print("✓ Monkey patch applied\n")
 
     # Setup dataset
     print("Loading dataset...")
@@ -660,34 +509,69 @@ def main():
         eval_ori_resolution=True
     )
 
-    dataloader = DataLoader(
-        gos_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        drop_last=False,
-        num_workers=args.num_workers,
-        pin_memory=True if args.device == 'cuda' else False,
-        collate_fn=custom_collate_fn if args.batch_size > 1 else None,
-    )
+    ## setup logger##
+    log_path= "./logs"
+    logger = None
 
-    print(f"✓ Dataset loaded: {len(gos_dataset)} samples")
-    print(f"  Batch size: {args.batch_size}")
-    print(f"  Use batch mode: {args.use_batch}")
-    print(f"  Samples to evaluate: {args.num_samples if args.num_samples else 'all'}\n")
     if args.processor == 'TRAINING_PRUNE_RATE_SAM2':
-        ckpt_prune_rate_path = "/home/22chi.nh/project/SAMquantization/SAM_Quantization/sam2_ckts/checkpoint.pt"
+        state="Diff_prune_rate"
+        logger = setup_logger(log_path,state)
+        ckpt_prune_rate_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_ckts/sam2_ckts/set_0.5_for_pt_box_sam2_prune_hiera_b_plus_base_0.2target_flop-0.9_flopscale_1000number batch2ratio_lr10max_epochs-5_vision_0.2.pt"
+        logger.info(ckpt_prune_rate_path)
         sam2_model.load_state_dict(torch.load(ckpt_prune_rate_path)['model'])
-        print_head_pruning_and_flops_info(predictor.model)
-    # Run evaluation
-    evaluator = SAM2Evaluator()
-    results = evaluator.eval_hq44k(
-        predictor=predictor,
-        dataloader=dataloader,
-        num_samples=args.num_samples,
-        use_batch=args.use_batch
-    )
+        print_head_pruning_and_flops_info(predictor.model, logger)
+        processor.recompute_masks(predictor)
+    elif args.processor == 'TRAINING_PRUNE_RATE_SAM2_DUO':
+        ckpt_prune_rate_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_ckts/sam2_ckts/sam2_duo_hiera_b_plus_base_0.05number batch2max_epochs-10ratio_lr10regression_weight0.5_vision_0.05.pt"
+        sam2_model.load_state_dict(torch.load(ckpt_prune_rate_path)['model'])
+        print_duo_head_pruning_info(predictor.model)
+    elif args.processor == 'TRAINING_PRUNE_RATE_SAM2_DIFF_DUO':
+        state="Diff_duo_sam2_prune_rate"
+        logger = setup_logger(log_path,state)
+        ckpt_prune_rate_path = "/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Quantization/sam2_ckts/sam2_ckts/sam2_diffduo_hiera_b_plus_base_0.1number batch2max_epochs-10ratio_lr10regression_weight0.5_vision_0.1.pt"
+        sam2_model.load_state_dict(torch.load(ckpt_prune_rate_path)['model'])
+        print_diff_duo_head_prunning_info(predictor.model, logger)
+    if not isinstance(args.batch_size, list):
+        args.batch_size = [args.batch_size]
+    
+    for batch_size in args.batch_size: 
+        print(f"\n{'='*80}")
+        print(f"Testing with batch size: {batch_size}")
+        print(f"{'='*80}")
+        
+        dataloader = DataLoader(
+            gos_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=args.num_workers,
+            pin_memory=True if args.device == 'cuda' else False,
+            collate_fn=custom_collate_fn if batch_size > 1 else None,
+        )
+        reset_memory()
+        print(f"✓ Dataset loaded: {len(gos_dataset)} samples")
+        print(f"  Batch size: {batch_size}")
+        print(f"  Use batch mode: {args.use_batch}")
+        print(f"  Samples to evaluate: {args.num_samples if args.num_samples else 'all'}\n")
+        
+        # Run evaluation
+        evaluator = SAM2Evaluator()
+        results = evaluator.eval_hq44k(
+            predictor=predictor,
+            dataloader=dataloader,
+            num_samples=args.num_samples,
+            use_batch=args.use_batch
+        )
+        if logger:
+            
+            logger.info("Results Summary:")
+            logger.info(f"Mean IoU: {results['miou']:.4f} ± {results['miou_std']:.4f}")
+            logger.info(f"Boundary IoU: {results['boundary_iou']:.4f} ± {results['boundary_iou_std']:.4f}")
+            logger.info(f"Number of Samples: {results['num_samples']}")
+            logger.info(f"Peak Memory Usage: {results['peak memory']} MB")
+            logger.info("=" * 100 + "\n")
 
-    return results
+        # return results
 
 
 if __name__ == '__main__':

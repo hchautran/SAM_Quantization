@@ -131,7 +131,6 @@ def main(args):
         os.path.join(cfg.launcher.experiment_log_dir, "config_resolved.yaml"), "w"
     ) as f:
         f.write(OmegaConf.to_yaml(cfg_resolved, resolve=True))
-
     submitit_conf = cfg.get("submitit", None)
     assert submitit_conf is not None, "Missing submitit config"
 
