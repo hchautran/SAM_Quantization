@@ -33,6 +33,9 @@ logssam2/
 sam2_logs/
 pretrained_checkpoint/
 data/
+tmp/
+cuda-12.1.0/
+cuda/
 # Exclude Python cache files
 __pycache__/
 *.pyc
