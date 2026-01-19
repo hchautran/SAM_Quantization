@@ -10,6 +10,12 @@ from ..base import AttentionProcessor, setup_logger
 from torch.distributions import Exponential
 from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
 
+from omegaconf import OmegaConf
+
+def exists(cfg, key):
+    if OmegaConf.is_config(cfg):
+        return OmegaConf.select(cfg, key, default=None) is not None
+    return hasattr(cfg, key)
 
 class BaseEntropyProcessor(AttentionProcessor):
     """
@@ -35,11 +41,35 @@ class BaseEntropyProcessor(AttentionProcessor):
     def set_params(self, args):
         """Set parameters from args. Override in subclasses for custom params."""
         self.threshold = 5.0
-        self.percent_global = args.quantization.percent_entropy_global
-        self.percent = args.quantization.percent_entropy
-        self.prunehighentropy = args.quantization.high_entropy
-        self.prune_global = args.quantization.prune_global
-        self.model_type = args.model.model_type
+        self.percent = (
+            args.percent
+            if exists(args, "percent")
+            else args.quantization.percent_entropy
+        )
+
+        self.global_percent = (
+            args.percent_global
+            if exists(args, "percent_global")
+            else args.quantization.percent_entropy_global
+        )
+
+        self.prunehighentropy = (
+            args.high_entropy
+            if exists(args, "high_entropy")
+            else args.quantization.high_entropy
+        )
+
+        self.prune_global = (
+            args.prune_global
+            if exists(args, "prune_global")
+            else args.quantization.prune_global
+        )
+
+        self.model_type = (
+            args.model_type
+            if exists(args, "model_type")
+            else args.model.model_type
+        )
     def calculate_entropy(self, attn_head):
         """
         Calculate entropy for attention head.
@@ -161,7 +191,7 @@ class BaseEntropyProcessor(AttentionProcessor):
                     key=lambda x: x[1],
                     reverse=self.prunehighentropy
                 )
-
+                # import ipdb; ipdb.set_trace()
                 # Calculate number of heads to select
                 num_heads_to_select = self._calculate_num_heads_to_select(len(heads_with_entropy))
                 selected_heads = heads_with_entropy[:num_heads_to_select]
@@ -254,6 +284,14 @@ class BaseEntropyProcessor(AttentionProcessor):
 class PruneRateProcessor(BaseEntropyProcessor):
     def __init__(self, strategy_name: str = 'PruneRate'):
         super().__init__(strategy_name)
+    def set_params(self, args):
+        """Set parameters from args. Override in subclasses for custom params."""
+        self.threshold = 5.0
+        self.percent = args.quantization.percent_entropy
+        self.percent_global = args.quantization.percent_entropy_global
+        self.prunehighentropy = args.quantization.high_entropy
+        self.prune_global = args.quantization.prune_global
+        self.model_type = args.model.model_type
     def calculate_entropy(self, attn_head):
         """Calculate mean entropy of the entire attention matrix."""
         if isinstance(attn_head, torch.Tensor) is False:
@@ -299,7 +337,48 @@ class PruneRateProcessor(BaseEntropyProcessor):
                 self.entropy_stats[head_key].append(mean_entropy)
 
         return attention_hook
+class EntropyValueCheck(BaseEntropyProcessor):
+    def __init__(self, strategy_name: str = 'entropycheck'):
+        super().__init__(strategy_name)
+        self.global_percent = 0.5
+    def set_params(self, args):
+        pass
+    def calculate_entropy(self, attn_head):
+        """Calculate mean entropy of the entire attention matrix."""
+        if isinstance(attn_head, torch.Tensor) is False:
+            attn_head = torch.from_numpy(attn_head)
 
+        eps = 1e-12
+        attn_head = torch.clamp(attn_head, min=eps).flatten()
+        entropy = -torch.sum(attn_head * torch.log(attn_head))
+        return entropy
+    def _create_attention_hook(self, name):
+        """Create attention hook for positional pruning."""
+        def attention_hook(module, input, output):
+            x = input[0] if isinstance(input, tuple) else input
+            B, H, W, _ = x.shape
+
+            qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
+
+            attn = (q * module.scale) @ k.transpose(-2, -1)
+            if module.use_rel_pos:
+                attn = add_decomposed_rel_pos(attn, q, module.rel_pos_h, module.rel_pos_w, (H, W), (H, W))
+
+            attn = attn.softmax(dim=-1)
+            B_nhead, N, _ = attn.shape
+
+            for head_idx in range(B_nhead):
+                attn_head = attn[head_idx]
+                mean_entropy = self.calculate_entropy(attn_head)
+                head_key = f"{name}.head_{head_idx}"
+                self.entropy_stats[head_key].append(mean_entropy)
+
+        return attention_hook
+    def _process_percent_mode(self, predictor):
+        """Process calibration in percent mode."""
+        self.layer_heads = self._group_entropy_by_layer()
+    
 class PositionalPruneProcessor(BaseEntropyProcessor):
     """
     Processor that prunes attention heads based on mean entropy of their attention distribution.
@@ -321,7 +400,6 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
 
     def set_params(self, args):
         super().set_params(args)
-        self.global_percent = args.percent_global
 
     def calculate_entropy(self, attn_head):
         """Calculate mean entropy of the entire attention matrix."""
@@ -335,6 +413,7 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
 
     def _calculate_num_heads_to_select(self, total_heads):
         """Override to support global vs local percentages."""
+       
         if self.model_type == "vit_b" :
             if total_heads < 300:
                 return  int(total_heads * self.global_percent)
@@ -344,6 +423,7 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
         elif self.model_type == "vit_h" :
             if total_heads < 400:
                 return  int(total_heads * self.global_percent)
+        
         return int(total_heads * self.percent)
 
     def _create_attention_hook(self, name):
@@ -386,12 +466,12 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
                 else:
                     prune_mask = None
             elif self.model_type =="vit_l":
-                if not any(num in module_name for num in ["5", "11", "17", "23"]):
+                if not any(num in module_name for num in [".5", "11", "17", "23"]):
                     prune_mask = module.processor.final_entropy_stats.get(module_name, None)
                 else:
                     prune_mask = None
             elif self.model_type == "vit_h":
-                if not any(num in module_name for num in ["7", "15", "23", "31"]):
+                if not any(num in module_name for num in [".7", "15", "23", "31"]):
                     prune_mask = module.processor.final_entropy_stats.get(module_name, None)
                 else:
                     prune_mask = None
@@ -574,7 +654,6 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
 
     def set_params(self, args):
         super().set_params(args)
-        self.global_percent = args.percent_global
 
     def calculate_entropy(self, attn_head):
         """Calculate global entropy of the entire attention matrix."""
@@ -590,15 +669,15 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
         """Override to support global vs local percentages."""
         if self.model_type == "vit_b" :
             if total_heads < 300:
-                return max(1, int(total_heads * self.global_percent))
+                return int(total_heads * self.global_percent)
         elif self.model_type == "vit_l" :
             if total_heads < 400:
-                return max(1, int(total_heads * self.global_percent))
+                return int(total_heads * self.global_percent)
         elif self.model_type == "vit_h" :
             if total_heads < 400:
-                return max(1, int(total_heads * self.global_percent))
+                return int(total_heads * self.global_percent)
         
-        return max(1, int(total_heads * self.percent))
+        return int(total_heads * self.percent)
 
     def _create_attention_hook(self, name):
         """Create attention hook for positional quantization."""
@@ -638,7 +717,7 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
 
                 num_heads_to_select = self._calculate_num_heads_to_select(len(heads_with_entropy))
                 selected_heads = heads_with_entropy[:num_heads_to_select]
-
+                print("remain heads/ total heads:", len(heads_with_entropy)-num_heads_to_select, "/", len(heads_with_entropy))
                 # mask = torch.isin(
                 #     torch.arange(len(heads_with_entropy)),
                 #     torch.tensor([head_idx for head_idx, _ in selected_heads])

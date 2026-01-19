@@ -47,10 +47,10 @@ from .encoder_observer import (
 )
 
 # SAM2 observers
-from .sam2_observer import (
-    MultiScaleAttentionObserver,
-    sam2_image_encoder_monkey_patch,
-)
+# from .sam2_observer import (
+#     MultiScaleAttentionObserver,
+#     sam2_image_encoder_monkey_patch,
+# )
 
 # Registry for encoder processors
 ENCODER_PROCESSOR_REGISTRY = {}

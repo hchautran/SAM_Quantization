@@ -38,6 +38,7 @@ from mmdet.utils import (build_ddp, build_dp, compat_cfg, get_device,
                          update_data_root)
 from quant.configmmdet.det_observer_instance_sam_ import DetObserverInstanceSAM
 from mmdet.apis import multi_gpu_test, single_gpu_test
+from omegaconf import OmegaConf
 
 def setup_logger(path_log,state):
     if not os.path.exists(path_log):
@@ -381,8 +382,8 @@ def main():
     args = parser.parse_args()
 
     # Load config
-    # config = OmegaConf.load(args.config_file)
-    # config = override_args(args, config)
+    config = OmegaConf.load(args.config_file)
+    config = override_args(args, config)
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -390,8 +391,8 @@ def main():
     # Initialize model
     print("Loading SAM model...")
     
-    model_type= args.model_type
-    checkpoint_path = args.hq_checkpoint
+    model_type= config.model.model_type
+    checkpoint_path = config.model.hq_checkpoint
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
     predictor = SamPredictor(sam)
 
