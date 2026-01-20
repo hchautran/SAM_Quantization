@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
 
+from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
+
 
 
 
@@ -33,7 +35,7 @@ class DuoPruneRateAttention(EncoderAttention):
             )
     
     def set_processor(self, processor, module_name, args,train_rate_prune=False):
-        # self.processor = processor
+        self.processor = processor
         self.module_name = module_name 
         self.training = train_rate_prune
         self.batch_size = args.train_prune_rate.batch_size_train
@@ -41,6 +43,7 @@ class DuoPruneRateAttention(EncoderAttention):
         self.global_threshold = args.train_prune_rate.threshold_globle
         self.model_type = args.model.model_type
         self.positional_quant = args.quantization.positional_quant
+        self.usepercentage = args.quantization.use_percentage
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         
         
@@ -95,7 +98,31 @@ class DuoPruneRateAttention(EncoderAttention):
             q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
             
             # Determine which heads to prune based on threshold
-            if hasattr(self, 'full_attention_heads') and self.full_attention_heads is not None:
+            # Check if percentage-based pruning should be used
+            if self.usepercentage:
+                # Retrieve pre-calculated mask from processor stats
+                if hasattr(self, 'processor') and hasattr(self.processor, 'final_entropy_stats'):
+                    prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)
+                    
+                    if prune_mask is not None:
+                        # Ensure mask is on correct device
+                        prune_mask = prune_mask.to(q.device)
+                        # Set n_bits for quantization if applicable (logic reused from threshold block)
+                        if self.model_type == "vit_b":
+                            n_bits = 4 if not prune_mask.shape[0] == 300 else 2
+                        elif self.model_type == "vit_l":
+                            n_bits = 4 if not prune_mask.shape[0] == 400 else 2
+                        elif self.model_type == "vit_h":
+                            n_bits = 4 if not prune_mask.shape[0] == 400 else 2
+                    else:
+                        # Fallback if no mask found for this layer
+                        q_attn, k_attn, v_attn = q, k, v
+                        prune_mask = None
+                else:
+                    q_attn, k_attn, v_attn = q, k, v
+                    prune_mask = None
+
+            elif hasattr(self, 'full_attention_heads') and self.full_attention_heads is not None:
                 # Create pruning mask: True for heads to prune (below threshold)
                 # head_weights = self.full_attention_heads.clamp(0, 1)
                 head_weights = self.full_attention_heads
@@ -118,9 +145,12 @@ class DuoPruneRateAttention(EncoderAttention):
                     else:
                         prune_mask = head_weights < self.global_threshold
                     n_bits = 4 if not prune_mask.shape[0] == 400 else 2
-                
+            else:
+                prune_mask = None
+
+            if prune_mask is not None:
                 # Expand mask to match batch dimension
-                prune_mask = prune_mask.repeat(q.shape[0]// len(head_weights))
+                prune_mask = prune_mask.repeat(q.shape[0]// len(prune_mask)) if prune_mask.shape[0] < q.shape[0] else prune_mask
                 
                 # Split heads into pruned and non-pruned
                 
@@ -144,10 +174,12 @@ class DuoPruneRateAttention(EncoderAttention):
             # Compute attention for non-pruned heads
             attn = (q_attn * self.scale) @ k_attn.transpose(-2, -1)
             if self.use_rel_pos:
+                # Note: This logic assumes q_attn dimensions match what add_decomposed_rel_pos expects roughly or handle broadcasting
+                # However, original code passed q_attn. 
                 attn = add_decomposed_rel_pos(attn, q_attn, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
             attn = attn.softmax(dim=-1)
             x_attn = attn @ v_attn
-            if self.positional_quant:
+            if self.positional_quant and prune_mask is not None:
                 attn_prune = ((q_prune * self.scale) @ k_prune.transpose(-2, -1)).softmax(dim=-1)
                 x_prune = quantize_activation_per_token_absmax(attn_prune, n_bits) @ v_prune
             # Merge outputs

@@ -11,6 +11,8 @@ from .encoder import (
     EncoderRecenterAttentionProcessor,
     PositionalPruneProcessor,
     EntropyValueCheck,
+    AttentionMapCollector,
+    PruneRateDuoProcessor,
     PruneRateProcessor,
     HeadPruneProcessor,
     PositionalQuantProcessor,
@@ -77,8 +79,10 @@ def get_encoder_processor(name: str, **kwargs):
 register_encoder_processor("BASE")(EncoderAttentionProcessor)
 register_encoder_processor("RECENTER")(EncoderRecenterAttentionProcessor)
 register_encoder_processor("POSITIONAL_PRUNE")(PositionalPruneProcessor)
+register_encoder_processor("PRUNE_RATE_DUO")(PruneRateDuoProcessor)
 register_encoder_processor("PRUNE_RATE")(PruneRateProcessor)
 register_encoder_processor("ENTROPY_VALUE_CHECK")(EntropyValueCheck)
+register_encoder_processor("ATTN_MAP_COLLECTOR")(AttentionMapCollector)
 register_encoder_processor("HEAD_PRUNE")(HeadPruneProcessor)
 register_encoder_processor("POSITIONAL_QUANT")(PositionalQuantProcessor)
 register_encoder_processor("SMOOTH_MEAN_Q")(EncoderAttentionProcessorSmoothMeanQ)
@@ -99,8 +103,10 @@ __all__ = [
     "EncoderRecenterAttentionProcessor",
     "HeadPruneProcessor",
     "PositionalPruneProcessor",
+    "PruneRateDuoProcessor",
     "PruneRateProcessor",
     "EntropyValueCheck",
+    "AttentionMapCollector",
     "PositionalQuantProcessor",
     "EncoderAttentionProcessorSmoothMeanQ",
     "EncoderAttentionProcessorCompensate",

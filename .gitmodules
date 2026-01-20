@@ -25,3 +25,6 @@
 [submodule "sam2_repo"]
 	path = sam2_repo
 	url = https://github.com/NguyenHuuChi/sam2.git
+[submodule "Block-Sparse-Attention"]
+	path = Block-Sparse-Attention
+	url = git@github.com:hchautran/Block-Sparse-Attention.git

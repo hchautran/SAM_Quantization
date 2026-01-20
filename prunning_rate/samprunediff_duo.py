@@ -31,6 +31,7 @@ class DuoDiffPruneRateAttention(EncoderAttention):
         self.model_type = args.model.model_type
         self.prune_global = args.quantization.prune_global
         self.positional_quant = args.quantization.positional_quant
+        self.use_percentage = args.quantization.use_percentage
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         if self.training:
@@ -111,41 +112,50 @@ class DuoDiffPruneRateAttention(EncoderAttention):
             nu_images =1
             
             # prune_kept_num=  int(self.prune_ddp.update_kept_head_number() )
-           
-            prune_mask_data = None
-            should_prune = True
-            if not self.prune_global:
-                if self.model_type == "vit_b" and any(num in self.module_name for num in ["2", "5", "8", "11"]):
-                    should_prune = False
-                elif self.model_type == "vit_l" and any(num in self.module_name for num in [".5", "11", "17", "23"]):
-                    should_prune = False
-                elif self.model_type == "vit_h" and any(num in self.module_name for num in [".7", "15", "23", "31"]):
-                    should_prune = False
-            
-            if should_prune:
-                single_mask_probability = self.prune_ddp.get_head_probability_diff_duo()
+            if self.use_percentage:
 
-                if self.model_type == "vit_b":
-                    if not any(num in self.module_name for num in [".2", ".5", "8", "11"]):
-                        mask = single_mask_probability > self.threshold
-                    else:
-                        mask = single_mask_probability > self.global_threshold
+                
+                
+                sorted_indices = self.processor.final_entropy_stats.get(self.module_name, None)
+                prune_head_num = self.processor.prune_counts_per_layer.get(self.module_name, self.num_heads)
+                kept_head_num = len(sorted_indices)- prune_head_num
+                non_prune_mask = sorted_indices[:kept_head_num]
+                prune_mask = sorted_indices[kept_head_num:]
+                single_mask_probability = torch.zeros(self.num_heads) # Dummy for determining n_bits size check
+            else:
+                should_prune = True
+                if not self.prune_global:
+                    if self.model_type == "vit_b" and any(num in self.module_name for num in ["2", "5", "8", "11"]):
+                        should_prune = False
+                    elif self.model_type == "vit_l" and any(num in self.module_name for num in [".5", "11", "17", "23"]):
+                        should_prune = False
+                    elif self.model_type == "vit_h" and any(num in self.module_name for num in [".7", "15", "23", "31"]):
+                        should_prune = False
+                
+                if should_prune:
+                    single_mask_probability = self.prune_ddp.get_head_probability_diff_duo()
 
-                elif self.model_type == "vit_l":
-                    if not any(num in self.module_name for num in [".5", "11", "17", "23"]):
-                        mask = single_mask_probability > self.threshold
-                    else:
-                        mask = single_mask_probability > self.global_threshold
+                    if self.model_type == "vit_b":
+                        if not any(num in self.module_name for num in [".2", ".5", "8", "11"]):
+                            mask = single_mask_probability > self.threshold
+                        else:
+                            mask = single_mask_probability > self.global_threshold
 
-                elif self.model_type == "vit_h":
-                    if not any(num in self.module_name for num in [".7", "15", "23", "31"]):
-                        mask = single_mask_probability > self.threshold
-                    else:
-                        mask = single_mask_probability > self.global_threshold
+                    elif self.model_type == "vit_l":
+                        if not any(num in self.module_name for num in [".5", "11", "17", "23"]):
+                            mask = single_mask_probability > self.threshold
+                        else:
+                            mask = single_mask_probability > self.global_threshold
 
-                kept_head_num = mask.sum().item()
-                non_prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)[:kept_head_num]
-                prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)[kept_head_num:]
+                    elif self.model_type == "vit_h":
+                        if not any(num in self.module_name for num in [".7", "15", "23", "31"]):
+                            mask = single_mask_probability > self.threshold
+                        else:
+                            mask = single_mask_probability > self.global_threshold
+
+                    kept_head_num = mask.sum().item()
+                    non_prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)[:kept_head_num]
+                    prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)[kept_head_num:]
                 
             
             if prune_mask is not None:

@@ -196,14 +196,7 @@ class BaseEntropyProcessor(AttentionProcessor):
                 num_heads_to_select = self._calculate_num_heads_to_select(len(heads_with_entropy))
                 selected_heads = heads_with_entropy[:num_heads_to_select]
                 print("remain heads/ total heads:", len(heads_with_entropy)-num_heads_to_select, "/", len(heads_with_entropy))
-                # Create mask
-                mask_size = mask_size_fn(layer_name, heads_with_entropy)
-                selected_indices = [head_idx for head_idx, _ in selected_heads]
-                # mask = torch.isin(
-                #     torch.arange(mask_size),
-                #     torch.tensor(selected_indices)
-                # ).to(predictor.device)
-                # final_stats[layer_name] = mask
+
                 
                 elements = torch.arange(len(heads_with_entropy))
                 test_elements = torch.tensor([head_idx for head_idx, _ in selected_heads])
@@ -229,10 +222,7 @@ class BaseEntropyProcessor(AttentionProcessor):
         """Custom calibration that accumulates all entropy values, then calculates final statistics."""
         self.entropy_stats = defaultdict(list)
         attention_hooks, _ = self._register_hooks(predictor, modules)
-
-        logger = setup_logger('./calib_logs', self.strategy_name)
         print('Collecting entropy values for all attention heads during calibration')
-
         self._run_calibration_loop(predictor, num_samples)
 
         # Remove hooks
@@ -281,6 +271,97 @@ class BaseEntropyProcessor(AttentionProcessor):
         """Reshape attention output to original spatial dimensions."""
         return x.view(B, num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
 
+class PruneRateDuoProcessor(BaseEntropyProcessor):
+    def __init__(self, strategy_name: str = 'PruneRateDuo'):
+        super().__init__(strategy_name)
+    def set_params(self, args):
+        """Set parameters from args. Override in subclasses for custom params."""
+        self.threshold = 5.0
+        self.percent = args.quantization.percent_entropy
+        self.percent_global = args.quantization.percent_entropy_global
+        self.prunehighentropy = args.quantization.high_entropy
+        self.prune_global = args.quantization.prune_global
+        self.model_type = args.model.model_type
+    def calculate_pruned_heads_per_layer_percent_based(self, predictor):
+        """
+        Calculate heads to prune based on trained Full Attention Heads gate values.
+        Separates Global and Local attention layers and prunes them based on respective percentages.
+        Returns a boolean mask: True indicates the head should be pruned.
+        """
+        # 1. Define global layer indices based on model type
+        global_indices = set()
+        if self.model_type == "vit_b":
+            global_indices = {2, 5, 8, 11}
+        elif self.model_type == "vit_l":
+            global_indices = {5, 11, 17, 23}
+        elif self.model_type == "vit_h":
+            global_indices = {7, 15, 23, 31}
+        
+        local_group_data = [] # Stores (value, head_index, layer_name)
+        global_group_data = []
+        layer_head_counts = {} # Stores total heads per layer to construct masks later
+        
+        # 2. Iterate through model blocks to collect gate values
+        # Accessing blocks via predictor.model.image_encoder.blocks
+        blocks = predictor.model.image_encoder.blocks
+        
+        for i, block in enumerate(blocks):
+            layer_name = f"image_encoder.blocks.{i}.attn"
+            
+            # Ensure the attention module has the trained parameter
+            if hasattr(block.attn, 'full_attention_heads'):
+                # Get gate values (value per head)
+                gate_values = block.attn.full_attention_heads.detach()
+                
+                # Store head count for this layer
+                layer_head_counts[layer_name] = gate_values.shape[0]
+
+                gate_values = gate_values.cpu()
+                
+                is_global = i in global_indices
+                target_list = global_group_data if is_global else local_group_data
+                
+                # Collect tuples
+                for head_idx, val in enumerate(gate_values):
+                    target_list.append((val.item(), head_idx, layer_name))
+        
+        # 3. Sort groups in ascending order (smallest gate values are pruned first)
+        local_group_data.sort(key=lambda x: x[0])
+        global_group_data.sort(key=lambda x: x[0])
+        
+        # 4. Determine cut-off counts based on percentages
+        num_prune_local = int(len(local_group_data) * self.percent)
+        num_prune_global = int(len(global_group_data) * self.percent_global)
+        
+        # 5. Select heads to prune
+        heads_to_prune = local_group_data[:num_prune_local] + global_group_data[:num_prune_global]
+        
+        # 6. Build result dictionary {layer_name: boolean_mask}
+        # Organize pruned indices by layer for efficient mask creation
+        pruned_indices_map = defaultdict(list)
+        for _, head_idx, layer_name in heads_to_prune:
+            pruned_indices_map[layer_name].append(head_idx)
+            
+        final_masks = {}
+        for layer_name, total_heads in layer_head_counts.items():
+            # Initialize mask as False (Keep)
+            mask = torch.zeros(total_heads, dtype=torch.bool, device=predictor.device)
+            
+            if layer_name in pruned_indices_map:
+                indices_to_prune = torch.tensor(pruned_indices_map[layer_name], device=predictor.device)
+                # Set pruned indices to True
+                mask[indices_to_prune] = True
+            
+            final_masks[layer_name] = mask
+        print("\n=== Pruning Statistics per Layer ===")
+        for layer_name, mask in final_masks.items():
+            num_pruned = mask.sum().item()
+            total = mask.shape[0]
+            print(f"{layer_name}: Pruned {num_pruned}/{total} heads ({(num_pruned/total)*100:.1f}%)")
+        print("====================================\n")
+           
+        self.final_entropy_stats = final_masks
+        
 class PruneRateProcessor(BaseEntropyProcessor):
     def __init__(self, strategy_name: str = 'PruneRate'):
         super().__init__(strategy_name)
@@ -314,6 +395,86 @@ class PruneRateProcessor(BaseEntropyProcessor):
         
         # Clean up the original entropy_stats to save memory
         del self.entropy_stats
+    def calculate_pruned_heads_per_layer_percent_based(self, predictor):
+        """
+        Calculate the NUMBER of heads to prune per layer based on trained DiffPruneRate probability values.
+        Separates Global and Local attention layers and determines cutoffs based on respective percentages.
+        Returns a dictionary where keys are layer names and values are the count of heads to prune.
+        """
+        # 1. Define global layer indices based on model type
+        global_indices = set()
+        if self.model_type == "vit_b":
+            global_indices = {2, 5, 8, 11}
+        elif self.model_type == "vit_l":
+            global_indices = {5, 11, 17, 23}
+        elif self.model_type == "vit_h":
+            global_indices = {7, 15, 23, 31}
+        
+        local_group_data = [] # Stores (value, head_index, layer_name)
+        global_group_data = []
+        
+        # 2. Iterate through model blocks to collect probability values
+        blocks = predictor.model.image_encoder.blocks
+        
+        for i, block in enumerate(blocks):
+            layer_name = f"image_encoder.blocks.{i}.attn"
+            
+            # Ensure the attention module has the trained parameter wrapper
+            if hasattr(block.attn, 'prune_ddp'):
+                # Get probability values (value per head)
+                # prune_ddp.get_head_probability_diff_duo() returns the prob probabilities
+                probs = block.attn.prune_ddp.get_head_probability_diff_duo().detach().cpu()
+                
+                is_global = i in global_indices
+                target_list = global_group_data if is_global else local_group_data
+                
+                # Collect tuples
+                for head_idx, val in enumerate(probs):
+                    target_list.append((val.item(), head_idx, layer_name))
+        
+        # 3. Sort groups in ascending order (smallest probabilities are pruned first)
+        local_group_data.sort(key=lambda x: x[0])
+        global_group_data.sort(key=lambda x: x[0])
+        
+        # 4. Determine cut-off counts based on percentages
+        # e.g., if percent is 0.2, we prune the bottom 20% of heads across all local layers
+        num_prune_local = int(len(local_group_data) * self.percent)
+        num_prune_global = int(len(global_group_data) * self.percent_global)
+        
+        # 5. Select heads to prune
+        heads_to_prune = local_group_data[:num_prune_local] + global_group_data[:num_prune_global]
+        
+        # 6. Count heads per layer to prune
+        # We need to return {layer_name: number_of_heads_to_prune} based on the request
+        prune_counts = defaultdict(int)
+        
+        # Initialize counts for all layers to 0 ensures layers with 0 pruned heads exist in dict
+        for i in range(len(blocks)):
+             layer_name = f"image_encoder.blocks.{i}.attn"
+             prune_counts[layer_name] = 0
+
+        for _, _, layer_name in heads_to_prune:
+            prune_counts[layer_name] += 1
+            
+        print("\n=== Probability Pruning Statistics per Layer (Counts) ===")
+        for layer_name, count in prune_counts.items():
+            print(f"{layer_name}: Pruning {count} heads")
+        print("=========================================================\n")
+        
+        # Store or return this based on how it's used. 
+        # The prompt asks to return a dictionary where value is number of heads to prune.
+        # Often this is stored in a class attribute for later use, but here we return it or store it.
+        # Since logic suggests this replaces the mask logic for counts, we might store it.
+        # But specifically requested to return/implement logic.
+        
+        # Storing in a specific attribute for the 'diff' strategies might be needed, 
+        # but reusing final_entropy_stats for now or a new attribute is fine.
+        # Given the previous context, 'final_entropy_stats' usually holds masks or sorted indices
+        # but here the request is specifically for "number of heads".
+        
+        self.prune_counts_per_layer = dict(prune_counts)
+        return self.prune_counts_per_layer
+        
     def _create_attention_hook(self, name):
         """Create attention hook for positional pruning."""
         def attention_hook(module, input, output):
@@ -378,6 +539,90 @@ class EntropyValueCheck(BaseEntropyProcessor):
     def _process_percent_mode(self, predictor):
         """Process calibration in percent mode."""
         self.layer_heads = self._group_entropy_by_layer()
+
+class AttentionMapCollector(BaseEntropyProcessor):
+    """
+    Processor that only collects attention maps from encoder attention modules.
+
+    Stores attention maps per layer name in self.attention_maps during calibration.
+    """
+
+    def __init__(self, strategy_name: str = "ATTN_MAP_COLLECTOR"):
+        super().__init__(strategy_name)
+        self.attention_maps = defaultdict(list)
+        self.max_maps_per_layer = None
+
+    def set_params(self, args):
+        """Optional parameters for controlling storage volume."""
+        self.max_maps_per_layer = (
+            args.attn_map_max_per_layer
+            if exists(args, "attn_map_max_per_layer")
+            else None
+        )
+
+    def calculate_entropy(self, attn_head):
+        """Calculate mean entropy of the entire attention matrix."""
+        if isinstance(attn_head, torch.Tensor) is False:
+            attn_head = torch.from_numpy(attn_head)
+
+        eps = 1e-12
+        attn_head = torch.clamp(attn_head, min=eps).flatten()
+        entropy = -torch.sum(attn_head * torch.log(attn_head))
+        return entropy
+
+    def _create_attention_hook(self, name):
+        """Create attention hook that collects attention maps."""
+        def attention_hook(module, input, output):
+            if self.max_maps_per_layer is not None:
+                if len(self.attention_maps[name]) >= self.max_maps_per_layer:
+                    return
+
+            x = input[0] if isinstance(input, tuple) else input
+            B, H, W, _ = x.shape
+
+            qkv = module.qkv(x).reshape(
+                B, H * W, 3, module.num_heads, -1
+            ).permute(2, 0, 3, 1, 4)
+            q, k, _ = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
+
+            attn = (q * module.scale) @ k.transpose(-2, -1)
+            if module.use_rel_pos:
+                attn = add_decomposed_rel_pos(
+                    attn,
+                    q,
+                    module.rel_pos_h,
+                    module.rel_pos_w,
+                    (H, W),
+                    (H, W),
+                )
+
+            attn = attn.softmax(dim=-1).view(B, module.num_heads, H * W, H * W)
+            self.attention_maps[name].append(attn.cpu().detach().numpy())
+            for head_idx in range(module.num_heads):
+                attn_head = attn[:, head_idx].reshape(-1, H * W, H * W)
+                mean_entropy = self.calculate_entropy(attn_head)
+                head_key = f"{name}.head_{head_idx}"
+                self.entropy_stats[head_key].append(mean_entropy)
+
+        return attention_hook
+
+    def calibrate(self, predictor, modules, num_samples=32):
+        """Collect attention maps during calibration without post-processing."""
+        self.attention_maps = defaultdict(list)
+        attention_hooks, _ = self._register_hooks(predictor, modules)
+        print("Collecting attention maps during calibration")
+        self._run_calibration_loop(predictor, num_samples)
+
+        for hook in attention_hooks:
+            hook.remove()
+
+    def get_attention_maps(self):
+        """Return collected attention maps."""
+        return self.attention_maps
+
+    def get_entropy_stats(self):
+        """Return collected entropy statistics per head."""
+        return self.entropy_stats
     
 class PositionalPruneProcessor(BaseEntropyProcessor):
     """
@@ -456,7 +701,7 @@ class PositionalPruneProcessor(BaseEntropyProcessor):
         mask_size_fn = lambda layer_name, heads: len(heads)
         self.final_entropy_stats = self._select_heads_by_percent(predictor, layer_heads, mask_size_fn)
 
-    def process(self, x: torch.Tensor, module, module_name: str = None):
+    def process(self, x: torch.Tensor, module, module_name: str = None ):
         """Standard attention processing with optional head pruning."""
         # Determine if we should prune this layer
         if not self.prune_global:

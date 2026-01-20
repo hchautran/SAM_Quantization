@@ -682,7 +682,7 @@ class training_engine:
                 train = train,
             )
 
-    def eval_hq44k(self, predictor: SamPredictor, num_samples=None, checkpoint_evaluation=None, plot_figures=False):
+    def eval_hq44k(self, predictor: SamPredictor, processor= None, num_samples=None, checkpoint_evaluation=None, plot_figures=False):
         """Delegate to evaluator component"""
         
 
@@ -690,7 +690,8 @@ class training_engine:
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
         predictor.model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
-
+        if self.args.quantization.use_percentage:
+            processor.calculate_pruned_heads_per_layer_percent_based(predictor)
         # Print pruned heads information
         if "distill" in checkpoint_path:
             states='distillation'+self.args.model.model_type
@@ -708,7 +709,8 @@ class training_engine:
         logger.info('Global threshold: {}'.format(global_threshold))
         logger.info('Number of Sample {}'.format(num_samples))
         logger.info(f"{'='*120}")
-        pruned_count, total_count = print_pruned_heads_info(predictor.model, threshold, global_threshold, logger, self.args.model.model_type)    
+        if not self.args.quantization.use_percentage:
+            pruned_count, total_count = print_pruned_heads_info(predictor.model, threshold, global_threshold, logger, self.args.model.model_type)    
         # exit()
 
         sam = predictor.model
@@ -748,7 +750,7 @@ class training_engine:
         
         lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args_yaml.train_prune_rate.lr_drop_epoch)
         lr_scheduler.last_epoch = args_yaml.train_prune_rate.start_epoch
-        if args_yaml.train_prune_rate.training_method == "duo" :
+        if args_yaml.train_prune_rate.training_method == "duo":
             wandb.init(project="sam-hq-training-duo", name=f"experiment_{self.strategy_name}-distill-model__{args_yaml.model.model_type}-lr-{args_yaml.train_prune_rate.learning_rate}-lr_drop_{args_yaml.train_prune_rate.lr_drop_epoch}-reg_weight_{args_yaml.train_prune_rate.reg_weight}")
         elif args_yaml.train_prune_rate.training_method == "diffduo":
             wandb.init(project="sam-hq-training-diffduo", name=f"experiment_{self.strategy_name}-distill-model__{args_yaml.model.model_type}-lr-{args_yaml.train_prune_rate.learning_rate}-lr_drop_{args_yaml.train_prune_rate.lr_drop_epoch}-reg_weight_{args_yaml.train_prune_rate.reg_weight}")
@@ -806,6 +808,11 @@ if __name__ == '__main__':
             modules=( EncoderAttentionTraining, EncoderAttention, EncoderSamAttention),
             num_samples=args.num_calib_samples
         )
+        processor.set_params(args_yaml)
+    if args_yaml.train_prune_rate.training_method == "duo":
+        processor = get_encoder_processor("PRUNE_RATE_DUO")
+        processor.set_params(args_yaml)
+        
 
 
     encoder_config =  None
@@ -815,7 +822,7 @@ if __name__ == '__main__':
     if args.train:
         engine.train_model(predictor=predictor, args_yaml=args_yaml)
     else:
-        results = engine.eval_hq44k(predictor=predictor, num_samples=args.num_samples, checkpoint_evaluation= args.checkpoint_evaluation, plot_figures=False)
+        results = engine.eval_hq44k(predictor=predictor,processor=processor , num_samples=args.num_samples, checkpoint_evaluation= args.checkpoint_evaluation, plot_figures=False)
 
 
     # 
