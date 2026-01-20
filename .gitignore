@@ -40,6 +40,8 @@ sam2_ckts/
 tmp/
 cuda-12.1.0/
 cuda/
+Block-Sparse-Attention/
+
 # Exclude Python cache files
 __pycache__/
 *.pyc
