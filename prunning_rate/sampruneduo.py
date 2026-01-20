@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Tuple
 from segment_anything.modeling import Sam
 import torch
 import torch.nn as nn
+from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
+
 
 
 
@@ -38,7 +40,7 @@ class DuoPruneRateAttention(EncoderAttention):
         self.threshold = args.train_prune_rate.threshold  # You can set this to any desired value
         self.global_threshold = args.train_prune_rate.threshold_globle
         self.model_type = args.model.model_type
-    
+        self.positional_quant = args.quantization.positional_quant
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         
         
@@ -95,24 +97,27 @@ class DuoPruneRateAttention(EncoderAttention):
             # Determine which heads to prune based on threshold
             if hasattr(self, 'full_attention_heads') and self.full_attention_heads is not None:
                 # Create pruning mask: True for heads to prune (below threshold)
-                head_weights = self.full_attention_heads.clamp(0, 1)
+                # head_weights = self.full_attention_heads.clamp(0, 1)
+                head_weights = self.full_attention_heads
 
                 if self.model_type == "vit_b":
                     if not any(num in self.module_name for num in [".2", ".5", "8", "11"]):
                         prune_mask = head_weights < self.threshold
                     else:
                         prune_mask = head_weights < self.global_threshold
+                    n_bits = 4 if not prune_mask.shape[0] == 300 else 2
                 elif self.model_type =="vit_l":
                     if not any(num in self.module_name for num in [".5", "11", "17", "23"]):
                         prune_mask = head_weights < self.threshold
                     else:
                         prune_mask = head_weights < self.global_threshold
+                    n_bits = 4 if not prune_mask.shape[0] == 400 else 2
                 elif self.model_type == "vit_h":
                     if not any(num in self.module_name for num in [".7", "15", "23", "31"]):
                         prune_mask = head_weights < self.threshold
                     else:
                         prune_mask = head_weights < self.global_threshold
-                
+                    n_bits = 4 if not prune_mask.shape[0] == 400 else 2
                 
                 # Expand mask to match batch dimension
                 prune_mask = prune_mask.repeat(q.shape[0]// len(head_weights))
@@ -122,8 +127,13 @@ class DuoPruneRateAttention(EncoderAttention):
                 q_attn = q[~prune_mask, :, :]
                 k_attn = k[~prune_mask, :, :]
                 v_attn = v[~prune_mask, :, :]
-                v_pruned = v[prune_mask, :, :]
-                
+                if not self.positional_quant:
+                    v_pruned = v[prune_mask, :, :]
+                else:
+                    q_prune = quantize_activation_per_token_absmax(q[prune_mask, :, :], n_bits)
+                    k_prune = quantize_activation_per_token_absmax(k[prune_mask, :, :], n_bits)
+                    v_prune = quantize_activation_per_channel_absmax(v[prune_mask, :, :], n_bits)
+
                 # print(q_attn.shape, k_attn.shape, v_attn.shape, v_pruned.shape )
                 
             else:
@@ -137,12 +147,17 @@ class DuoPruneRateAttention(EncoderAttention):
                 attn = add_decomposed_rel_pos(attn, q_attn, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
             attn = attn.softmax(dim=-1)
             x_attn = attn @ v_attn
-            
+            if self.positional_quant:
+                attn_prune = ((q_prune * self.scale) @ k_prune.transpose(-2, -1)).softmax(dim=-1)
+                x_prune = quantize_activation_per_token_absmax(attn_prune, n_bits) @ v_prune
             # Merge outputs
             if prune_mask is not None:
                 x = torch.zeros_like(v).to(v.device)
                 # For pruned heads: use mean of value vectors
-                x[prune_mask] = v_pruned.mean(-2, keepdim=True).expand(-1, x_attn.shape[-2], x_attn.shape[-1])
+                if not self.positional_quant:
+                    x[prune_mask] = v_pruned.mean(-2, keepdim=True).expand(-1, x_attn.shape[-2], x_attn.shape[-1])
+                else:
+                    x[prune_mask] = x_prune
                 # For non-pruned heads: use computed attention
                 x[~prune_mask] = x_attn
             else:

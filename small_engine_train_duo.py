@@ -197,7 +197,8 @@ def print_pruned_heads_info(model, threshold, global_threshold, logger, model_ty
         # (A) OLD PATH: full_attention_heads
         # =========================
         if has_full and not has_duo:
-            head_weights = module.full_attention_heads.clamp(0, 1)
+            # head_weights = module.full_attention_heads.clamp(0, 1)
+            head_weights = module.full_attention_heads
             num_total = int(head_weights.numel())
 
             # old meaning: pruned if head weight is below threshold
@@ -557,12 +558,12 @@ def train(args, sam_hq, optimizer, train_dataloaders, valid_dataloaders, lr_sche
                 T=2.0,
             )
             loss = loss_distill  +  args.reg_weight * reg_loss
-            # wandb.log({
-            #     "train_step/loss": loss.item(),
-            #     "train_step/loss_distill": loss_distill.item(), 
-            #     "train_step/reg_loss": reg_loss.item(),
-            #     "train_step/epoch": epoch,
-            # })
+            wandb.log({
+                "train_step/loss": loss.item(),
+                "train_step/loss_distill": loss_distill.item(), 
+                "train_step/reg_loss": reg_loss.item(),
+                "train_step/epoch": epoch,
+            })
 
             loss_dict = {"loss_distill": loss_distill}
 
@@ -594,11 +595,11 @@ def train(args, sam_hq, optimizer, train_dataloaders, valid_dataloaders, lr_sche
         epoch_time = time.time() - epoch_start_time
         total_training_time = time.time() - training_start_time
         
-        # wandb_log_dict = {"epoch": epoch}
-        # wandb_log_dict.update({f"epoch/{k}": v for k, v in train_stats.items()})
-        # wandb_log_dict["epoch/time_seconds"] = epoch_time
-        # wandb_log_dict["epoch/total_training_time_seconds"] = total_training_time
-        # wandb.log(wandb_log_dict)
+        wandb_log_dict = {"epoch": epoch}
+        wandb_log_dict.update({f"epoch/{k}": v for k, v in train_stats.items()})
+        wandb_log_dict["epoch/time_seconds"] = epoch_time
+        wandb_log_dict["epoch/total_training_time_seconds"] = total_training_time
+        wandb.log(wandb_log_dict)
         sam_hq.train()  
 
         if epoch % args.model_save_fre == 0 and epoch != 0:
@@ -632,7 +633,7 @@ class training_engine:
         
         if self.train:
             
-            valid_im_gt_list = get_im_gt_name_dict([datasets[0]], flag="valid")
+            valid_im_gt_list = get_im_gt_name_dict([datasets[2]], flag="valid")
             for dataset_dict in valid_im_gt_list:
                 dataset_dict["im_path"] = dataset_dict["im_path"][-10:]
                 dataset_dict["gt_path"] = dataset_dict["gt_path"][-10:]
@@ -747,8 +748,10 @@ class training_engine:
         
         lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args_yaml.train_prune_rate.lr_drop_epoch)
         lr_scheduler.last_epoch = args_yaml.train_prune_rate.start_epoch
-        
-        # wandb.init(project="sam-hq-training-duo", name=f"experiment_{self.strategy_name}-distill-model__{args_yaml.model.model_type}-lr-{args_yaml.train_prune_rate.learning_rate}-lr_drop_{args_yaml.train_prune_rate.lr_drop_epoch}-reg_weight_{args_yaml.train_prune_rate.reg_weight}")
+        if args_yaml.train_prune_rate.training_method == "duo" :
+            wandb.init(project="sam-hq-training-duo", name=f"experiment_{self.strategy_name}-distill-model__{args_yaml.model.model_type}-lr-{args_yaml.train_prune_rate.learning_rate}-lr_drop_{args_yaml.train_prune_rate.lr_drop_epoch}-reg_weight_{args_yaml.train_prune_rate.reg_weight}")
+        elif args_yaml.train_prune_rate.training_method == "diffduo":
+            wandb.init(project="sam-hq-training-diffduo", name=f"experiment_{self.strategy_name}-distill-model__{args_yaml.model.model_type}-lr-{args_yaml.train_prune_rate.learning_rate}-lr_drop_{args_yaml.train_prune_rate.lr_drop_epoch}-reg_weight_{args_yaml.train_prune_rate.reg_weight}")
         train(args_yaml.train_prune_rate, sam,  optimizer, self.train_dataloaders, self.valid_dataloaders, lr_scheduler)
 if __name__ == '__main__':
     
