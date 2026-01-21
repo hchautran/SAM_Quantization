@@ -709,7 +709,10 @@ class training_engine:
         logger.info('Number of Sample {}'.format(num_samples))
         logger.info(f"{'='*120}")
         if not self.args.quantization.use_percentage:
-            pruned_count, total_count = print_pruned_heads_info(predictor.model, threshold, global_threshold, logger, self.args.model.model_type)    
+            pruned_count, total_count = print_pruned_heads_info(predictor.model, threshold, global_threshold, logger, self.args.model.model_type)   
+        logger.info("Local percent {}".format(self.args.quantization.percent_entropy))
+        logger.info("Global percent {}".format(self.args.quantization.percent_entropy_global))
+        logger.info("Model type {}".format(self.args.model.model_type))
         # exit()
 
         sam = predictor.model

@@ -121,7 +121,7 @@ class DuoDiffPruneRateAttention(EncoderAttention):
                 kept_head_num = len(sorted_indices)- prune_head_num
                 non_prune_mask = sorted_indices[:kept_head_num]
                 prune_mask = sorted_indices[kept_head_num:]
-                single_mask_probability = torch.zeros(self.num_heads) # Dummy for determining n_bits size check
+                single_mask_probability = torch.zeros(len(sorted_indices)) # Dummy for determining n_bits size check
             else:
                 should_prune = True
                 if not self.prune_global:

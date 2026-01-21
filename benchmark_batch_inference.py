@@ -357,8 +357,8 @@ class BatchEvaluator:
 
         all_results = dict()
 
-        for i in range(2,len(datasets_config)):
-            logger.info(f"{'='*250}")
+        for i in range(2,4):
+            logger.info(f"{'='*150}")
             dataname= datasets_config[i]["name"]
             print(f"Running benchmark for dataset {dataname}...")
             logger.info(f"Running benchmark for dataset {dataname}...")
@@ -470,9 +470,15 @@ def run_single_benchmark(args):
         states = "Manual_positional_prune"
     elif args.processor == "POSITIONAL_QUANT":
         states = "Manual_positional_quant"
-    
+    elif args.processor == "HEAD_PRUNE":
+        states = "Manual_head_prune"
+    elif args.processor == "SUB_IMAGE_PRUNE":
+        states = "Manual_sub_image_prune"
     logger = setup_logger("./logs", states)  # Use the states variable to create logger
-
+    logger.info(f"{'='*250}")
+    logger.info(f"Local percent: {args.percent}")
+    logger.info(f"Global percent: {args.percent_global}")
+    logger.info(f"Model type: {args.model_type}")
     # Get processor
     enc_processor = get_encoder_processor(args.processor)
 
@@ -708,7 +714,7 @@ def main():
                        help='percent-global')
     parser.add_argument('--prune-global', action='store_true',
                        help='Number of samples per batch size')
-    parser.add_argument('--n-bits', type=int, default=8,
+    parser.add_argument('--n-bits', type=int, default=16,
                        help='Number of samples per batch size')
     parser.add_argument('--high-entropy', action='store_true',
                        help='Number of samples per batch size')
@@ -724,7 +730,7 @@ def main():
 
     # Model parameters
     parser.add_argument('--processor', type=str, default='POSITIONAL_PRUNE',
-                       choices=['BASE','POSITIONAL_PRUNE', 'POSITIONAL_QUANT', 'HEAD_PRUNE'],
+                       choices=['BASE','POSITIONAL_PRUNE', 'POSITIONAL_QUANT', 'HEAD_PRUNE','SUB_IMAGE_PRUNE'],
                        help='Processor to use')
     parser.add_argument('--quantize-encoder', action='store_true',
                        help='Enable encoder quantization')

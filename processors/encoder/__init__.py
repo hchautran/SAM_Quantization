@@ -1,7 +1,7 @@
 """Encoder processors for SAM quantization."""
 
 from .basic import EncoderAttentionProcessor, EncoderRecenterAttentionProcessor
-from .entropy import PositionalPruneProcessor, HeadPruneProcessor, PositionalQuantProcessor,PruneRateDuoProcessor ,PruneRateProcessor, EntropyValueCheck, AttentionMapCollector
+from .entropy import PositionalPruneProcessor, HeadPruneProcessor, WholeSubImageProcessor, PositionalQuantProcessor ,PruneRateDuoProcessor ,PruneRateProcessor, EntropyValueCheck, AttentionMapCollector
 from .entropy_sam2 import (
     PositionalPruneSAM2Processor,
     HeadPruneSAM2Processor,
@@ -23,6 +23,7 @@ __all__ = [
     "EncoderRecenterAttentionProcessor",
     "PositionalPruneProcessor",
     "HeadPruneProcessor",
+    "WholeSubImageProcessor",
     "PositionalQuantProcessor",
     "EntropyValueCheck",
     "AttentionMapCollector",
