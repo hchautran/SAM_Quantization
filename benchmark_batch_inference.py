@@ -357,8 +357,8 @@ class BatchEvaluator:
 
         all_results = dict()
 
-        for i in range(2,len(datasets_config)):
-            logger.info(f"{'='*250}")
+        for i in range(2,3):
+            
             dataname= datasets_config[i]["name"]
             print(f"Running benchmark for dataset {dataname}...")
             logger.info(f"Running benchmark for dataset {dataname}...")
@@ -470,9 +470,15 @@ def run_single_benchmark(args):
         states = "Manual_positional_prune"
     elif args.processor == "POSITIONAL_QUANT":
         states = "Manual_positional_quant"
+    elif args.processor == "HEAD_PRUNE":
+        states =  "Manual_head_prune"
     
     logger = setup_logger("./logs", states)  # Use the states variable to create logger
-
+    logger.info(f"{'='*250}")
+    logger.info(f"Local Percent : {args.percent}")
+    logger.info(f"Global Percent : {args.percent_global}")
+    logger.info(f"Prune High : {args.high_entropy}")
+    logger.info(f"Model type : {args.model_type}")
     # Get processor
     enc_processor = get_encoder_processor(args.processor)
 

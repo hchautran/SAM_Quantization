@@ -104,7 +104,6 @@ class DuoDiffPruneRateAttention(EncoderAttention):
         
         else:
             B, H, W, _ = x.shape
-            
             # qkv with shape (3, B, nHead, H * W, C)
             qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
             # q, k, v with shape (B * nHead, H * W, C)
@@ -121,7 +120,7 @@ class DuoDiffPruneRateAttention(EncoderAttention):
                 kept_head_num = len(sorted_indices)- prune_head_num
                 non_prune_mask = sorted_indices[:kept_head_num]
                 prune_mask = sorted_indices[kept_head_num:]
-                single_mask_probability = torch.zeros(self.num_heads) # Dummy for determining n_bits size check
+                single_mask_probability = torch.zeros(len(sorted_indices)) # Dummy for determining n_bits size check
             else:
                 should_prune = True
                 if not self.prune_global:
@@ -207,7 +206,6 @@ class DuoDiffPruneRateAttention(EncoderAttention):
                 x = attn @ v
         
             # Reshape output to original spatial dimensions
-            
             x = x.view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
             x = self.proj(x)
       

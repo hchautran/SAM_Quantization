@@ -11,7 +11,7 @@ model:
   
   device: cpu
 train_prune_rate:
-  training_method: diffduo # duo or diffduo --> this parameter is used in training duo
+  training_method: diffduo
   learning_rate: 5e-2
   lr_drop_epoch: 2
   start_epoch: 0
@@ -70,10 +70,10 @@ quantization:
   channel: False
   percent: 100
   centerQ: False
-  percent_entropy: 0.7
-  percent_entropy_global: 0.7
+  percent_entropy: 1
+  percent_entropy_global: 0.5
   high_entropy: True 
   prune_global: True 
   train_rate_prune: True
-  positional_quant: False
+  positional_quant: True
   use_percentage: True

@@ -656,7 +656,7 @@ class training_engine:
                 training= True
             )
         else:
-            valid_im_gt_list = get_im_gt_name_dict(datasets[2:], flag="valid")
+            valid_im_gt_list = get_im_gt_name_dict(datasets[2:3], flag="valid")
             self.dataloaders, self.datasets = create_calib_dataloaders(
                 valid_im_gt_list,
                 my_transforms=[Resize([1024, 1024])],
@@ -711,6 +711,8 @@ class training_engine:
         logger.info(f"{'='*120}")
         if not self.args.quantization.use_percentage:
             pruned_count, total_count = print_pruned_heads_info(predictor.model, threshold, global_threshold, logger, self.args.model.model_type)    
+        logger.info("Local percent: {}".format(self.args.quantization.percent_entropy))
+        logger.info("Global percent: {}".format(self.args.quantization.percent_entropy_global))
         # exit()
 
         sam = predictor.model
