@@ -57,7 +57,7 @@ for i in "${!MODEL_TYPES[@]}"; do
             --n-bits 16 \
             --num-calib-samples 16 \
             --processor "$processor" \
-            --detector hdetr
+            --detector dino
 
         echo "Evaluation completed for model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, processor=${processor}"
     done

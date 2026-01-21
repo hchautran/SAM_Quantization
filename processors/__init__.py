@@ -14,6 +14,7 @@ from .encoder import (
     AttentionMapCollector,
     PruneRateDuoProcessor,
     PruneRateProcessor,
+    WholeSubImageProcessor,
     HeadPruneProcessor,
     PositionalQuantProcessor,
     EncoderAttentionProcessorSmoothMeanQ,
@@ -83,6 +84,7 @@ register_encoder_processor("PRUNE_RATE_DUO")(PruneRateDuoProcessor)
 register_encoder_processor("PRUNE_RATE")(PruneRateProcessor)
 register_encoder_processor("ENTROPY_VALUE_CHECK")(EntropyValueCheck)
 register_encoder_processor("ATTN_MAP_COLLECTOR")(AttentionMapCollector)
+register_encoder_processor("SUB_IMAGE_PRUNE")(WholeSubImageProcessor)
 register_encoder_processor("HEAD_PRUNE")(HeadPruneProcessor)
 register_encoder_processor("POSITIONAL_QUANT")(PositionalQuantProcessor)
 register_encoder_processor("SMOOTH_MEAN_Q")(EncoderAttentionProcessorSmoothMeanQ)
@@ -101,6 +103,7 @@ __all__ = [
     # Encoder processors
     "EncoderAttentionProcessor",
     "EncoderRecenterAttentionProcessor",
+    "WholeSubImageProcessor",
     "HeadPruneProcessor",
     "PositionalPruneProcessor",
     "PruneRateDuoProcessor",

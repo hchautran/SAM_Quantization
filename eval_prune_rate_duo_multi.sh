@@ -12,6 +12,7 @@ CHECKPOINT_EVALUATION="/home/ubuntu/21chi.nh/Quantization/SAM_Quantization/SAM_Q
 
 # local thresholds
 LOCAL_PERCENT=(  0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1  )
+LOCAL_PERCENT=(  0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1  )
 
 # global thresholds
 GLOBAL_PERCENT=(   0.5 )
@@ -19,6 +20,7 @@ GLOBAL_PERCENT=(   0.5 )
 update_yaml_thresholds() {
     local thr_local="$1"
     local thr_global="$2"
+    local training_method="duo"  # Added 'local' for function scope if desired; remove if global is intended
     local training_method="duo"  # Added 'local' for function scope if desired; remove if global is intended
 
     # Replace quantization.percent_entropy

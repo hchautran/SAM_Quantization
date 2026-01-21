@@ -10,6 +10,10 @@ from ..base import AttentionProcessor, setup_logger
 from torch.distributions import Exponential
 from utils.quant_utils import quantize_activation_per_channel_absmax, quantize_activation_per_token_absmax
 
+# from block_sparse_attn.attention import block_sparse_attn_simple
+# from examples.masks import generate_image_to_prompt_mask
+
+
 from omegaconf import OmegaConf
 
 def exists(cfg, key):
@@ -237,7 +241,7 @@ class BaseEntropyProcessor(AttentionProcessor):
         else:
             self._process_percent_mode(predictor)
 
-        # self._log_final_stats()
+        self._log_final_stats()
 
     def _log_final_stats(self):
         """Log the final entropy statistics."""
@@ -756,11 +760,9 @@ class HeadPruneProcessor(BaseEntropyProcessor):
 
     def __init__(self, strategy_name: str = 'head_prune'):
         super().__init__(strategy_name)
-        self.percent_global = 0.5
 
     def set_params(self, args):
         super().set_params(args)
-        self.percent_global = args.percent_global
 
     def calculate_entropy(self, attn_head):
         """Calculate entropy for each position in a single attention head."""
@@ -826,34 +828,212 @@ class HeadPruneProcessor(BaseEntropyProcessor):
                 if layer_name not in layer_heads:
                     layer_heads[layer_name] = []
                 layer_heads[layer_name].append((head_idx, entropy_mean.item()))
-
+        nu_heads= predictor.model.image_encoder.blocks[0].attn.num_heads
+        
+        
         # Select heads by percentage
         self.final_entropy_stats = {}
         for layer_name, heads_with_entropy in layer_heads.items():
+            nu_subimages = 25
+            percent = self.percent
+            if self.model_type == "vit_b" :    
+                if  any(num in layer_name for num in ["2", "5", "8", "11"]):
+                    nu_subimages = 1
+                    percent = self.global_percent
+            elif self.model_type == "vit_l" :
+                if  any(num in layer_name for num in [".5", "11", "17", "23"]):
+                    nu_subimages = 1
+                    percent = self.global_percent
+            elif self.model_type == "vit_h" :
+                if  any(num in layer_name for num in [".7", "15", "23", "31"]):
+                    nu_subimages = 1
+                    percent = self.global_percent
             if len(heads_with_entropy) > 0:
                 heads_with_entropy.sort(
                     key=lambda x: x[1],
                     reverse=self.prunehighentropy
                 )
 
-                num_heads_to_select = max(1, int(len(heads_with_entropy) * self.percent))
+                num_heads_to_select =  int(len(heads_with_entropy) * percent)
                 selected_heads = heads_with_entropy[:num_heads_to_select]
 
                 # Create mask for batch * heads indexing
                 selected_head_indices = torch.tensor([head_idx for head_idx, _ in selected_heads])
-                mask_indices = (torch.arange(25)[:, None] * 16 + selected_head_indices).flatten()
-                mask = torch.isin(torch.arange(16*25), mask_indices).to(predictor.device)
+                mask_indices = (torch.arange(nu_subimages)[:, None] * nu_heads + selected_head_indices).flatten()
+                mask = torch.isin(torch.arange(nu_heads*nu_subimages), mask_indices).to(predictor.device)
                 self.final_entropy_stats[layer_name] = mask
 
     def process(self, x: torch.Tensor, module, module_name: str = None):
         """Standard attention processing with optional head pruning."""
-        if not any(num in module_name for num in ["5", "11", "17", "23"]):
-            prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+        if not self.prune_global:
+            if self.model_type == "vit_b" :
+                if not any(num in module_name for num in ["2", "5", "8", "11"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
+            elif self.model_type =="vit_l":
+                if not any(num in module_name for num in ["5", "11", "17", "23"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
+            elif self.model_type == "vit_h":
+                if not any(num in module_name for num in ["7", "15", "23", "31"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
         else:
-            prune_mask = None
-
+            prune_mask = module.processor.final_entropy_stats.get(module_name, None)
         q, k, v, B, H, W = self._compute_qkv(x, module)
+        if prune_mask is not None:
+            prune_mask = prune_mask.repeat(q.shape[0] // prune_mask.shape[0])
+            q = q[~prune_mask, :, :]
+            k = k[~prune_mask, :, :]
+            v_pruned = v[prune_mask, :, :]
+            v = v[~prune_mask, :, :]
+            
+        attn = self._compute_attention(q, k, module, H, W)
+        x_attn = attn @ v
 
+        if prune_mask is not None:
+            x = torch.zeros(B * module.num_heads, attn.shape[-2], v.shape[-1]).to(v.device)
+            x[prune_mask] = v_pruned.mean(-2, keepdim=True).expand(-1, x_attn.shape[-2], x_attn.shape[-1])
+            x[~prune_mask] = x_attn
+        else:
+            x = x_attn
+
+        x = self._reshape_output(x, B, module.num_heads, H, W)
+        x = module.proj(x)
+        return x
+
+class WholeSubImageProcessor(BaseEntropyProcessor):
+    def __init__(self, strategy_name: str = 'head_prune'):
+        super().__init__(strategy_name)
+
+    def set_params(self, args):
+        super().set_params(args)
+
+    def calculate_entropy(self, attn_head):
+        """Calculate entropy for each position in a single attention head."""
+        if isinstance(attn_head, torch.Tensor) is False:
+            attn_head = torch.from_numpy(attn_head)
+
+        eps = 1e-12
+        attn_normalized = torch.clamp(attn_head, min=eps)
+        entropy_per_position = -torch.mean(attn_normalized * torch.log(attn_normalized), dim=-1)
+        return entropy_per_position
+    
+    def _create_attention_hook(self, name):
+        """Create attention hook for head pruning."""
+        def attention_hook(module, input, output):
+            x = input[0] if isinstance(input, tuple) else input
+            B, H, W, _ = x.shape
+
+            qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.reshape(3, B * module.num_heads, H * W, -1).unbind(0)
+
+            attn = (q * module.scale) @ k.transpose(-2, -1)
+            if module.use_rel_pos:
+                attn = add_decomposed_rel_pos(attn, q, module.rel_pos_h, module.rel_pos_w, (H, W), (H, W))
+
+            attn = attn.softmax(dim=-1).reshape(B, module.num_heads , attn.shape[-2], -1)
+            B, n_heads, N, _ = attn.shape
+
+            for subimage_idx in range(B):
+                attn_subimage = attn[subimage_idx]
+                entropy_per_position = self.calculate_entropy(attn_subimage)
+                head_key = f"{name}.subimage_{subimage_idx}"
+                self.entropy_stats[head_key].append(entropy_per_position.mean(-1).mean(-1).item())
+
+        return attention_hook
+    def _process_percent_mode(self, predictor):
+        """Process calibration in percent mode."""
+        layer_heads = {}
+        for head_key, stats in self.entropy_stats.items():
+            if len(stats) > 0:
+                entropy_mean = self._compute_entropy_stats(stats)
+                layer_name, subimage_idx = self._parse_head_key(head_key)
+                
+                if layer_name not in layer_heads:
+                    layer_heads[layer_name] = []
+                layer_heads[layer_name].append((subimage_idx, entropy_mean.item()))
+        
+        nu_heads = predictor.model.image_encoder.blocks[0].attn.num_heads
+
+        # Select heads by percentage
+        self.final_entropy_stats = {}
+        for layer_name, subimages_with_entropy in layer_heads.items():
+            nu_subimages = 25
+            percent = self.percent
+            
+            # Identify Global vs Local layers
+            is_global = False
+            if self.model_type == "vit_b":    
+                if any(num in layer_name for num in ["2", "5", "8", "11"]):
+                    is_global = True
+            elif self.model_type == "vit_l":
+                if any(num in layer_name for num in [".5", "11", "17", "23"]):
+                    is_global = True
+            elif self.model_type == "vit_h":
+                # Note: fixed module_name -> layer_name typo from context
+                if any(num in layer_name for num in [".7", "15", "23", "31"]):
+                    is_global = True
+            
+            if is_global:
+                nu_subimages = 1
+                percent = self.global_percent
+
+            if len(subimages_with_entropy) > 0:
+                subimages_with_entropy.sort(
+                    key=lambda x: x[1],
+                    reverse=self.prunehighentropy
+                )
+
+                num_heads_to_select = int(len(subimages_with_entropy) * percent)
+                selected_subimage = subimages_with_entropy[:num_heads_to_select]
+
+                # Create mask for batch * heads indexing
+                selected_subimage_indices = torch.tensor(
+                    [subimage_idx for subimage_idx, _ in selected_subimage], 
+                    device=predictor.device
+                )
+                
+                if nu_subimages > 1:
+                    # Expand indices: {2, 5} -> {2*H...2*H+H-1, 5*H...5*H+H-1}
+                    # This maps selected sub-images to all their constituent heads
+                    mask_indices = (
+                        selected_subimage_indices.unsqueeze(1) * nu_heads + 
+                        torch.arange(nu_heads, device=predictor.device).unsqueeze(0)
+                    ).flatten()
+                else:
+                    # Fallback for global or non-expanded case
+                    mask_indices = selected_subimage_indices
+
+                mask = torch.isin(
+                    torch.arange(nu_heads * nu_subimages, device=predictor.device), 
+                    mask_indices
+                )
+                self.final_entropy_stats[layer_name] = mask
+    def process(self, x: torch.Tensor, module, module_name: str = None):
+        """Standard attention processing with optional head pruning."""
+        if not self.prune_global:
+            if self.model_type == "vit_b" :
+                if not any(num in module_name for num in ["2", "5", "8", "11"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
+            elif self.model_type =="vit_l":
+                if not any(num in module_name for num in ["5", "11", "17", "23"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
+            elif self.model_type == "vit_h":
+                if not any(num in module_name for num in ["7", "15", "23", "31"]):
+                    prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+                else:
+                    prune_mask = None
+        else:
+            prune_mask = module.processor.final_entropy_stats.get(module_name, None)
+        q, k, v, B, H, W = self._compute_qkv(x, module)
         if prune_mask is not None:
             prune_mask = prune_mask.repeat(q.shape[0] // prune_mask.shape[0])
             q = q[~prune_mask, :, :]
@@ -874,8 +1054,7 @@ class HeadPruneProcessor(BaseEntropyProcessor):
         x = self._reshape_output(x, B, module.num_heads, H, W)
         x = module.proj(x)
         return x
-
-
+    
 class PositionalQuantProcessor(BaseEntropyProcessor):
     """
     Processor that quantizes attention heads based on global entropy of their attention distribution.
@@ -894,8 +1073,6 @@ class PositionalQuantProcessor(BaseEntropyProcessor):
 
     def __init__(self, strategy_name: str = 'PositionalHeadPruneProcessor'):
         super().__init__(strategy_name)
-        self.global_percent = 0.5
-        self.prune_global = False
 
     def set_params(self, args):
         super().set_params(args)

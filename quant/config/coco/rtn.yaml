@@ -3,11 +3,11 @@ model:
   use_hq: True
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
   # model_type: 'vit_b'
-  # hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_b.pth'
-  model_type: vit_l 
-  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
-  # model_type: 'vit_h'
-  # hq_checkpoint: './pretrained_checkpoint/sam_hq_vit_h.pth'
+  # hq_checkpoint: './ckts/sam_hq_vit_b.pth'
+  # model_type: vit_l
+  # hq_checkpoint: ./ckts/sam_hq_vit_l.pth
+  model_type: vit_h
+  hq_checkpoint: ./ckts/sam_hq_vit_h.pth
   
   device: cpu
 train_prune_rate:
@@ -70,10 +70,11 @@ quantization:
   channel: False
   percent: 100
   centerQ: False
-  percent_entropy: 1
+  percent_entropy: 0.7
   percent_entropy_global: 0.5
   high_entropy: True 
   prune_global: True 
+  # this parameter for train prune rate
   train_rate_prune: True
   positional_quant: True
   use_percentage: True
