@@ -241,7 +241,7 @@ class BaseEntropyProcessor(AttentionProcessor):
         else:
             self._process_percent_mode(predictor)
 
-        self._log_final_stats()
+        # self._log_final_stats()
 
     def _log_final_stats(self):
         """Log the final entropy statistics."""
@@ -514,9 +514,16 @@ class EntropyValueCheck(BaseEntropyProcessor):
             attn_head = torch.from_numpy(attn_head)
 
         eps = 1e-12
+        # Ensure values are clamped for numerical stability and flattened
         attn_head = torch.clamp(attn_head, min=eps).flatten()
-        entropy = -torch.sum(attn_head * torch.log(attn_head))
-        return entropy
+        
+        # Calculate entropy per element
+        element_wise_entropy = -(attn_head * torch.log(attn_head))
+        
+        # Take the mean across all elements in the attention matrix
+        mean_entropy = torch.mean(element_wise_entropy)
+        
+        return mean_entropy
     def _create_attention_hook(self, name):
         """Create attention hook for positional pruning."""
         def attention_hook(module, input, output):
@@ -872,12 +879,12 @@ class HeadPruneProcessor(BaseEntropyProcessor):
                 else:
                     prune_mask = None
             elif self.model_type =="vit_l":
-                if not any(num in module_name for num in ["5", "11", "17", "23"]):
+                if not any(num in module_name for num in [".5", "11", "17", "23"]):
                     prune_mask = module.processor.final_entropy_stats.get(module_name, None)
                 else:
                     prune_mask = None
             elif self.model_type == "vit_h":
-                if not any(num in module_name for num in ["7", "15", "23", "31"]):
+                if not any(num in module_name for num in [".7", "15", "23", "31"]):
                     prune_mask = module.processor.final_entropy_stats.get(module_name, None)
                 else:
                     prune_mask = None

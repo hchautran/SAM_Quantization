@@ -108,14 +108,14 @@ class DuoDiffPruneRateAttention(EncoderAttention):
             qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
             # q, k, v with shape (B * nHead, H * W, C)
             q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
-            nu_images =1
             
+            sorted_indices = self.processor.final_entropy_stats.get(self.module_name, None)
             # prune_kept_num=  int(self.prune_ddp.update_kept_head_number() )
             if self.use_percentage:
 
                 
                 
-                sorted_indices = self.processor.final_entropy_stats.get(self.module_name, None)
+                
                 prune_head_num = self.processor.prune_counts_per_layer.get(self.module_name, self.num_heads)
                 kept_head_num = len(sorted_indices)- prune_head_num
                 non_prune_mask = sorted_indices[:kept_head_num]
@@ -153,10 +153,23 @@ class DuoDiffPruneRateAttention(EncoderAttention):
                             mask = single_mask_probability > self.global_threshold
 
                     kept_head_num = mask.sum().item()
-                    non_prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)[:kept_head_num]
-                    prune_mask = self.processor.final_entropy_stats.get(self.module_name, None)[kept_head_num:]
-                
-            
+                    non_prune_mask = sorted_indices[:kept_head_num]
+                    prune_mask = sorted_indices[kept_head_num:]
+            nu_images =    q.shape[0]// len(sorted_indices)
+            all_non_prune = []
+            all_prune = []
+            num_heads = len(sorted_indices)
+
+            for i in range(nu_images):
+                # Use list comprehension to add the offset to each index
+                offset = i * num_heads
+                all_non_prune.extend([idx + offset for idx in non_prune_mask])
+                all_prune.extend([idx + offset for idx in prune_mask])
+
+            # Now use these extended lists for indexing
+            non_prune_mask = all_non_prune
+            prune_mask = all_prune
+            # import ipdb; ipdb.set_trace( )
             if prune_mask is not None:
                 if not self.positional_quant :
                     q_attn = q[non_prune_mask, :, :]

@@ -39,6 +39,7 @@ from segment_anything.modeling.transformer import  Attention as  DecoderAttentio
 from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention 
 from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining
 from sam_engine import override_args, Evaluator , create_calib_dataloaders, setup_logger, get_default_datasets, plot_output
+from benchmark_batch_inference import BatchEvaluator
 import wandb
 
 from processors import (
@@ -51,12 +52,24 @@ from processors import (
 
 def get_full_attention_heads(model):
     full_attention_heads = []
-    # import ipdb; ipdb.set_trace()
+    
+    # Accessing the blocks in the image encoder
     for layer in model.module.image_encoder.blocks:
         module = layer.attn
+        
         if not hasattr(module, "full_attention_heads"):
             continue
-        full_attention_heads.append(module.full_attention_heads)
+            
+        heads = module.full_attention_heads
+        
+        # Logic: If length is not a multiple of 100 (e.g., len=16)
+        if heads.shape[0] % 100 != 0:
+            heads_to_append = heads.repeat(25)
+        else:
+            heads_to_append = heads
+            
+        full_attention_heads.append(heads_to_append)
+        
     return full_attention_heads
 
 def get_head_probability(model):
@@ -66,6 +79,9 @@ def get_head_probability(model):
         if not hasattr(module, "prune_ddp"):
             continue
         head_probability = module.prune_ddp.get_head_probability_diff_duo()
+        if head_probability.shape[0] % 100 != 0:
+            # Duplicate the global heads 25 times to match the local count (400)
+            head_probability = head_probability.repeat(25)
         full_head_probability.append(head_probability)
     return full_head_probability
 def print_model_structure(model, title="Model Structure"):
@@ -200,7 +216,7 @@ def print_pruned_heads_info(model, threshold, global_threshold, logger, model_ty
             # head_weights = module.full_attention_heads.clamp(0, 1)
             head_weights = module.full_attention_heads
             num_total = int(head_weights.numel())
-
+            logger.info(f"{tag} {name}: head_weight ",head_weights)
             # old meaning: pruned if head weight is below threshold
             pruned_mask = head_weights < thr_used
 
@@ -210,7 +226,7 @@ def print_pruned_heads_info(model, threshold, global_threshold, logger, model_ty
         else:
             # new meaning: kept if prob_diff > threshold -> pruned otherwise
             single_mask_probability = module.prune_ddp.get_head_probability_diff_duo()
-
+            logger.info(f"{tag} {name}: maskp probability", single_mask_probability)
             # make sure it's a tensor on CPU-friendly dtype
             if not torch.is_tensor(single_mask_probability):
                 single_mask_probability = torch.tensor(single_mask_probability)
@@ -604,9 +620,9 @@ def train(args, sam_hq, optimizer, train_dataloaders, valid_dataloaders, lr_sche
 
         if epoch % args.model_save_fre == 0 and epoch != 0:
             if args.training_method == "diffduo" :
-                model_name = "/diffduo_sam_hq_epoch_torchnograd_distill" + str(epoch) + "_" + str(args_yaml.model.model_type) + "_reg-weight_" + str(args.reg_weight) + "_lr" + str(learning_rate) + "_lr_drop" + str(lr_drop) + ".pth"
+                model_name = "/diffduo_sam_hq_epoch_torchnograd_distill_balance" + str(epoch) + "_" + str(args_yaml.model.model_type) + "_reg-weight_" + str(args.reg_weight) + "_lr" + str(learning_rate) + "_lr_drop" + str(lr_drop) + ".pth"
             elif  args.training_method == "duo" :
-                model_name = "/duo_sam_hq_epoch_torchnograd_distill" + str(epoch) + "_" + str(args_yaml.model.model_type) + "_reg-weight_" + str(args.reg_weight) + "_lr" + str(learning_rate) + "_lr_drop" + str(lr_drop) + ".pth"
+                model_name = "/duo_sam_hq_epoch_torchnograd_distill_balance" + str(epoch) + "_" + str(args_yaml.model.model_type) + "_reg-weight_" + str(args.reg_weight) + "_lr" + str(learning_rate) + "_lr_drop" + str(lr_drop) + ".pth"
 
             print('come here save at', args.output + model_name)
             misc.save_on_master(sam_hq.module.state_dict(), args.output + model_name)
@@ -628,12 +644,12 @@ class training_engine:
         self.args= args
         # Setup datasets
         if datasets is None:
-            datasets = get_default_datasets()
+            self.datasets = get_default_datasets()
             
         
         if self.train:
             
-            valid_im_gt_list = get_im_gt_name_dict([datasets[2]], flag="valid")
+            valid_im_gt_list = get_im_gt_name_dict([self.datasets[2]], flag="valid")
             for dataset_dict in valid_im_gt_list:
                 dataset_dict["im_path"] = dataset_dict["im_path"][-10:]
                 dataset_dict["gt_path"] = dataset_dict["gt_path"][-10:]
@@ -644,7 +660,7 @@ class training_engine:
                 training= False
             )
             
-            train_im_gt_list = get_im_gt_name_dict([datasets[1]], flag="train")
+            train_im_gt_list = get_im_gt_name_dict([self.datasets[1]], flag="train")
             for dataset_dict in train_im_gt_list:
                 dataset_dict["im_path"] = dataset_dict["im_path"][:500]
                 dataset_dict["gt_path"] = dataset_dict["gt_path"][:500]
@@ -656,12 +672,12 @@ class training_engine:
                 training= True
             )
         else:
-            valid_im_gt_list = get_im_gt_name_dict(datasets[2:3], flag="valid")
-            self.dataloaders, self.datasets = create_calib_dataloaders(
-                valid_im_gt_list,
-                my_transforms=[Resize([1024, 1024])],
-                batch_size=self.args.train_prune_rate.batch_size_valid,
-            )
+            valid_im_gt_list = get_im_gt_name_dict(self.datasets[2:3], flag="valid")
+            # self.dataloaders, self.datasets = create_calib_dataloaders(
+            #     valid_im_gt_list,
+            #     my_transforms=[Resize([1024, 1024])],
+            #     batch_size=self.args.train_prune_rate.batch_size_valid,
+            # )
        
        
         
@@ -711,6 +727,7 @@ class training_engine:
         logger.info(f"{'='*120}")
         if not self.args.quantization.use_percentage:
             pruned_count, total_count = print_pruned_heads_info(predictor.model, threshold, global_threshold, logger, self.args.model.model_type)   
+            exit()
         logger.info("Local percent {}".format(self.args.quantization.percent_entropy))
         logger.info("Global percent {}".format(self.args.quantization.percent_entropy_global))
         logger.info("Model type {}".format(self.args.model.model_type))
@@ -721,9 +738,17 @@ class training_engine:
         self.device = self.accelerator.device
         sam = sam.to(self.device)
         sam.eval()  
-        self.evaluator = Evaluator(self.accelerator, self.dataloaders, self.datasets)
-        
-        results= self.evaluator.eval_hq44k(predictor, num_samples, plot_figures)
+        # self.evaluator = Evaluator(self.accelerator, self.dataloaders, self.datasets)
+        # results= self.evaluator.eval_hq44k(predictor, num_samples, plot_figures)
+
+        batch_evaluator = BatchEvaluator()
+        results = batch_evaluator.run_benchmark(
+            predictor=predictor,
+            batch_sizes=[self.args.train_prune_rate.batch_size_valid],
+            num_samples=num_samples,
+            datasets_config=self.datasets,
+            logger=logger
+        )
         logger.info(f"{'='*120}")
         keys_list = list(results.keys()) 
         for i in range(len(results)):

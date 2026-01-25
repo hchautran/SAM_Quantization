@@ -357,7 +357,7 @@ class BatchEvaluator:
 
         all_results = dict()
 
-        for i in range(2,4):
+        for i in range(2,len(datasets_config)):
             logger.info(f"{'='*150}")
             dataname= datasets_config[i]["name"]
             print(f"Running benchmark for dataset {dataname}...")

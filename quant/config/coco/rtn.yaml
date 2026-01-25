@@ -4,10 +4,10 @@ model:
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
   # model_type: 'vit_b'
   # hq_checkpoint: './ckts/sam_hq_vit_b.pth'
-  # model_type: vit_l
-  # hq_checkpoint: ./ckts/sam_hq_vit_l.pth
-  model_type: vit_h
-  hq_checkpoint: ./ckts/sam_hq_vit_h.pth
+  model_type: vit_l
+  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  # model_type: vit_h
+  # hq_checkpoint: ./pretrained/sam_hq_vit_h.pth
   
   device: cpu
 train_prune_rate:
@@ -15,11 +15,11 @@ train_prune_rate:
   learning_rate: 5e-2
   lr_drop_epoch: 2
   start_epoch: 0
-  output: './ckts/prune_rate/'
+  output: './pretrained_checkpoint/prune_rate/'
   max_epoch_num: 12
   batch_size_train: 2
-  batch_size_valid: 1
-  model_save_fre: 2
+  batch_size_valid: 4
+  model_save_fre: 5
   seed: 42
   gpu: [0]
   find_unused_params: True
@@ -30,7 +30,7 @@ train_prune_rate:
   dist_url: "env://"   
   # training: False 
   # this parameter for duo
-  reg_weight: 0.5
+  reg_weight: 5
   threshold: 0.00085
   threshold_globle: 0.9999835
   # duo 0.0002 1.000003  diffduo  0.00085 and 0.9999835
@@ -70,11 +70,11 @@ quantization:
   channel: False
   percent: 100
   centerQ: False
-  percent_entropy: 0.7
+  percent_entropy: 1
   percent_entropy_global: 0.5
   high_entropy: True 
   prune_global: True 
   # this parameter for train prune rate
   train_rate_prune: True
-  positional_quant: True
+  positional_quant: False
   use_percentage: True
