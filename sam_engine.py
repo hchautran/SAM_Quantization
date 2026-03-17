@@ -1,5 +1,4 @@
 import os
-import logging
 import datetime
 import numpy as np
 import pandas as pd
@@ -14,7 +13,6 @@ from tqdm.auto import tqdm
 from omegaconf import OmegaConf
 
 from train.utils.dataloader import get_im_gt_name_dict, Resize
-from data_utils import OnlineDataset
 from segment_anything.modeling.transformer import TwoWayTransformer
 from train.train import compute_iou, compute_boundary_iou, MaskDecoderHQ
 from segment_anything import SamPredictor, sam_model_registry
@@ -31,36 +29,13 @@ from processors import (
     EncoderAttentionProcessor,
     DecoderDoNothingProcessor,
 )
+from processors.base import create_calib_dataloaders
 from segment_anything.modeling.image_encoder import Attention as EncoderSamAttention
-from segment_anything.modeling.transformer import  Attention as  DecoderAttention
+from segment_anything.modeling.transformer import Attention as DecoderAttention
 from train.segment_anything_training.modeling.image_encoder import Attention as EncoderAttentionTraining
-from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention 
+from seginw.segment_anything.modeling.image_encoder import Attention as EncoderAttention
 
 
-
-
-
-def create_calib_dataloaders(name_im_gt_list, my_transforms=[], batch_size=1 ):
-    gos_dataloaders = []
-    gos_datasets = []
-    for i in range(len(name_im_gt_list)):   
-        gos_dataset = OnlineDataset([name_im_gt_list[i]], transform = transforms.Compose(my_transforms), eval_ori_resolution = True)
-        dataloader = DataLoader(gos_dataset, batch_size, drop_last=False)
-        gos_dataloaders.append(dataloader)
-        gos_datasets.append(gos_dataset) 
-    return gos_dataloaders, gos_datasets
-
-def setup_logger(path_log, state):
-    if not os.path.exists(path_log):
-        os.makedirs(path_log)
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    fh = logging.FileHandler(os.path.join(path_log, f'{state}.log'))
-    fh.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(message)s')
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-    return logger
 
 
 def get_default_datasets():
