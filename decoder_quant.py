@@ -1,17 +1,13 @@
 import math
-
 import torch
 import torch.nn as nn
-
 from segment_anything import SamPredictor, sam_model_registry
 from segment_anything.modeling.transformer import (
     Attention,
     TwoWayAttentionBlock,
     TwoWayTransformer,
 )
-
 from collections import defaultdict
-
 from processors.decoder import DecoderDoNothingProcessor
 from processors.decoder_observer import (
     TwoWayTransformerObserverElementLow,
@@ -20,7 +16,6 @@ from processors.decoder_observer import (
 )
 from RTN_quantization.utils import replace_linear_with_quantized, QuantizationConfig
 from utils.utils import inference_image
-
 
 # ============================================================================
 # Decoder Observer Classes (used by sam_engine.py and notebooks)
