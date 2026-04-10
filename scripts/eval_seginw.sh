@@ -1,1 +1,0 @@
-CUDA_VISIBLE_DEVICES=1 torchrun --nproc_per_node=1 --master_port=$29512 quant/seginw_engine_quan.py

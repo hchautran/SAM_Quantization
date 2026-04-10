@@ -1,6 +1,6 @@
-[submodule "Block-Sparse-Attention"]
-	path = Block-Sparse-Attention
-	url = git@github.com:hchautran/Block-Sparse-Attention.git
 [submodule "sam-hq"]
 	path = sam-hq 
 	url =   https://github.com/SysCV/sam-hq.git
+[submodule "PiToMe"]
+	path = PiToMe
+	url = git@github.com:hchautran/PiToMe.git
