@@ -3,7 +3,9 @@
     "allow": [
       "Bash(git rm:*)",
       "Bash(git update-index:*)",
-      "Bash(git config:*)"
+      "Bash(git config:*)",
+      "Bash(git add:*)",
+      "Bash(rm -rf .git/modules/Block-Sparse-Attention)"
     ],
     "additionalDirectories": [
       "/media/volume/Chau/SAM_Quantization/.git/modules/--force",
