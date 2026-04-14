@@ -235,12 +235,12 @@ def print_report_sam2(timers, n_runs, config_name, batch_size, encoder=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def apply_tome_patch(encoder, algo, ratio, margin):
-    from algo.tome.patch.sam import apply_patch
+    from algo.sparsesam.patch.sam import apply_patch
     apply_patch(encoder, algo=algo, ratio=ratio, margin=margin)
 
 
 def remove_tome_patch(encoder):
-    from algo.tome.patch.sam import ToMeSAMBlock, ToMeSAMAttention
+    from algo.sparsesam.patch.sam import ToMeSAMBlock, ToMeSAMAttention
     from segment_anything.modeling.image_encoder import Block, Attention
     for m in encoder.modules():
         if type(m) is ToMeSAMBlock:

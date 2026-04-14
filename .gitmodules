@@ -4,3 +4,6 @@
 [submodule "PiToMe"]
 	path = PiToMe
 	url = git@github.com:hchautran/PiToMe.git
+[submodule "Block-Sparse-Attention"]
+	path = Block-Sparse-Attention
+	url = git@github.com:hchautran/Block-Sparse-Attention.git

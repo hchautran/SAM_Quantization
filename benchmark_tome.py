@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
 """
-Benchmark SAM-1 encoder with ToMe / PiToMe token merging.
+Benchmark SAM-1 encoder with token merging (ToMe / PiToMe / SparseSAM / GradToMe).
 
 Sweeps over (algo × ratio × batch_size) and reports throughput, latency,
 memory, and mIoU for each combination, plus a final comparison table against
 the uncompressed baseline.
 
+Available algorithms
+--------------------
+  none             — uncompressed baseline
+  tome             — bipartite soft matching, post-attn merge  (algo.tome)
+  pitome           — energy-score ranked matching, post-attn   (algo.tome)
+  sparsesam        — bipartite matching, pre-attn / Hilbert    (algo.sparsesam)
+  sparsesam_pitome — PiToMe variant of sparsesam               (algo.sparsesam)
+  gradtome         — gradient-guided matching, Hilbert         (algo.gradtome)
+  gradtome_pitome  — PiToMe variant of gradtome                (algo.gradtome)
+
+WARNING: sparsesam and gradtome patch files contain debug breakpoint() calls.
+Remove them from the respective patch/sam.py files before running a sweep.
+
 Usage:
     # Baseline only
     python benchmark_tome.py --algos none --batch-sizes 1 2 4
 
-    # ToMe sweep
+    # Classic ToMe sweep
     python benchmark_tome.py --algos none tome --ratios 1.0 0.9 0.8 0.7
 
-    # Full sweep
+    # Full sweep across all methods
     python benchmark_tome.py \
-        --algos none tome pitome \
-        --ratios 1.0 0.9 0.8 0.7 0.6 \
+        --algos none tome pitome sparsesam gradtome \
+        --ratios 0.9 0.8 0.7 0.6 \
         --batch-sizes 1 2 4 8 \
         --num-samples 100 \
         --model-ckt ./ckts/sam_hq_vit_l.pth \
@@ -43,9 +56,22 @@ import wandb
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'sam-hq'))
 from segment_anything import SamPredictor, sam_model_registry
 
-# ── ToMe patch ────────────────────────────────────────────────────────────────
+# ── Token merging patches ─────────────────────────────────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'PiToMe'))
-from algo.tome.patch.sam import apply_patch as tome_apply_patch
+from algo.tome.patch.sam      import apply_patch as _patch_tome
+from algo.sparsesam.patch.sam import apply_patch as _patch_sparsesam
+from algo.gradtome.patch.sam  import apply_patch as _patch_gradtome
+
+# Maps benchmark algo name → (apply_patch_fn, internal algo arg passed to fn)
+ALGO_REGISTRY = {
+    "tome":             (_patch_tome,      "tome"),
+    "pitome":           (_patch_tome,      "pitome"),
+    "sparsesam":        (_patch_sparsesam, "tome"),
+    "sparsesam_pitome": (_patch_sparsesam, "pitome"),
+    "gradtome":         (_patch_gradtome,  "tome"),
+    "gradtome_pitome":  (_patch_gradtome,  "pitome"),
+}
+VALID_ALGOS = ["none"] + list(ALGO_REGISTRY.keys())
 
 # ── Local imports ─────────────────────────────────────────────────────────────
 from sam_engine import get_default_datasets
@@ -60,10 +86,16 @@ from train.train import compute_iou, compute_boundary_iou
 # ─────────────────────────────────────────────────────────────────────────────
 
 def apply_tome(encoder, algo: str, ratio: float, margin: float = 0.5):
-    """Patch encoder in-place. algo='none' is a no-op."""
+    """Patch encoder in-place using the algo specified in ALGO_REGISTRY.
+
+    algo='none' or ratio>=1.0 are no-ops.
+    """
     if algo == "none" or ratio >= 1.0:
         return
-    tome_apply_patch(encoder, algo=algo, ratio=ratio, margin=margin)
+    if algo not in ALGO_REGISTRY:
+        raise ValueError(f"Unknown algo {algo!r}. Valid choices: {VALID_ALGOS}")
+    patch_fn, internal_algo = ALGO_REGISTRY[algo]
+    patch_fn(encoder, algo=internal_algo, ratio=ratio, margin=margin)
 
 
 def update_ratio(encoder, ratio: float):
@@ -74,16 +106,22 @@ def update_ratio(encoder, ratio: float):
 
 def remove_tome(encoder):
     """
-    Undo ToMe patching by restoring original Block and Attention classes.
-    Needed when sweeping multiple ratios on the same model instance.
+    Undo any token-merging patch by restoring original Block and Attention.
+    Handles all three patch variants (tome, sparsesam, gradtome).
+    Needed when sweeping multiple algos/ratios on the same model instance.
     """
-    from algo.tome.patch.sam import ToMeSAMBlock, ToMeSAMAttention
+    from algo.tome.patch.sam      import ToMeSAMBlock as _B_t,  ToMeSAMAttention as _A_t
+    from algo.sparsesam.patch.sam import ToMeSAMBlock as _B_s,  ToMeSAMAttention as _A_s
+    from algo.gradtome.patch.sam  import ToMeSAMBlock as _B_g,  ToMeSAMAttention as _A_g
     from segment_anything.modeling.image_encoder import Block, Attention
 
+    _patched_blocks = (_B_t, _B_s, _B_g)
+    _patched_attns  = (_A_t, _A_s, _A_g)
+
     for module in encoder.modules():
-        if type(module) is ToMeSAMBlock:
+        if type(module) in _patched_blocks:
             module.__class__ = Block
-        elif type(module) is ToMeSAMAttention:
+        elif type(module) in _patched_attns:
             module.__class__ = Attention
 
     if hasattr(encoder, 'tome_info'):
@@ -343,7 +381,6 @@ def run_sweep(
     remove_tome(encoder)
     return all_results
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary printing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -405,7 +442,14 @@ def main():
     # Sweep axes
     parser.add_argument('--algos', type=str, nargs='+',
                         default=['none', 'tome', 'pitome'],
-                        help="Algorithms to sweep. 'none' = uncompressed baseline.")
+                        choices=VALID_ALGOS,
+                        help=(
+                            "Algorithms to sweep. 'none' = uncompressed baseline.\n"
+                            "Available: " + ", ".join(VALID_ALGOS) + "\n"
+                            "  tome/pitome       — algo.tome patch (post-attn merge)\n"
+                            "  sparsesam[_pitome]— algo.sparsesam patch (pre-attn / Hilbert)\n"
+                            "  gradtome[_pitome] — algo.gradtome patch (gradient-guided / Hilbert)"
+                        ))
     parser.add_argument('--ratios', type=float, nargs='+',
                         default=[0.9, 0.8, 0.7],
                         help='Token-keep ratios to sweep (ignored for algo=none).')
