@@ -21,7 +21,8 @@
       "Bash(python3 -c \"from cutlass import cute; import cutlass; a = cute.make_copy_atom\\(cute.nvgpu.CopyUniversalOp\\(\\), cutlass.Float16, num_bits_per_copy=128\\); print\\(a\\)\")",
       "Bash(python3 -c \"from cutlass.cute.nvgpu import cpasync; print\\(dir\\(cpasync\\)\\)\")",
       "Bash(conda search:*)",
-      "Bash(awk '{print $2}')"
+      "Bash(awk '{print $2}')",
+      "Bash(python3 -c ':*)"
     ],
     "additionalDirectories": [
       "/media/volume/Chau/SAM_Quantization/.git/modules/--force",

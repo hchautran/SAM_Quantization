@@ -7,19 +7,19 @@ from tqdm.auto import tqdm
 from segment_anything import SamPredictor
 from train.train import compute_iou, compute_boundary_iou
 import train.utils.misc as misc
-from utils.utils import show_mask_image
+# from utils.utils import show_mask_image
 
 
 def get_default_datasets():
     """Get default dataset configurations"""
     return [
-        {
-            "name": "DIS5K-VD",
-            "im_dir": "./data/DIS5K/DIS-VD/im",
-            "gt_dir": "./data/DIS5K/DIS-VD/gt",
-            "im_ext": ".jpg",
-            "gt_ext": ".png"
-        },
+        # {
+        #     "name": "DIS5K-VD",
+        #     "im_dir": "./data/DIS5K/DIS-VD/im",
+        #     "gt_dir": "./data/DIS5K/DIS-VD/gt",
+        #     "im_ext": ".jpg",
+        #     "gt_ext": ".png"
+        # },
         # {
         #     "name": "DIS5K-TR",
         #     "im_dir": "./data/DIS5K/DIS-TR/im",

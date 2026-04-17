@@ -187,10 +187,10 @@ def process_batch(predictor, images, labels_boxes, labels_ori):
     device = predictor.device
 
     images        = images.to(device)
-    labels_boxes  = labels_boxes.to(device)
+    labels_boxes  = labels_boxes.to(device, dtype=torch.float16)
     labels_ori    = labels_ori.to(device)
 
-    transformed = predictor.model.preprocess(images)
+    transformed = predictor.model.preprocess(images).half()
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -486,7 +486,7 @@ def main():
 
     # ── load model ────────────────────────────────────────────────────────────
     print(f"Loading SAM {args.model_type} from {args.model_ckt} ...")
-    sam       = sam_model_registry[args.model_type](checkpoint=args.model_ckt).to('cuda')
+    sam       = sam_model_registry[args.model_type](checkpoint=args.model_ckt).to('cuda').half()
     predictor = SamPredictor(sam)
 
     datasets = get_default_datasets()

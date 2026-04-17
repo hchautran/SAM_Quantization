@@ -251,42 +251,57 @@ def remove_tome_patch(encoder):
     encoder.__dict__.pop('tome_info',  None)
 
 
+def apply_fa2_patch(encoder):
+    """Patch attention with FlashAttentionForwardAmpere; ratio=1.0 disables token merging."""
+    from algo.sparsesam.patch.sam import apply_patch
+    apply_patch(encoder, algo='tome', ratio=1.0)
+
+
+# remove_fa2_patch is identical to remove_tome_patch (same classes)
+remove_fa2_patch = remove_tome_patch
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Side-by-side comparison report (SAM 1 only)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def print_comparison_sam1(t_base, t_tome, model_type, batch_size, algo, ratio, n_runs, encoder=None):
-    """Compact speedup table: baseline vs ToMe/PiToMe."""
+def print_comparison_sam1(t_base, t_patched, model_type, batch_size, algo, ratio,
+                          n_runs, encoder=None, patched_label=None):
+    """Compact speedup table: baseline vs patched (ToMe/PiToMe/FA2)."""
+
+    col = patched_label or algo[:4]          # short column header (≤6 chars)
 
     n_blocks = sum(1 for k in t_base if k.startswith("block[") and k.endswith("]"))
     top_keys = ["patch_embed"] + [f"block[{i:02d}]" for i in range(n_blocks)] + ["neck"]
-    total_base = sum(_get(t_base, k) for k in top_keys)
-    total_tome = sum(_get(t_tome, k) for k in top_keys)
+    total_base    = sum(_get(t_base,    k) for k in top_keys)
+    total_patched = sum(_get(t_patched, k) for k in top_keys)
 
     def spd(b, t): return b / t if t > 1e-6 else float('inf')
     def fmt_spd(s): return f"{s:.2f}x" if s != float('inf') else "  inf"
 
     W = 90
     print(f"\n{'='*W}")
-    print(f"  Baseline vs {algo.upper()}  ratio={ratio}  "
-          f"model={model_type}  bs={batch_size}  runs={n_runs}")
+    title = f"  Baseline vs {algo.upper()}"
+    if ratio is not None:
+        title += f"  ratio={ratio}"
+    print(f"{title}  model={model_type}  bs={batch_size}  runs={n_runs}")
     print(f"{'='*W}")
     print(f"  {'block':<10} {'total':>12}  {'spd':>5} |"
           f"  {'attn':>12}  {'spd':>5} |"
           f"  {'mlp':>12}  {'ovhd':>6}  type")
-    print(f"  {'':10} {'base':>6} {'tome':>6}  {'':>5} |"
-          f"  {'base':>6} {'tome':>6}  {'':>5} |"
-          f"  {'base':>6} {'tome':>6}")
+    print(f"  {'':10} {'base':>6} {col:>6}  {'':>5} |"
+          f"  {'base':>6} {col:>6}  {'':>5} |"
+          f"  {'base':>6} {col:>6}")
     print(f"  {'-'*W}")
 
     sum_ovhd = 0.0
     for i in range(n_blocks):
         tag   = f"block[{i:02d}]"
-        b_blk = _get(t_base, tag);   t_blk = _get(t_tome, tag)
-        b_att = _get(t_base, tag+".attn"); t_att = _get(t_tome, tag+".attn")
-        b_mlp = _get(t_base, tag+".mlp");  t_mlp = _get(t_tome, tag+".mlp")
-        t_n1  = _get(t_tome, tag+".norm1"); t_n2 = _get(t_tome, tag+".norm2")
-        ovhd  = max(0.0, t_blk - t_att - t_mlp - t_n1 - t_n2)
+        b_blk = _get(t_base,    tag);            p_blk = _get(t_patched, tag)
+        b_att = _get(t_base,    tag + ".attn");  p_att = _get(t_patched, tag + ".attn")
+        b_mlp = _get(t_base,    tag + ".mlp");   p_mlp = _get(t_patched, tag + ".mlp")
+        p_n1  = _get(t_patched, tag + ".norm1"); p_n2  = _get(t_patched, tag + ".norm2")
+        ovhd  = max(0.0, p_blk - p_att - p_mlp - p_n1 - p_n2)
         sum_ovhd += ovhd
 
         blk_type = ""
@@ -295,27 +310,27 @@ def print_comparison_sam1(t_base, t_tome, model_type, batch_size, algo, ratio, n
             if ws is not None:
                 blk_type = "global" if ws == 0 else f"win{ws}"
 
-        print(f"  block[{i:02d}]  {b_blk:>6.2f} {t_blk:>6.2f}  {fmt_spd(spd(b_blk,t_blk)):>5} |"
-              f"  {b_att:>6.2f} {t_att:>6.2f}  {fmt_spd(spd(b_att,t_att)):>5} |"
-              f"  {b_mlp:>6.2f} {t_mlp:>6.2f}  {ovhd:>6.2f}  {blk_type}")
+        print(f"  block[{i:02d}]  {b_blk:>6.2f} {p_blk:>6.2f}  {fmt_spd(spd(b_blk,p_blk)):>5} |"
+              f"  {b_att:>6.2f} {p_att:>6.2f}  {fmt_spd(spd(b_att,p_att)):>5} |"
+              f"  {b_mlp:>6.2f} {p_mlp:>6.2f}  {ovhd:>6.2f}  {blk_type}")
 
     # ── summary ───────────────────────────────────────────────────────────────
     def _agg(t, sfx):
         return sum(_get(t, f"block[{i:02d}]{sfx}") for i in range(n_blocks))
 
-    b_attn = _agg(t_base, ".attn"); t_attn = _agg(t_tome, ".attn")
-    b_mlp  = _agg(t_base, ".mlp");  t_mlp  = _agg(t_tome, ".mlp")
+    b_attn = _agg(t_base,    ".attn"); p_attn = _agg(t_patched, ".attn")
+    b_mlp  = _agg(t_base,    ".mlp");  p_mlp  = _agg(t_patched, ".mlp")
 
-    print(f"\n  {'':10} {'base':>6} {'tome':>6}  {'spd':>5}")
+    print(f"\n  {'':10} {'base':>6} {col:>6}  {'spd':>5}")
     print(f"  {'-'*36}")
-    for label, b, t in [("attn (Σ)", b_attn, t_attn),
-                         ("mlp  (Σ)", b_mlp,  t_mlp),
-                         ("merge ovhd", 0.0,  sum_ovhd),
-                         ("TOTAL",     total_base, total_tome)]:
-        delta = t - b
-        sign  = "+" if delta >= 0 else ""
-        spd_str = fmt_spd(spd(b, t)) if b > 0 else "  n/a"
-        print(f"  {label:<10} {b:>6.1f} {t:>6.1f}  {spd_str:>5}   {sign}{delta:.1f}ms")
+    for label, b, p in [("attn (Σ)",  b_attn, p_attn),
+                         ("mlp  (Σ)",  b_mlp,  p_mlp),
+                         ("overhead",  0.0,    sum_ovhd),
+                         ("TOTAL",     total_base, total_patched)]:
+        delta   = p - b
+        sign    = "+" if delta >= 0 else ""
+        spd_str = fmt_spd(spd(b, p)) if b > 0 else "  n/a"
+        print(f"  {label:<10} {b:>6.1f} {p:>6.1f}  {spd_str:>5}   {sign}{delta:.1f}ms")
     print(f"{'='*W}\n")
 
 
@@ -402,6 +417,11 @@ def main():
     parser.add_argument('--tome-margin', type=float, default=0.5,
                         help="PiToMe energy margin.")
 
+    # FA2 comparison (SAM 1 only)
+    parser.add_argument('--fa2', action='store_true',
+                        help="Run a second pass with FlashAttentionForwardAmpere and show "
+                             "comparison table (SAM1 only, no token merging).")
+
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -409,44 +429,65 @@ def main():
         sys.exit(1)
 
     device = 'cuda'
-    dummy  = torch.randn(args.batch_size, 3, args.img_size, args.img_size, device=device)
+    dummy  = torch.randn(args.batch_size, 3, args.img_size, args.img_size, device=device, dtype=torch.float16)
 
     # ── load ──────────────────────────────────────────────────────────────────
     if args.version == 'sam1':
-        encoder   = load_sam1(args.model_type, args.model_ckt, device)
+        encoder   = load_sam1(args.model_type, args.model_ckt, device).half()
         attach_fn = attach_timers_sam1
         report_fn = lambda t, n: print_report_sam1(t, n, args.model_type, args.batch_size, encoder)
     else:
-        encoder   = load_sam2(args.sam2_config, args.model_ckt, device)
+        encoder   = load_sam2(args.sam2_config, args.model_ckt, device).half()
         attach_fn = attach_timers_sam2
         report_fn = lambda t, n: print_report_sam2(t, n, args.sam2_config, args.batch_size)
 
     # ── baseline pass ─────────────────────────────────────────────────────────
-    print("\n── Baseline ──")
+    print("\n── Baseline (naive SAM) ──")
     t_base = _run_profile(encoder, attach_fn, dummy, args.n_warmup, args.n_runs, "baseline")
 
-    if args.tome_algo == 'none' or args.version != 'sam1':
+    want_tome = args.tome_algo != 'none' and args.version == 'sam1'
+    want_fa2  = args.fa2 and args.version == 'sam1'
+
+    if not want_tome and not want_fa2:
         report_fn(t_base, args.n_runs)
         return
 
-    # ── ToMe pass (SAM 1 only) ────────────────────────────────────────────────
-    print(f"\n── {args.tome_algo.upper()} ratio={args.tome_ratio} ──")
-    apply_tome_patch(encoder, algo=args.tome_algo,
-                     ratio=args.tome_ratio, margin=args.tome_margin)
-    t_tome = _run_profile(encoder, attach_fn, dummy, args.n_warmup, args.n_runs,
-                          f"{args.tome_algo} r={args.tome_ratio}")
-    remove_tome_patch(encoder)
+    # ── FA2 pass (SAM 1 only) ─────────────────────────────────────────────────
+    if want_fa2:
+        print("\n── FA2 (FlashAttentionForwardAmpere, no token merging) ──")
+        apply_fa2_patch(encoder)
+        t_fa2 = _run_profile(encoder, attach_fn, dummy, args.n_warmup, args.n_runs, "fa2")
+        remove_fa2_patch(encoder)
 
-    # ── comparison only ───────────────────────────────────────────────────────
-    print_comparison_sam1(
-        t_base, t_tome,
-        model_type=args.model_type,
-        batch_size=args.batch_size,
-        algo=args.tome_algo,
-        ratio=args.tome_ratio,
-        n_runs=args.n_runs,
-        encoder=encoder,
-    )
+        print_comparison_sam1(
+            t_base, t_fa2,
+            model_type=args.model_type,
+            batch_size=args.batch_size,
+            algo="FA2",
+            ratio=None,
+            n_runs=args.n_runs,
+            encoder=encoder,
+            patched_label="fa2",
+        )
+
+    # ── ToMe / PiToMe pass (SAM 1 only) ──────────────────────────────────────
+    if want_tome:
+        print(f"\n── {args.tome_algo.upper()} ratio={args.tome_ratio} ──")
+        apply_tome_patch(encoder, algo=args.tome_algo,
+                         ratio=args.tome_ratio, margin=args.tome_margin)
+        t_tome = _run_profile(encoder, attach_fn, dummy, args.n_warmup, args.n_runs,
+                              f"{args.tome_algo} r={args.tome_ratio}")
+        remove_tome_patch(encoder)
+
+        print_comparison_sam1(
+            t_base, t_tome,
+            model_type=args.model_type,
+            batch_size=args.batch_size,
+            algo=args.tome_algo,
+            ratio=args.tome_ratio,
+            n_runs=args.n_runs,
+            encoder=encoder,
+        )
 
 
 if __name__ == '__main__':
