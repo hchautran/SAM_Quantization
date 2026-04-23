@@ -15,7 +15,7 @@ Usage:
   # SAM 1 + ToMe comparison
   python profile_encoder.py --version sam1 \
       --model-ckt ./ckts/sam_hq_vit_l.pth --model-type vit_l \
-      --tome-algo tome --tome-ratio 0.9
+      --tome-algo tome --tome-ratio 0.9 --sparsity 0.5
 
   # SAM 1 + PiToMe comparison
   python profile_encoder.py --version sam1 \
@@ -105,6 +105,34 @@ def attach_timers_sam1(encoder):
         a(blk.mlp,       f"block[{i:02d}].mlp")
         a(blk.mlp.lin1,  f"block[{i:02d}].mlp.lin1")
         a(blk.mlp.lin2,  f"block[{i:02d}].mlp.lin2")
+
+    return timers, handles
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAM 3  (HuggingFace Sam3VisionModel)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def attach_timers_sam3(vision_enc):
+    """Attach hooks to Sam3VisionModel (backbone layers + neck)."""
+    timers, handles = {}, []
+    a = lambda m, n: _attach(m, n, timers, handles)
+
+    backbone = vision_enc.backbone
+
+    a(backbone.embeddings, "embeddings")
+    a(backbone.layer_norm, "backbone.final_ln")
+
+    for i, layer in enumerate(backbone.layers):
+        a(layer,             f"layer[{i:02d}]")
+        a(layer.layer_norm1, f"layer[{i:02d}].norm1")
+        a(layer.attention,   f"layer[{i:02d}].attn")
+        a(layer.layer_norm2, f"layer[{i:02d}].norm2")
+        a(layer.mlp,         f"layer[{i:02d}].mlp")
+
+    a(vision_enc.neck, "neck")
+    for i, fpn_layer in enumerate(vision_enc.neck.fpn_layers):
+        a(fpn_layer, f"neck.fpn[{i}]")
 
     return timers, handles
 
@@ -230,13 +258,66 @@ def print_report_sam2(timers, n_runs, config_name, batch_size, encoder=None):
     print(f"{'='*70}\n")
 
 
+def print_report_sam3(timers, n_runs, model_id, batch_size, vision_enc=None):
+    backbone = vision_enc.backbone if vision_enc is not None else None
+    n_layers = sum(1 for k in timers if k.startswith("layer[") and k.endswith("]"))
+
+    top_keys = (
+        ["embeddings"]
+        + [f"layer[{i:02d}]" for i in range(n_layers)]
+        + ["backbone.final_ln", "neck"]
+    )
+    total_ms = sum(_get(timers, k) for k in top_keys)
+
+    global_idxs = set()
+    if backbone is not None:
+        global_idxs = set(backbone.config.global_attn_indexes)
+        window_size = backbone.config.window_size
+    else:
+        window_size = "?"
+
+    print(f"\n{'='*70}")
+    print(f"  SAM3 Encoder  |  model={model_id}  bs={batch_size}  runs={n_runs}  total={total_ms:.1f}ms")
+    print(f"{'='*70}")
+
+    print(f"\n  {'layer':<12} {'total':>8}  {'attn':>8}  {'mlp':>8}  {'attn%':>6}  {'mlp%':>6}  {'type'}")
+    print(f"  {'-'*62}")
+
+    sum_total = sum_attn = sum_mlp = 0.0
+    for i in range(n_layers):
+        tag     = f"layer[{i:02d}]"
+        blk_ms  = _get(timers, tag)
+        attn_ms = _get(timers, tag + ".attn")
+        mlp_ms  = _get(timers, tag + ".mlp")
+        attn_pct = attn_ms / blk_ms * 100 if blk_ms > 0 else 0
+        mlp_pct  = mlp_ms  / blk_ms * 100 if blk_ms > 0 else 0
+        kind = "global" if i in global_idxs else f"win{window_size}"
+        sum_total += blk_ms; sum_attn += attn_ms; sum_mlp += mlp_ms
+        print(f"  layer[{i:02d}]    {blk_ms:>8.3f}  {attn_ms:>8.3f}  {mlp_ms:>8.3f}  "
+              f"{attn_pct:>5.1f}%  {mlp_pct:>5.1f}%  {kind}")
+
+    a_pct   = sum_attn  / sum_total * 100 if sum_total > 0 else 0
+    m_pct   = sum_mlp   / sum_total * 100 if sum_total > 0 else 0
+    blk_pct = sum_total / total_ms  * 100 if total_ms  > 0 else 0
+    print(f"  {'-'*62}")
+    print(f"  {'all layers':<12} {sum_total:>8.1f}  {sum_attn:>8.1f}  {sum_mlp:>8.1f}  "
+          f"{a_pct:>5.1f}%  {m_pct:>5.1f}%  ({blk_pct:.1f}% of total)")
+
+    emb_ms = _get(timers, "embeddings")
+    fln_ms = _get(timers, "backbone.final_ln")
+    nck_ms = _get(timers, "neck")
+    print(f"\n  embeddings={emb_ms:.2f}ms  final_ln={fln_ms:.2f}ms  neck={nck_ms:.2f}ms")
+    print(f"{'='*70}\n")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ToMe helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def apply_tome_patch(encoder, algo, ratio, margin):
+def apply_tome_patch(encoder, algo, ratio, margin, sparsity=0.0):
     from algo.sparsesam.patch.sam import apply_patch
-    apply_patch(encoder, algo=algo, ratio=ratio, margin=margin)
+    apply_patch(encoder, algo=algo, ratio=ratio, margin=margin,
+                sparsity=sparsity)
 
 
 def remove_tome_patch(encoder):
@@ -360,26 +441,54 @@ def load_sam2(config_file, model_ckt, device):
     return model.image_encoder
 
 
+def load_sam3(model_id, device, dtype=torch.float16, mock=False):
+    from transformers import Sam3VisionModel, Sam3VisionConfig, Sam3ViTConfig
+    if mock:
+        print(f"Building mock SAM3 vision encoder (random weights, default config) ...")
+        vit_cfg = Sam3ViTConfig(
+            hidden_size=1024, intermediate_size=4096,
+            num_hidden_layers=32, num_attention_heads=16,
+            image_size=1008, patch_size=14, window_size=24,
+            global_attn_indexes=[7, 15, 23, 31],
+            layer_scale_init_value=1e-6,
+        )
+        vis_cfg = Sam3VisionConfig(
+            backbone_config=vit_cfg, fpn_hidden_size=256,
+            scale_factors=[4.0, 2.0, 1.0, 0.5],
+        )
+        enc = Sam3VisionModel(vis_cfg).to(dtype).to(device).eval()
+    else:
+        print(f"Loading SAM3 from HuggingFace: {model_id} ...")
+        enc = Sam3VisionModel.from_pretrained(model_id, torch_dtype=dtype).to(device).eval()
+    return enc
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_profile(encoder, attach_fn, dummy, n_warmup, n_runs, label):
-    """Attach hooks, warm up, measure, detach. Returns timers dict."""
+def _run_profile(encoder, attach_fn, dummy, n_warmup, n_runs, label, pixel_values=False):
+    """Attach hooks, warm up, measure, detach. Returns timers dict.
+
+    pixel_values=True uses encoder(pixel_values=dummy) instead of encoder(dummy),
+    which is required for HuggingFace SAM3.
+    """
     timers, handles = attach_fn(encoder)
     encoder.eval()
+
+    call = (lambda x: encoder(pixel_values=x)) if pixel_values else (lambda x: encoder(x))
 
     print(f"  Warming up [{label}] ({n_warmup} passes) ...")
     with torch.no_grad():
         for _ in range(n_warmup):
-            encoder(dummy)
+            call(dummy)
     for t in timers.values():
         t.reset()
 
     print(f"  Profiling  [{label}] ({n_runs} passes) ...")
     with torch.no_grad():
         for _ in range(n_runs):
-            encoder(dummy)
+            call(dummy)
 
     for h in handles:
         h.remove()
@@ -392,7 +501,7 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
-    parser.add_argument('--version', type=str, default='sam1', choices=['sam1', 'sam2'])
+    parser.add_argument('--version', type=str, default='sam1', choices=['sam1', 'sam2', 'sam3'])
 
     # SAM 1
     parser.add_argument('--model-ckt',  type=str, default='./ckts/sam_hq_vit_l.pth')
@@ -402,20 +511,33 @@ def main():
     # SAM 2
     parser.add_argument('--sam2-config', type=str, default='sam2.1_hq_hiera_l.yaml')
 
+    # SAM 3
+    parser.add_argument('--sam3-model', type=str, default='facebook/sam3',
+                        help="HuggingFace model ID (e.g. facebook/sam3, facebook/sam3.1)")
+    parser.add_argument('--sam3-mock',  action='store_true',
+                        help="Use random-weight mock model (no HF download needed)")
+
     # Common
     parser.add_argument('--n-warmup',   type=int, default=5)
     parser.add_argument('--n-runs',     type=int, default=20)
     parser.add_argument('--img-size',   type=int, default=1024)
-    parser.add_argument('--batch-size', type=int, default=1)
+    parser.add_argument('--batch-size', type=int, default=8)
 
     # ToMe / PiToMe comparison (SAM 1 only)
     parser.add_argument('--tome-algo',   type=str, default='none',
-                        choices=['none', 'tome', 'pitome'],
+                        choices=['none', 'tome', 'pitome', 'sparsesam', 'sparsesam_pitome',
+                                 'sparsesam-dense'],
                         help="Run a second pass with this algo and show comparison table.")
     parser.add_argument('--tome-ratio',  type=float, default=0.9,
                         help="Token-keep ratio for ToMe/PiToMe (0 < ratio < 1).")
     parser.add_argument('--tome-margin', type=float, default=0.5,
                         help="PiToMe energy margin.")
+    parser.add_argument('--sparsity', type=float, default=0.0,
+                        help="Block-sparse attention sparsity (0.0=dense, 0.9=90%% sparse). "
+                             "Only used for sparsesam[-pitome].")
+    parser.add_argument('--diagonal-width', type=int, default=1,
+                        help="Diagonal band width for block-sparse attention "
+                             "(1=exact diagonal, 3=±1 block). Only used for sparsesam[-pitome].")
 
     # FA2 comparison (SAM 1 only)
     parser.add_argument('--fa2', action='store_true',
@@ -429,24 +551,40 @@ def main():
         sys.exit(1)
 
     device = 'cuda'
-    dummy  = torch.randn(args.batch_size, 3, args.img_size, args.img_size, device=device, dtype=torch.float16)
 
     # ── load ──────────────────────────────────────────────────────────────────
     if args.version == 'sam1':
-        encoder   = load_sam1(args.model_type, args.model_ckt, device).half()
-        attach_fn = attach_timers_sam1
-        report_fn = lambda t, n: print_report_sam1(t, n, args.model_type, args.batch_size, encoder)
-    else:
-        encoder   = load_sam2(args.sam2_config, args.model_ckt, device).half()
-        attach_fn = attach_timers_sam2
-        report_fn = lambda t, n: print_report_sam2(t, n, args.sam2_config, args.batch_size)
+        encoder      = load_sam1(args.model_type, args.model_ckt, device).half()
+        attach_fn    = attach_timers_sam1
+        report_fn    = lambda t, n: print_report_sam1(t, n, args.model_type, args.batch_size, encoder)
+        img_size     = args.img_size
+        pixel_values = False
+    elif args.version == 'sam2':
+        encoder      = load_sam2(args.sam2_config, args.model_ckt, device).half()
+        attach_fn    = attach_timers_sam2
+        report_fn    = lambda t, n: print_report_sam2(t, n, args.sam2_config, args.batch_size)
+        img_size     = args.img_size
+        pixel_values = False
+    else:  # sam3
+        encoder      = load_sam3(args.sam3_model, device, dtype=torch.float16, mock=args.sam3_mock)
+        attach_fn    = attach_timers_sam3
+        report_fn    = lambda t, n: print_report_sam3(t, n, args.sam3_model, args.batch_size, encoder)
+        img_size     = 1008   # SAM3 native resolution
+        pixel_values = True
+
+    dummy = torch.randn(args.batch_size, 3, img_size, img_size, device=device, dtype=torch.float16)
 
     # ── baseline pass ─────────────────────────────────────────────────────────
     print("\n── Baseline (naive SAM) ──")
-    t_base = _run_profile(encoder, attach_fn, dummy, args.n_warmup, args.n_runs, "baseline")
+    t_base = _run_profile(encoder, attach_fn, dummy, args.n_warmup, args.n_runs, "baseline",
+                          pixel_values=pixel_values)
 
     want_tome = args.tome_algo != 'none' and args.version == 'sam1'
     want_fa2  = args.fa2 and args.version == 'sam1'
+
+    if (args.tome_algo != 'none' or args.fa2) and args.version != 'sam1':
+        print("Note: --tome-algo and --fa2 are only supported for SAM1; ignoring.")
+
 
     if not want_tome and not want_fa2:
         report_fn(t_base, args.n_runs)
@@ -472,9 +610,12 @@ def main():
 
     # ── ToMe / PiToMe pass (SAM 1 only) ──────────────────────────────────────
     if want_tome:
-        print(f"\n── {args.tome_algo.upper()} ratio={args.tome_ratio} ──")
+        sp_tag = (f" sparsity={args.sparsity} dw={args.diagonal_width}"
+                  if args.tome_algo in ('sparsesam', 'sparsesam_pitome') else "")
+        print(f"\n── {args.tome_algo.upper()} ratio={args.tome_ratio}{sp_tag} ──")
         apply_tome_patch(encoder, algo=args.tome_algo,
-                         ratio=args.tome_ratio, margin=args.tome_margin)
+                         ratio=args.tome_ratio, margin=args.tome_margin,
+                         sparsity=args.sparsity )
         t_tome = _run_profile(encoder, attach_fn, dummy, args.n_warmup, args.n_runs,
                               f"{args.tome_algo} r={args.tome_ratio}")
         remove_tome_patch(encoder)

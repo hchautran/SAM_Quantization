@@ -58,18 +58,20 @@ from segment_anything import SamPredictor, sam_model_registry
 
 # ── Token merging patches ─────────────────────────────────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'PiToMe'))
-from algo.tome.patch.sam      import apply_patch as _patch_tome
-from algo.sparsesam.patch.sam import apply_patch as _patch_sparsesam
-from algo.gradtome.patch.sam  import apply_patch as _patch_gradtome
+from algo.tome.patch.sam         import apply_patch as _patch_tome
+from algo.sparsesam.patch.sam    import apply_patch as _patch_sparsesam
+from algo.gradtome.patch.sam     import apply_patch as _patch_gradtome
+from algo.gradtome.patch.sam_hilbert import apply_patch as _patch_gradtome_hilbert
 
 # Maps benchmark algo name → (apply_patch_fn, internal algo arg passed to fn)
 ALGO_REGISTRY = {
-    "tome":             (_patch_tome,      "tome"),
-    "pitome":           (_patch_tome,      "pitome"),
-    "sparsesam":        (_patch_sparsesam, "tome"),
-    "sparsesam_pitome": (_patch_sparsesam, "pitome"),
-    "gradtome":         (_patch_gradtome,  "tome"),
-    "gradtome_pitome":  (_patch_gradtome,  "pitome"),
+    "tome":               (_patch_tome,             "tome"),
+    "pitome":             (_patch_tome,             "pitome"),
+    "sparsesam":          (_patch_sparsesam,        "tome"),
+    "sparsesam_pitome":   (_patch_sparsesam,        "pitome"),
+    "gradtome":           (_patch_gradtome,         "tome"),
+    "gradtome_pitome":    (_patch_gradtome,         "pitome"),
+    "gradtome_hilbert":   (_patch_gradtome_hilbert, "tome"),
 }
 VALID_ALGOS = ["none"] + list(ALGO_REGISTRY.keys())
 
@@ -85,18 +87,25 @@ from train.train import compute_iou, compute_boundary_iou
 # Token merging helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def apply_tome(encoder, algo: str, ratio: float, margin: float = 0.5):
+_SPARSESAM_ALGOS = {"sparsesam", "sparsesam_pitome"}
+
+def apply_tome(encoder, algo: str, ratio: float, margin: float = 0.5,
+               sparsity: float = 0.0):
     """Patch encoder in-place using the algo specified in ALGO_REGISTRY.
 
     algo='none' or ratio>=1.0 are no-ops.
+    sparsity/diagonal_width are forwarded to sparsesam-family algos only.
     """
     if algo == "none" or ratio >= 1.0:
         return
     if algo not in ALGO_REGISTRY:
         raise ValueError(f"Unknown algo {algo!r}. Valid choices: {VALID_ALGOS}")
     patch_fn, internal_algo = ALGO_REGISTRY[algo]
-    patch_fn(encoder, algo=internal_algo, ratio=ratio, margin=margin)
-
+    if algo in _SPARSESAM_ALGOS:
+        patch_fn(encoder, algo=internal_algo, ratio=ratio, margin=margin,
+                 sparsity=sparsity)
+    else:
+        patch_fn(encoder, algo=internal_algo, ratio=ratio, margin=margin)
 
 def update_ratio(encoder, ratio: float):
     """Update merge ratio without re-patching (works if already patched)."""
@@ -110,13 +119,14 @@ def remove_tome(encoder):
     Handles all three patch variants (tome, sparsesam, gradtome).
     Needed when sweeping multiple algos/ratios on the same model instance.
     """
-    from algo.tome.patch.sam      import ToMeSAMBlock as _B_t,  ToMeSAMAttention as _A_t
-    from algo.sparsesam.patch.sam import ToMeSAMBlock as _B_s,  ToMeSAMAttention as _A_s
-    from algo.gradtome.patch.sam  import ToMeSAMBlock as _B_g,  ToMeSAMAttention as _A_g
+    from algo.tome.patch.sam             import ToMeSAMBlock as _B_t,  ToMeSAMAttention as _A_t
+    from algo.sparsesam.patch.sam        import ToMeSAMBlock as _B_s,  ToMeSAMAttention as _A_s
+    from algo.gradtome.patch.sam         import ToMeSAMBlock as _B_g,  ToMeSAMAttention as _A_g
+    from algo.gradtome.patch.sam_hilbert import ToMeSAMBlock as _B_gh, ToMeSAMAttention as _A_gh
     from segment_anything.modeling.image_encoder import Block, Attention
 
-    _patched_blocks = (_B_t, _B_s, _B_g)
-    _patched_attns  = (_A_t, _A_s, _A_g)
+    _patched_blocks = (_B_t, _B_s, _B_g, _B_gh)
+    _patched_attns  = (_A_t, _A_s, _A_g, _A_gh)
 
     for module in encoder.modules():
         if type(module) in _patched_blocks:
@@ -226,9 +236,27 @@ def process_batch(predictor, images, labels_boxes, labels_ori):
     }
 
 
-def run_one(predictor, batch_size, dataloader, num_samples, label="") -> Dict:
+def run_one(predictor, batch_size, dataloader, num_samples, label="", warmup_batches: int = 3) -> Dict:
     """Run benchmark for a single (algo, ratio, batch_size) configuration."""
     reset_memory()
+
+    # Warmup: run a few batches outside the timer so CUDA kernels are compiled
+    # and GPU caches are hot before measurement begins. Without this, the first
+    # algo in the sweep (often a patched variant) pays kernel-compilation cost
+    # and appears artificially slower than the baseline.
+    device = predictor.device
+    warmup_iter = iter(dataloader)
+    for _ in range(warmup_batches):
+        try:
+            data_val = next(warmup_iter)
+        except StopIteration:
+            break
+        images = data_val['image'].to(device)
+        transformed = predictor.model.preprocess(images).half()
+        with torch.no_grad():
+            predictor.model.image_encoder(transformed)
+    torch.cuda.synchronize()
+    del warmup_iter
 
     enc_times, enc_per_img, ious, b_ious = [], [], [], []
     total_images = 0
@@ -309,6 +337,8 @@ def run_sweep(
     datasets_config: List[Dict],
     dataset_idx: int,
     margin: float,
+    sparsity: float = 0.0,
+    diagonal_width: int = 1,
 ) -> List[Dict]:
 
     encoder = predictor.model.image_encoder
@@ -342,12 +372,14 @@ def run_sweep(
         # ── patch / unpatch encoder ──────────────────────────────────────────
         remove_tome(encoder)
         if algo != "none":
-            apply_tome(encoder, algo=algo, ratio=ratio, margin=margin)
+            apply_tome(encoder, algo=algo, ratio=ratio, margin=margin,
+                       sparsity=sparsity)
 
         n_tokens = int(64 * 64 * ratio) if algo != "none" else 64 * 64
 
         for batch_size in batch_sizes:
-            label = f"{algo} r={ratio:.2f} bs={batch_size}"
+            sp_tag = f" sp={sparsity:.2f} dw={diagonal_width}" if algo in _SPARSESAM_ALGOS else ""
+            label = f"{algo} r={ratio:.2f}{sp_tag} bs={batch_size}"
             print(f"\n── {label} ──")
 
             dataloader = build_dataloader(datasets_config, dataset_idx, batch_size)
@@ -358,6 +390,8 @@ def run_sweep(
                 'algo':            algo,
                 'ratio':           ratio,
                 'n_tokens_kept':   n_tokens,
+                'sparsity':        sparsity if algo in _SPARSESAM_ALGOS else 0.0,
+                'diagonal_width':  diagonal_width if algo in _SPARSESAM_ALGOS else 1,
             })
             all_results.append(result)
 
@@ -461,6 +495,14 @@ def main():
     parser.add_argument('--margin', type=float, default=0.5,
                         help='PiToMe energy margin (ignored for ToMe).')
 
+    # SparseSAM block-sparse attention
+    parser.add_argument('--sparsity', type=float, default=0.0,
+                        help='Fraction of key blocks to skip in block-sparse attention '
+                             '(0.0 = dense, 0.9 = 90%% sparse). Only used for sparsesam[-pitome].')
+    parser.add_argument('--diagonal-width', type=int, default=1,
+                        help='Width of the diagonal band kept in block-sparse attention '
+                             '(1 = exact diagonal, 3 = ±1 block). Only used for sparsesam[-pitome].')
+
     # Dataset
     parser.add_argument('--dataset-idx', type=int, default=0,
                         help='Index into get_default_datasets() list.')
@@ -493,14 +535,15 @@ def main():
 
     # ── run sweep ─────────────────────────────────────────────────────────────
     results = run_sweep(
-        predictor     = predictor,
-        algos         = args.algos,
-        ratios        = args.ratios,
-        batch_sizes   = args.batch_sizes,
-        num_samples   = args.num_samples,
+        predictor       = predictor,
+        algos           = args.algos,
+        ratios          = args.ratios,
+        batch_sizes     = args.batch_sizes,
+        num_samples     = args.num_samples,
         datasets_config = datasets,
-        dataset_idx   = args.dataset_idx,
-        margin        = args.margin,
+        dataset_idx     = args.dataset_idx,
+        margin          = args.margin,
+        sparsity        = args.sparsity,
     )
 
     # ── save CSV ──────────────────────────────────────────────────────────────

@@ -22,7 +22,9 @@
       "Bash(python3 -c \"from cutlass.cute.nvgpu import cpasync; print\\(dir\\(cpasync\\)\\)\")",
       "Bash(conda search:*)",
       "Bash(awk '{print $2}')",
-      "Bash(python3 -c ':*)"
+      "Bash(python3 -c ':*)",
+      "Bash(python3 -c \"import json; nb=json.load\\(open\\('/media/volume/Chau/SAM_Quantization/notebook.ipynb'\\)\\); print\\(len\\(nb['cells']\\), 'cells'\\); [print\\(c['cell_type'], ':', c['source'][:80] if c['source'] else ''\\) for c in nb['cells'][:3]]\")",
+      "Bash(python3 -c \"from transformers import Sam2Model; print\\('Sam2Model ok'\\)\")"
     ],
     "additionalDirectories": [
       "/media/volume/Chau/SAM_Quantization/.git/modules/--force",

@@ -1,0 +1,13 @@
+{
+    "languages": {
+        "Python": {
+            "language_servers": [
+                // Enable ty, disable basedpyright, and enable all
+                // other registered language servers (ruff, pylsp, pyright).
+                "ty",
+                "!basedpyright",
+                "..."
+            ]
+        }
+    }
+}
