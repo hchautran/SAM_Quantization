@@ -7,3 +7,6 @@
 [submodule "Block-Sparse-Attention"]
 	path = Block-Sparse-Attention
 	url = git@github.com:hchautran/Block-Sparse-Attention.git
+[submodule "perception_models"]
+	path = perception_models
+	url = https://github.com/facebookresearch/perception_models.git

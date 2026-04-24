@@ -142,11 +142,12 @@ def run_benchmark(dtype_str, B, Sq, H, D, scale, m_block, n_block, threads,
     rel_h_t, rel_w_t = compute_rel_bias(q_t, Rh, Rw, win)
     rel_h_c, rel_w_c = to_cute_pos(rel_h_t), to_cute_pos(rel_w_t)
 
-    # Identity permutations: no token reordering in this benchmark
-    perm_q_t = torch.arange(Sq, dtype=torch.int32, device="cuda")
-    perm_k_t = torch.arange(Sq, dtype=torch.int32, device="cuda")
-    perm_q_c = from_dlpack(perm_q_t, assumed_align=4).mark_layout_dynamic(leading_dim=0)
-    perm_k_c = from_dlpack(perm_k_t, assumed_align=4).mark_layout_dynamic(leading_dim=0)
+    # Identity permutations: no token reordering in this benchmark.
+    # Shape (B, Sq) — kernel slices per-batch via m_perm[batch, None].
+    perm_q_t = torch.arange(Sq, dtype=torch.int32, device="cuda").unsqueeze(0).expand(B, -1).contiguous()
+    perm_k_t = torch.arange(Sq, dtype=torch.int32, device="cuda").unsqueeze(0).expand(B, -1).contiguous()
+    perm_q_c = from_dlpack(perm_q_t, assumed_align=4)
+    perm_k_c = from_dlpack(perm_k_t, assumed_align=4)
 
     # Compile once with a dense mask; the kernel is shape-specialized, not value-specialized.
     dense_mask_c, _ = make_A_mask(B, H, num_m_blocks, num_n_blocks, sparsity=0.0)
@@ -178,8 +179,8 @@ def run_benchmark(dtype_str, B, Sq, H, D, scale, m_block, n_block, threads,
           f"({flops/(t_sam*1e-6)/1e12:.2f} TFLOP/s)\n")
 
     print(f"  {'Sparsity':>9} | {'fa2-total us':>13} | {'fa2-kernel us':>14} | "
-          f"{'TFLOP/s':>8} | {'vs SAM (naive)':>14} | {'verify':>7}")
-    print(f"  {'-'*9}-+-{'-'*13}-+-{'-'*14}-+-{'-'*8}-+-{'-'*14}-+-{'-'*7}")
+          f"{'TFLOP/s':>8} | {'vs SAM (naive)':>14} | {'vs Torch'}| {'verify':>7}")
+    print(f"  {'-'*9}-+-{'-'*13}-+-{'-'*14}-+-{'-'*8}-+-{'-'*14}-+-{'-'*14}-+-{'-'*7}")
 
     for sp in sparsities:
         bmask_c, bmask_t = make_A_mask(B, H, num_m_blocks, num_n_blocks, sp)
@@ -239,14 +240,19 @@ def run_benchmark(dtype_str, B, Sq, H, D, scale, m_block, n_block, threads,
         def fa2_kernel():
             compiled(q_c, k_c, v_c, make_o_cute(o_t, dtype),
                      rel_h_c, rel_w_c, perm_q_c, perm_k_c, bmask_c, scale, cu_stream)
+        
+        def fa2_torch():
+            F.scaled_dot_product_attention(q_t, k_t, v_t, attn_mask=None, is_causal=False, scale=scale)
 
         t_fa2  = timeit(fa2_total,  warmup, iters)
         t_kern = timeit(fa2_kernel, warmup, iters)
+        t_torch= timeit(fa2_torch, warmup, iters)
         tflops = flops / (t_kern * 1e-6) / 1e12
         speedup = t_sam / t_fa2
+        speedup_torch = t_torch / t_kern
 
         print(f"  {sp:>9.2f} | {t_fa2:>13.1f} | {t_kern:>14.1f} | "
-              f"{tflops:>8.2f} | {speedup:>13.2f}x | {status:>7}")
+              f"{tflops:>8.2f} | {speedup:>13.2f}x | {speedup_torch:>14.2f}x | {status:>7}")
 
     print()
 
@@ -255,7 +261,7 @@ def run_benchmark(dtype_str, B, Sq, H, D, scale, m_block, n_block, threads,
 # SAM presets  (effective batch = B x num_windows, win=14 -> 25 windows)
 # ---------------------------------------------------------------------------
 SAM_CONFIGS = {
-    "sam_l": (196, 16, 64),
+    "sam_l": (5184, 16, 64),
     # "sam_h": (14*14, 16, 80),
 }
 
@@ -264,7 +270,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model",         default=None, choices=list(SAM_CONFIGS))
     p.add_argument("--dtype",         default="BFloat16")
-    p.add_argument("--batch_size",    type=int,   default=25 * 8 )
+    p.add_argument("--batch_size",    type=int,   default=1)
     p.add_argument("--seqlen_q",      type=int,   default=None)
     p.add_argument("--num_head",      type=int,   default=None)
     p.add_argument("--head_dim",      type=int,   default=None)

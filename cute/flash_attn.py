@@ -273,6 +273,11 @@ class FlashAttentionForwardAmpere:
             (None, 0),
         ) # [N, D ,num_tiles]
 
+        # Slice per-batch 1D views of the perm tensors so the kernel only needs
+        # 1D indexing (CUTE DSL does not support [batch, idx] on plain tensors).
+        perm_Q_batch = m_perm_Q[batch_size, None]  # (seqlen_q,) view for this batch
+        perm_K_batch = m_perm_K[batch_size, None]  # (seqlen_k,) view for this batch
+
         # inv_softmax_scale: so that (acc_S + rel_pos/scale) * scale = acc_S*scale + rel_pos
         # softmax_scale_log2 = scale * log2(e), so scale = softmax_scale_log2 / log2(e)
         # inv_softmax_scale = log2(e) / softmax_scale_log2
@@ -280,8 +285,8 @@ class FlashAttentionForwardAmpere:
         rel_pos_params = SimpleNamespace(
             m_rel_H=m_rel_H,
             m_rel_W=m_rel_W,
-            perm_Q=m_perm_Q,
-            perm_K=m_perm_K,
+            perm_Q=perm_Q_batch,
+            perm_K=perm_K_batch,
             inv_softmax_scale=inv_softmax_scale,
         )
 
@@ -552,7 +557,7 @@ class FlashAttentionForwardAmpere:
                 k_pos         = flat_idx %  self._win_shape
                 q_global_perm = m_block * self._m_block_size + q_local
                 if cute.elem_less(q_global_perm, mQ.shape[1]):
-                    q_global_orig = m_perm_Q[q_global_perm]
+                    q_global_orig = rel_pos_params.perm_Q[q_global_perm]
                     sRelH[q_local, k_pos] = m_rel_H[batch_size, q_global_orig, num_head, k_pos].to(self._dtype)
                     sRelW[q_local, k_pos] = m_rel_W[batch_size, q_global_orig, num_head, k_pos].to(self._dtype)
 
@@ -653,6 +658,7 @@ class FlashAttentionForwardAmpere:
         rel_pos_params: SimpleNamespace,
         is_first_n_block: cutlass.Constexpr,
         in_mask_steps: cutlass.Constexpr,
+        no_mask: cutlass.Constexpr = False,
     ):
         """Process one n-block: S=Q*K^T, online softmax, O+=P*V.
 
@@ -668,10 +674,13 @@ class FlashAttentionForwardAmpere:
         self.cta_sync_barrier.arrive_and_wait()
 
         # 0 = skip this (m_block, n_block) pair; 1 = compute it
-        block_enabled = basic_params.m_block_mask[
-            basic_params.batch_size, basic_params.num_head,
-            basic_params.m_block, basic_params.n_block,
-        ]
+        if cutlass.const_expr(no_mask):
+            block_enabled = True
+        else:
+            block_enabled = basic_params.m_block_mask[
+                basic_params.batch_size, basic_params.num_head,
+                basic_params.m_block, basic_params.n_block,
+            ]
 
         # Load V tile. For enabled blocks: full n_block_size rows. For masked blocks:
         # only the first 16 rows (partition 0) go into sV; the rest of sV is left stale
@@ -742,12 +751,15 @@ class FlashAttentionForwardAmpere:
         self.cta_sync_barrier.arrive_and_wait()
 
 
-        # Prefetch K for the next n-block: full or small depending on its mask bit.
+        # Prefetch K for the next n-block.
         if basic_params.n_block > 0:
-            next_block_enabled = basic_params.m_block_mask[
-                basic_params.batch_size, basic_params.num_head,
-                basic_params.m_block, basic_params.n_block - 1,
-            ]
+            if cutlass.const_expr(no_mask):
+                next_block_enabled = True
+            else:
+                next_block_enabled = basic_params.m_block_mask[
+                    basic_params.batch_size, basic_params.num_head,
+                    basic_params.m_block, basic_params.n_block - 1,
+                ]
             if next_block_enabled:
                 cute.copy(
                     gmem_copy_params.gmem_tiled_copy_QKV,
@@ -972,6 +984,359 @@ class FlashAttentionForwardAmpere:
 
 
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Structured-mask variants: no mask tensor needed.
+    #
+    #   DIAGONAL  (n_init_blocks=0): each CTA processes only n_block == m_block.
+    #   A-SHAPE   (n_init_blocks>0): n_block < n_init_blocks  ∪  n_block == m_block.
+    #
+    # Benefits vs the GENERAL kernel:
+    #   • No (B,H,nm,nn) mask tensor → zero mask GMEM reads.
+    #   • Loop iterates n_init_blocks+1 times instead of n_block_max times.
+    #   • All processed blocks are always "enabled" → no_mask=True eliminates
+    #     dead branches inside compute_one_n_block.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @cute.jit
+    def call_structured(
+        self,
+        mQ: cute.Tensor,
+        mK: cute.Tensor,
+        mV: cute.Tensor,
+        mO: cute.Tensor,
+        m_rel_H: cute.Tensor,
+        m_rel_W: cute.Tensor,
+        m_perm_Q: cute.Tensor,
+        m_perm_K: cute.Tensor,
+        n_init_blocks: cutlass.Int32,   # 0 = diagonal only, >0 = A-shape
+        softmax_scale: cutlass.Float32,
+        stream: cuda.CUstream,
+    ):
+        """Structured-mask (diagonal / A-shape) forward pass — no mask tensor."""
+        if cutlass.const_expr(
+            not (mQ.element_type == mK.element_type == mV.element_type == mO.element_type)
+        ):
+            raise TypeError("All tensors must have the same data type")
+        if cutlass.const_expr(
+            not (mQ.element_type == cutlass.Float16 or mQ.element_type == cutlass.BFloat16)
+        ):
+            raise TypeError("Only Float16 or BFloat16 is supported")
+        self._dtype: Type[cutlass.Numeric] = mQ.element_type
+
+        smem_k_block_size = 64 if self._head_dim_padded % 64 == 0 else 32
+        swizzle_bits = 3 if smem_k_block_size == 64 else 2
+        sQ_layout_atom = cute.make_composed_layout(
+            cute.make_swizzle(swizzle_bits, 3, 3),
+            0,
+            cute.make_layout((8, smem_k_block_size), stride=(smem_k_block_size, 1)),
+        )
+        sQ_layout  = cute.tile_to_shape(sQ_layout_atom, (self._m_block_size, self._head_dim_padded), (0, 1))
+        sKV_layout = cute.tile_to_shape(sQ_layout_atom, (self._n_block_size, self._head_dim_padded), (0, 1))
+        sO_layout  = sQ_layout
+
+        @cute.struct
+        class SharedStorage:
+            sQ:    cute.struct.Align[cute.struct.MemRange[self._dtype, cute.cosize(sQ_layout)],  1024]
+            sK:    cute.struct.Align[cute.struct.MemRange[self._dtype, cute.cosize(sKV_layout)], 1024]
+            sV:    cute.struct.Align[cute.struct.MemRange[self._dtype, cute.cosize(sKV_layout)], 1024]
+            sRelH: cute.struct.Align[cute.struct.MemRange[self._dtype, self._m_block_size * self._win_shape], 128]
+            sRelW: cute.struct.Align[cute.struct.MemRange[self._dtype, self._m_block_size * self._win_shape], 128]
+
+        universal_copy_bits = 128
+        async_copy_elems    = universal_copy_bits // self._dtype.width
+        atom_async_copy     = cute.make_copy_atom(cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL), self._dtype, num_bits_per_copy=universal_copy_bits)
+        atom_universal_copy = cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), self._dtype, num_bits_per_copy=universal_copy_bits)
+
+        tQKV_shape_dim_1 = sQ_layout_atom.outer.shape[1] // async_copy_elems
+        tQKV_layout      = cute.make_layout((self._num_threads // tQKV_shape_dim_1, tQKV_shape_dim_1), stride=(tQKV_shape_dim_1, 1))
+        vQKV_layout      = cute.make_layout((1, async_copy_elems))
+
+        gmem_tiled_copy_QKV = cute.make_tiled_copy_tv(atom_async_copy,     tQKV_layout, vQKV_layout)
+        gmem_tiled_copy_O   = cute.make_tiled_copy_tv(atom_universal_copy,  tQKV_layout, vQKV_layout)
+
+        tiled_mma = cute.make_tiled_mma(
+            warp.MmaF16BF16Op(self._dtype, cutlass.Float32, (16, 8, 16)),
+            (self._num_threads // 32, 1, 1),
+            permutation_mnk=(self._num_threads // 32 * 16, 16, 16),
+        )
+
+        grid_dim = (
+            cute.ceil_div(mQ.shape[1], self._m_block_size),
+            cute.size(mQ.shape[0]),
+            cute.size(mQ.shape[2]),
+        )
+        softmax_scale_log2 = softmax_scale * 1.4426950408889634074
+
+        self.kernel_structured(
+            mQ, mK, mV, mO,
+            m_rel_H, m_rel_W,
+            m_perm_Q, m_perm_K,
+            n_init_blocks,
+            softmax_scale_log2,
+            sQ_layout, sKV_layout, sO_layout,
+            gmem_tiled_copy_QKV, gmem_tiled_copy_O,
+            tiled_mma,
+            SharedStorage,
+        ).launch(
+            grid=grid_dim,
+            block=[self._num_threads, 1, 1],
+            stream=stream,
+        )
+
+    @cute.kernel
+    def kernel_structured(
+        self,
+        mQ: cute.Tensor,
+        mK: cute.Tensor,
+        mV: cute.Tensor,
+        mO: cute.Tensor,
+        m_rel_H: cute.Tensor,
+        m_rel_W: cute.Tensor,
+        m_perm_Q: cute.Tensor,
+        m_perm_K: cute.Tensor,
+        n_init_blocks: cutlass.Int32,
+        softmax_scale_log2: cutlass.Float32,
+        sQ_layout: cute.ComposedLayout,
+        sKV_layout: cute.ComposedLayout,
+        sO_layout: cute.ComposedLayout,
+        gmem_tiled_copy_QKV: cute.TiledCopy,
+        gmem_tiled_copy_O: cute.TiledCopy,
+        tiled_mma: cute.TiledMma,
+        SharedStorage: cutlass.Constexpr,
+    ):
+        """Structured-mask kernel: no mask tensor, only active blocks visited."""
+        tidx, _, _ = cute.arch.thread_idx()
+        m_block, batch_size, num_head = cute.arch.block_idx()
+        n_block_max = cute.ceil_div(mK.shape[1], self._n_block_size)
+
+        gQ = cute.local_tile(mQ[batch_size, None, num_head, None], (self._m_block_size, self._head_dim_padded), (m_block, 0))
+        gK = cute.local_tile(mK[batch_size, None, num_head, None], (self._m_block_size, self._head_dim_padded), (None, 0))
+        gV = cute.local_tile(mV[batch_size, None, num_head, None], (self._m_block_size, self._head_dim_padded), (None, 0))
+
+        perm_Q_batch = m_perm_Q[batch_size, None]
+        perm_K_batch = m_perm_K[batch_size, None]
+        inv_softmax_scale = 1.4426950408889634074 / softmax_scale_log2
+        rel_pos_params = SimpleNamespace(
+            m_rel_H=m_rel_H, m_rel_W=m_rel_W,
+            perm_Q=perm_Q_batch, perm_K=perm_K_batch,
+            inv_softmax_scale=inv_softmax_scale,
+        )
+
+        smem    = cutlass.utils.SmemAllocator()
+        storage = smem.allocate(SharedStorage)
+        sQ = storage.sQ.get_tensor(sQ_layout)
+        sK = storage.sK.get_tensor(sKV_layout)
+        sV = storage.sV.get_tensor(sKV_layout)
+
+        sRelH_layout = cute.make_layout((self._m_block_size, self._win_shape), stride=(self._win_shape, 1))
+        sRelH = storage.sRelH.get_tensor(sRelH_layout)
+        sRelW = storage.sRelW.get_tensor(sRelH_layout)
+        rel_pos_params.sRelH = sRelH
+        rel_pos_params.sRelW = sRelW
+
+        sVt = cute.composition(sV, cute.make_layout((self._head_dim_padded, self._n_block_size), stride=(self._n_block_size, 1)))
+
+        gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_slice(tidx)
+        tQgQ = gmem_thr_copy_QKV.partition_S(gQ)
+        tQsQ = gmem_thr_copy_QKV.partition_D(sQ)
+        tKgK = gmem_thr_copy_QKV.partition_S(gK)
+        tKsK = gmem_thr_copy_QKV.partition_D(sK)
+        tVgV = gmem_thr_copy_QKV.partition_S(gV)
+        tVsV = gmem_thr_copy_QKV.partition_D(sV)
+
+        thr_mma = tiled_mma.get_slice(tidx)
+        tSrQ  = thr_mma.make_fragment_A(thr_mma.partition_A(sQ))
+        tSrK  = thr_mma.make_fragment_B(thr_mma.partition_B(sK))
+        tOrVt = thr_mma.make_fragment_B(thr_mma.partition_B(sVt))
+
+        acc_O = cute.make_rmem_tensor(thr_mma.partition_shape_C((self._m_block_size, self._head_dim_padded)), cutlass.Float32)
+        acc_O.fill(0.0)
+        # acc_S_small not needed (no masked blocks in structured mode)
+        acc_S_small = cute.make_rmem_tensor(thr_mma.partition_shape_C((self._m_block_size, 16)), cutlass.Float32)
+
+        smem_copy_atom_Q = cute.make_copy_atom(warp.LdMatrix8x8x16bOp(transpose=False, num_matrices=4), self._dtype)
+        smem_copy_atom_K = cute.make_copy_atom(warp.LdMatrix8x8x16bOp(transpose=False, num_matrices=4), self._dtype)
+        smem_copy_atom_V = cute.make_copy_atom(warp.LdMatrix8x8x16bOp(transpose=True,  num_matrices=4), self._dtype)
+        smem_tiled_copy_Q = cute.make_tiled_copy_A(smem_copy_atom_Q, tiled_mma)
+        smem_tiled_copy_K = cute.make_tiled_copy_B(smem_copy_atom_K, tiled_mma)
+        smem_tiled_copy_V = cute.make_tiled_copy_B(smem_copy_atom_V, tiled_mma)
+
+        smem_thr_copy_Q = smem_tiled_copy_Q.get_slice(tidx)
+        smem_thr_copy_K = smem_tiled_copy_K.get_slice(tidx)
+        smem_thr_copy_V = smem_tiled_copy_V.get_slice(tidx)
+
+        tSsQ = smem_thr_copy_Q.partition_S(sQ)
+        tSrQ_copy_view  = smem_thr_copy_Q.retile(tSrQ)
+        tSsK = smem_thr_copy_K.partition_S(sK)
+        tSrK_copy_view  = smem_thr_copy_K.retile(tSrK)
+        tOsVt = smem_thr_copy_V.partition_S(sVt)
+        tOrVt_copy_view = smem_thr_copy_V.retile(tOrVt)
+
+        # Dummy small-path partitions (unused but needed to keep namespace shape consistent)
+        sK_small   = cute.local_tile(sK,  (16, self._head_dim_padded), (0, 0))
+        sVt_small  = cute.local_tile(sVt, (self._head_dim_padded, 16), (0, 0))
+        tSrK_small  = thr_mma.make_fragment_B(thr_mma.partition_B(sK_small))
+        tOrVt_small = thr_mma.make_fragment_B(thr_mma.partition_B(sVt_small))
+        tSsK_small           = smem_thr_copy_K.partition_S(sK_small)
+        tSrK_small_copy_view = smem_thr_copy_K.retile(tSrK_small)
+        tOsVt_small           = smem_thr_copy_V.partition_S(sVt_small)
+        tOrVt_small_copy_view = smem_thr_copy_V.retile(tOrVt_small)
+
+        mcQ  = cute.make_identity_tensor(mQ.layout.shape)
+        mcKV = cute.make_identity_tensor(mK.layout.shape)
+        cQ   = cute.local_tile(mcQ[batch_size, None, num_head, None],  (self._m_block_size, self._head_dim_padded), (m_block, 0))
+        cKV  = cute.local_tile(mcKV[batch_size, None, num_head, None], (self._n_block_size, self._head_dim_padded), (m_block, 0))
+        tQcQ   = gmem_thr_copy_QKV.partition_S(cQ)
+        tKVcKV = gmem_thr_copy_QKV.partition_S(cKV)
+
+        tQpQ = cute.make_rmem_tensor(cute.make_layout((tQsQ.shape[0][1], cute.size(tQsQ, mode=[1]), cute.size(tQsQ, mode=[2])), stride=(cute.size(tQsQ, mode=[2]), 0, 1)), cutlass.Boolean)
+        tKVpKV = cute.make_rmem_tensor(cute.make_layout((tKsK.shape[0][1], cute.size(tKsK, mode=[1]), cute.size(tKsK, mode=[2])), stride=(cute.size(tKsK, mode=[2]), 0, 1)), cutlass.Boolean)
+        for rest_v in cutlass.range_constexpr(tQpQ.shape[0]):
+            for rest_k in cutlass.range_constexpr(tQpQ.shape[2]):
+                tQpQ[rest_v, 0, rest_k] = cute.elem_less(tQcQ[(0, rest_v), 0, rest_k][3], mQ.layout.shape[3])
+        for rest_v in cutlass.range_constexpr(tKVpKV.shape[0]):
+            for rest_k in cutlass.range_constexpr(tKVpKV.shape[2]):
+                tKVpKV[rest_v, 0, rest_k] = cute.elem_less(tKVcKV[(0, rest_v), 0, rest_k][3], mK.layout.shape[3])
+
+        row_max = cute.make_rmem_tensor((acc_O.shape[0][0] * acc_O.shape[1]), cutlass.Float32)
+        row_sum = cute.make_rmem_tensor((acc_O.shape[0][0] * acc_O.shape[1]), cutlass.Float32)
+        row_max.fill(-cutlass.Float32.inf)
+        row_sum.fill(0.0)
+
+        basic_params = SimpleNamespace(
+            m_block=m_block, n_block=m_block,
+            mQ=mQ, mK=mK,
+            batch_size=batch_size, num_head=num_head,
+            m_block_mask=None,   # unused in no_mask=True path
+        )
+        mma_params = SimpleNamespace(
+            thr_mma=thr_mma, tiled_mma=tiled_mma,
+            tSrQ=tSrQ, tSrK=tSrK, tOrVt=tOrVt, acc_O=acc_O,
+            tSrK_small=tSrK_small, tOrVt_small=tOrVt_small,
+            acc_S_small=acc_S_small,
+        )
+        gmem_copy_params = SimpleNamespace(
+            gmem_tiled_copy_QKV=gmem_tiled_copy_QKV,
+            tKVcKV=tKVcKV,
+            tKgK=tKgK, tKsK=tKsK,
+            tVgV=tVgV, tVsV=tVsV,
+            tKVpKV=tKVpKV,
+        )
+        smem_copy_params = SimpleNamespace(
+            smem_tiled_copy_Q=smem_tiled_copy_Q,
+            smem_tiled_copy_K=smem_tiled_copy_K,
+            smem_tiled_copy_V=smem_tiled_copy_V,
+            tSsQ=tSsQ, tSrQ_copy_view=tSrQ_copy_view,
+            tSsK=tSsK, tSrK_copy_view=tSrK_copy_view,
+            tOsVt=tOsVt, tOrVt_copy_view=tOrVt_copy_view,
+            tSsK_small=tSsK_small, tSrK_small_copy_view=tSrK_small_copy_view,
+            tOsVt_small=tOsVt_small, tOrVt_small_copy_view=tOrVt_small_copy_view,
+        )
+        softmax_params = SimpleNamespace(row_max=row_max, row_sum=row_sum, softmax_scale_log2=softmax_scale_log2)
+
+        acc_O_mn_ref = self._make_acc_tensor_mn_view(acc_O)
+        num_r = cute.size(acc_O_mn_ref.shape[0])
+        mcS_ref = cute.make_identity_tensor((mQ.shape[0], mQ.shape[1], mQ.shape[2], mK.shape[1]))
+        cS_ref  = cute.local_tile(mcS_ref[batch_size, None, num_head, None], (self._m_block_size, self._n_block_size), (m_block, 0))
+        tScS_ref_mn = self._make_acc_tensor_mn_view(thr_mma.partition_C(cS_ref))
+
+        rRelH = cute.make_rmem_tensor((num_r, self._win_shape), cutlass.Float32)
+        rRelW = cute.make_rmem_tensor((num_r, self._win_shape), cutlass.Float32)
+        rRelH.fill(0.0)
+        rRelW.fill(0.0)
+        rel_pos_params.rRelH = rRelH
+        rel_pos_params.rRelW = rRelW
+
+        # ── Prologue: load Q and K[m_block] (diagonal block, always first active) ──
+        for m in cutlass.range_constexpr(cute.size(tQsQ.shape[1])):
+            if cute.elem_less(tQcQ[0, m, 0][1], mQ.layout.shape[1]):
+                cute.copy(gmem_tiled_copy_QKV, tQgQ[None, m, None], tQsQ[None, m, None], pred=tQpQ[None, m, None])
+            else:
+                tQsQ[None, m, None].fill(0)
+        for n in cutlass.range_constexpr(cute.size(tKsK.shape[1])):
+            if cute.elem_less(tKVcKV[0, n, 0][1], mK.layout.shape[1]):
+                cute.copy(gmem_tiled_copy_QKV, tKgK[None, n, None, m_block], tKsK[None, n, None], pred=tKVpKV[None, n, None])
+            else:
+                tKsK[None, n, None].fill(0)
+        cute.arch.cp_async_commit_group()
+
+        # Rel-pos bias load (same as general kernel)
+        n_rel_elems = self._m_block_size * self._win_shape
+        for j in cutlass.range_constexpr(cute.ceil_div(n_rel_elems, self._num_threads)):
+            flat_idx = tidx + j * self._num_threads
+            if cute.elem_less(flat_idx, n_rel_elems):
+                q_local       = flat_idx // self._win_shape
+                k_pos         = flat_idx %  self._win_shape
+                q_global_perm = m_block * self._m_block_size + q_local
+                if cute.elem_less(q_global_perm, mQ.shape[1]):
+                    q_global_orig = rel_pos_params.perm_Q[q_global_perm]
+                    sRelH[q_local, k_pos] = m_rel_H[batch_size, q_global_orig, num_head, k_pos].to(self._dtype)
+                    sRelW[q_local, k_pos] = m_rel_W[batch_size, q_global_orig, num_head, k_pos].to(self._dtype)
+        self.cta_sync_barrier.arrive_and_wait()
+
+        for r in cutlass.range_constexpr(num_r):
+            q_idx   = tScS_ref_mn[r, 0][1]
+            q_local = q_idx - m_block * self._m_block_size
+            for k in cutlass.range_constexpr(self._win_shape):
+                rRelH[r, k] = rel_pos_params.sRelH[q_local, k].to(cutlass.Float32)
+                rRelW[r, k] = rel_pos_params.sRelW[q_local, k].to(cutlass.Float32)
+
+        # ── First active block: the diagonal (m_block) ──────────────────────────
+        basic_params.n_block = m_block
+        self.compute_one_n_block(
+            basic_params, mma_params, gmem_copy_params, smem_copy_params,
+            softmax_params, rel_pos_params,
+            is_first_n_block=True, in_mask_steps=True, no_mask=True,
+        )
+
+        # ── Initial-token blocks: [n_init_blocks-1 .. 0], skipping m_block ──────
+        for n in range(n_init_blocks):
+            cur_n = n_init_blocks - 1 - n
+            if cur_n != m_block:
+                basic_params.n_block = cur_n
+                self.compute_one_n_block(
+                    basic_params, mma_params, gmem_copy_params, smem_copy_params,
+                    softmax_params, rel_pos_params,
+                    is_first_n_block=False, in_mask_steps=False, no_mask=True,
+                )
+
+        # ── Epilogue (identical to general kernel) ───────────────────────────────
+        self.normalize_softmax(acc_O, row_sum)
+        rO = cute.make_fragment_like(acc_O, self._dtype)
+        rO.store(acc_O.load().to(self._dtype))
+
+        sO = cute.make_tensor(sQ.iterator, sO_layout)
+        smem_copy_atom_O  = cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), self._dtype)
+        smem_tiled_copy_O = cute.make_tiled_copy_C(smem_copy_atom_O, tiled_mma)
+        smem_thr_copy_O   = smem_tiled_copy_O.get_slice(tidx)
+        taccOrO = smem_thr_copy_O.retile(rO)
+        taccOsO = smem_thr_copy_O.partition_D(sO)
+        cute.copy(smem_copy_atom_O, taccOrO, taccOsO)
+
+        gO = cute.local_tile(mO[batch_size, None, num_head, None], (self._m_block_size, self._head_dim_padded), (m_block, 0))
+        gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
+        tOsO = gmem_thr_copy_O.partition_S(sO)
+        tOgO = gmem_thr_copy_O.partition_D(gO)
+        tOrO = cute.make_fragment_like(tOgO, self._dtype)
+
+        self.cta_sync_barrier.arrive_and_wait()
+        cute.copy(gmem_tiled_copy_O, tOsO, tOrO)
+
+        mcO = cute.make_identity_tensor(mO.layout.shape)
+        cO  = cute.local_tile(mcO[batch_size, None, num_head, None], (self._m_block_size, self._head_dim_padded), (m_block, 0))
+        tOcO = gmem_thr_copy_O.partition_D(cO)
+        tOpO = cute.make_rmem_tensor(
+            cute.make_layout((tOgO.shape[0][1], tOgO.shape[1], tOgO.shape[2]), stride=(tOgO.shape[2], 0, 1)),
+            cutlass.Boolean,
+        )
+        for rest_v in cutlass.range_constexpr(tOpO.shape[0]):
+            for rest_n in cutlass.range_constexpr(cute.size(tOpO.shape[2])):
+                tOpO[rest_v, 0, rest_n] = cute.elem_less(tOcO[(0, rest_v), 0, rest_n][3], mO.layout.shape[3])
+        for rest_m in cutlass.range_constexpr(cute.size(tOpO.shape[1])):
+            if cute.elem_less(tOcO[0, rest_m, 0][1], mO.layout.shape[1]):
+                cute.copy(gmem_tiled_copy_O, tOrO[None, rest_m, None], tOgO[None, rest_m, None], pred=tOpO[None, rest_m, None])
+
+
 def run(
     dtype: Type[cutlass.Numeric],
     batch_size: int,
@@ -1053,7 +1418,9 @@ def run(
 
 
     def create_perm(seqlen):
-        t = torch.randperm(seqlen, dtype=torch.int32).cuda()
+        t = torch.stack(
+            [torch.randperm(seqlen, dtype=torch.int32) for _ in range(batch_size)]
+        ).cuda()  # (B, seqlen)
         ct = from_dlpack(t, assumed_align=4)
         return ct, t
 
@@ -1103,28 +1470,34 @@ def run(
         k_ref = k_torch.permute(0, 2, 1, 3).float()
         v_ref = v_torch.permute(0, 2, 1, 3).float()
 
-        orig_q = perm_q_torch.long().cpu()  # (seqlen_q,)
-        orig_k = perm_k_torch.long().cpu()  # (seqlen_k,)
-        k_row  = orig_k // win_shape        # original row in the 2-D window
-        k_col  = orig_k % win_shape         # original col in the 2-D window
+        orig_q = perm_q_torch.long().cpu()  # (B, seqlen_q)
+        orig_k = perm_k_torch.long().cpu()  # (B, seqlen_k)
 
-        rel_H_pq = rel_h_torch[:, orig_q, :, :].permute(0, 2, 1, 3).float()  # (B,H,Sq,win)
-        rel_W_pq = rel_w_torch[:, orig_q, :, :].permute(0, 2, 1, 3).float()  # (B,H,Sq,win)
-        rel_pos  = rel_H_pq[:, :, :, k_row] + rel_W_pq[:, :, :, k_col]       # (B,H,Sq,Sk)
+        # Build rel_pos per batch since each batch has its own permutation
+        rel_pos_list = []
+        for b in range(batch_size):
+            oq = orig_q[b]                    # (seqlen_q,)
+            ok = orig_k[b]                    # (seqlen_k,)
+            k_row = ok // win_shape           # original row in the 2-D window
+            k_col = ok % win_shape            # original col in the 2-D window
+            rH = rel_h_torch[b:b+1, oq, :, :].permute(0, 2, 1, 3).float()  # (1,H,Sq,win)
+            rW = rel_w_torch[b:b+1, oq, :, :].permute(0, 2, 1, 3).float()  # (1,H,Sq,win)
+            rel_pos_list.append(rH[:, :, :, k_row] + rW[:, :, :, k_col])    # (1,H,Sq,Sk)
+        rel_pos = torch.cat(rel_pos_list, dim=0)  # (B,H,Sq,Sk)
 
         scores = (torch.matmul(q_ref, k_ref.transpose(-2, -1)) * softmax_scale + rel_pos)
 
-        # Apply block mask: enabled (m_block, n_block) pairs keep all n_block_size K
-        # positions; masked pairs keep only the first 16 K positions of the n-tile and
-        # mask the rest to -inf (matches the kernel's small-K fallback path).
+        # Apply block mask: disabled (m_block, n_block) pairs are fully skipped by the
+        # kernel (no small-K fallback), so mask all their K positions to -inf.
         enabled = block_mask_torch.bool()                                     # (B,H,nm,nn)
-        within  = torch.arange(n_block_size, device="cuda") < 16              # (n_block_size,)
-        keep    = enabled.unsqueeze(-1) | within.view(1, 1, 1, 1, -1)         # (B,H,nm,nn,N)
         mask_expanded = (
-            keep.reshape(batch_size, num_head, num_m_blocks, num_n_blocks * n_block_size)
-                [:, :, :, :seqlen_k]
-                .repeat_interleave(m_block_size, dim=2)
-                [:, :, :seqlen_q, :]
+            enabled
+            .unsqueeze(-1)
+            .expand(batch_size, num_head, num_m_blocks, num_n_blocks, n_block_size)
+            .reshape(batch_size, num_head, num_m_blocks, num_n_blocks * n_block_size)
+            [:, :, :, :seqlen_k]
+            .repeat_interleave(m_block_size, dim=2)
+            [:, :, :seqlen_q, :]
         )
         scores = scores.masked_fill(~mask_expanded, float("-inf"))
 
@@ -1193,10 +1566,10 @@ def run(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Flash Attention v2 with CuTe DSL (Ampere SM80)")
     parser.add_argument("--dtype",             type=cutlass.dtype, default=cutlass.BFloat16)
-    parser.add_argument("--batch_size",        type=int,   default=1)
-    parser.add_argument("--seqlen_q",          type=int,   default=4096)
-    parser.add_argument("--seqlen_k",          type=int,   default=4096)
-    parser.add_argument("--num_head",          type=int,   default=16)
+    parser.add_argument("--batch_size",        type=int,   default=400)
+    parser.add_argument("--seqlen_q",          type=int,   default=196)
+    parser.add_argument("--seqlen_k",          type=int,   default=196)
+    parser.add_argument("--num_head",          type=int,   default=1)
     parser.add_argument("--head_dim",          type=int,   default=64)
     parser.add_argument("--softmax_scale",     type=float, default=0.5)
     parser.add_argument("--m_block_size",      type=int,   default=64)
