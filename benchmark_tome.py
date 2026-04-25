@@ -91,23 +91,17 @@ from train.train import compute_iou, compute_boundary_iou
 
 _SPARSESAM_ALGOS = {"sparsesam", "sparsesam_pitome", "sparsesam_random"}
 
-def apply_tome(encoder, algo: str, ratio: float, margin: float = 0.5,
-               sparsity: float = 0.0):
+def apply_tome(encoder, algo: str, ratio: float, margin: float = 0.5):
     """Patch encoder in-place using the algo specified in ALGO_REGISTRY.
 
     algo='none' or ratio>=1.0 are no-ops.
-    sparsity/diagonal_width are forwarded to sparsesam-family algos only.
     """
     if algo == "none" or ratio >= 1.0:
         return
     if algo not in ALGO_REGISTRY:
         raise ValueError(f"Unknown algo {algo!r}. Valid choices: {VALID_ALGOS}")
     patch_fn, internal_algo = ALGO_REGISTRY[algo]
-    if algo in _SPARSESAM_ALGOS:
-        patch_fn(encoder, algo=internal_algo, ratio=ratio, margin=margin,
-                 sparsity=sparsity)
-    else:
-        patch_fn(encoder, algo=internal_algo, ratio=ratio, margin=margin)
+    patch_fn(encoder, algo=internal_algo, ratio=ratio, margin=margin)
 
 def update_ratio(encoder, ratio: float):
     """Update merge ratio without re-patching (works if already patched)."""
@@ -340,7 +334,6 @@ def run_sweep(
     datasets_config: List[Dict],
     dataset_idx: int,
     margin: float,
-    sparsity: float = 0.0,
     diagonal_width: int = 1,
 ) -> List[Dict]:
 
@@ -375,14 +368,12 @@ def run_sweep(
         # ── patch / unpatch encoder ──────────────────────────────────────────
         remove_tome(encoder)
         if algo != "none":
-            apply_tome(encoder, algo=algo, ratio=ratio, margin=margin,
-                       sparsity=sparsity)
+            apply_tome(encoder, algo=algo, ratio=ratio, margin=margin)
 
         n_tokens = int(64 * 64 * ratio) if algo != "none" else 64 * 64
 
         for batch_size in batch_sizes:
-            sp_tag = f" sp={sparsity:.2f} dw={diagonal_width}" if algo in _SPARSESAM_ALGOS else ""
-            label = f"{algo} r={ratio:.2f}{sp_tag} bs={batch_size}"
+            label = f"{algo} r={ratio:.2f} bs={batch_size}"
             print(f"\n── {label} ──")
 
             dataloader = build_dataloader(datasets_config, dataset_idx, batch_size)
@@ -393,7 +384,6 @@ def run_sweep(
                 'algo':            algo,
                 'ratio':           ratio,
                 'n_tokens_kept':   n_tokens,
-                'sparsity':        sparsity if algo in _SPARSESAM_ALGOS else 0.0,
                 'diagonal_width':  diagonal_width if algo in _SPARSESAM_ALGOS else 1,
             })
             all_results.append(result)
@@ -498,10 +488,6 @@ def main():
     parser.add_argument('--margin', type=float, default=0.5,
                         help='PiToMe energy margin (ignored for ToMe).')
 
-    # SparseSAM block-sparse attention
-    parser.add_argument('--sparsity', type=float, default=0.0,
-                        help='Fraction of key blocks to skip in block-sparse attention '
-                             '(0.0 = dense, 0.9 = 90%% sparse). Only used for sparsesam[-pitome].')
     parser.add_argument('--diagonal-width', type=int, default=1,
                         help='Width of the diagonal band kept in block-sparse attention '
                              '(1 = exact diagonal, 3 = ±1 block). Only used for sparsesam[-pitome].')
@@ -546,7 +532,6 @@ def main():
         datasets_config = datasets,
         dataset_idx     = args.dataset_idx,
         margin          = args.margin,
-        sparsity        = args.sparsity,
     )
 
     # ── save CSV ──────────────────────────────────────────────────────────────

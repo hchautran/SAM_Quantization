@@ -314,10 +314,9 @@ def print_report_sam3(timers, n_runs, model_id, batch_size, vision_enc=None):
 # ToMe helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def apply_tome_patch(encoder, algo, ratio, margin, sparsity=0.0):
+def apply_tome_patch(encoder, algo, ratio, margin):
     from algo.sparsesam.patch.sam import apply_patch
-    apply_patch(encoder, algo=algo, ratio=ratio, margin=margin,
-                sparsity=sparsity)
+    apply_patch(encoder, algo=algo, ratio=ratio, margin=margin)
 
 
 def remove_tome_patch(encoder):
@@ -532,9 +531,6 @@ def main():
                         help="Token-keep ratio for ToMe/PiToMe (0 < ratio < 1).")
     parser.add_argument('--tome-margin', type=float, default=0.5,
                         help="PiToMe energy margin.")
-    parser.add_argument('--sparsity', type=float, default=0.0,
-                        help="Block-sparse attention sparsity (0.0=dense, 0.9=90%% sparse). "
-                             "Only used for sparsesam[-pitome].")
     parser.add_argument('--diagonal-width', type=int, default=1,
                         help="Diagonal band width for block-sparse attention "
                              "(1=exact diagonal, 3=±1 block). Only used for sparsesam[-pitome].")
@@ -610,12 +606,9 @@ def main():
 
     # ── ToMe / PiToMe pass (SAM 1 only) ──────────────────────────────────────
     if want_tome:
-        sp_tag = (f" sparsity={args.sparsity} dw={args.diagonal_width}"
-                  if args.tome_algo in ('sparsesam', 'sparsesam_pitome') else "")
-        print(f"\n── {args.tome_algo.upper()} ratio={args.tome_ratio}{sp_tag} ──")
+        print(f"\n── {args.tome_algo.upper()} ratio={args.tome_ratio} ──")
         apply_tome_patch(encoder, algo=args.tome_algo,
-                         ratio=args.tome_ratio, margin=args.tome_margin,
-                         sparsity=args.sparsity )
+                         ratio=args.tome_ratio, margin=args.tome_margin)
         t_tome = _run_profile(encoder, attach_fn, dummy, args.n_warmup, args.n_runs,
                               f"{args.tome_algo} r={args.tome_ratio}")
         remove_tome_patch(encoder)
