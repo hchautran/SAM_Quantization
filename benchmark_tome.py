@@ -58,20 +58,22 @@ from segment_anything import SamPredictor, sam_model_registry
 
 # ── Token merging patches ─────────────────────────────────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'PiToMe'))
-from algo.tome.patch.sam         import apply_patch as _patch_tome
-from algo.sparsesam.patch.sam    import apply_patch as _patch_sparsesam
-from algo.gradtome.patch.sam     import apply_patch as _patch_gradtome
-from algo.gradtome.patch.sam_hilbert import apply_patch as _patch_gradtome_hilbert
+from algo.tome.patch.sam              import apply_patch as _patch_tome
+from algo.sparsesam.patch.sam         import apply_patch as _patch_sparsesam
+from algo.sparsesam.patch.sam_random  import apply_patch as _patch_sparsesam_random
+from algo.gradtome.patch.sam          import apply_patch as _patch_gradtome
+from algo.gradtome.patch.sam_hilbert  import apply_patch as _patch_gradtome_hilbert
 
 # Maps benchmark algo name → (apply_patch_fn, internal algo arg passed to fn)
 ALGO_REGISTRY = {
-    "tome":               (_patch_tome,             "tome"),
-    "pitome":             (_patch_tome,             "pitome"),
-    "sparsesam":          (_patch_sparsesam,        "tome"),
-    "sparsesam_pitome":   (_patch_sparsesam,        "pitome"),
-    "gradtome":           (_patch_gradtome,         "tome"),
-    "gradtome_pitome":    (_patch_gradtome,         "pitome"),
-    "gradtome_hilbert":   (_patch_gradtome_hilbert, "tome"),
+    "tome":                   (_patch_tome,              "tome"),
+    "pitome":                 (_patch_tome,              "pitome"),
+    "sparsesam":              (_patch_sparsesam,         "tome"),
+    "sparsesam_pitome":       (_patch_sparsesam,         "pitome"),
+    "sparsesam_random":       (_patch_sparsesam_random,  "sparsesam_random"),
+    "gradtome":               (_patch_gradtome,          "tome"),
+    "gradtome_pitome":        (_patch_gradtome,          "pitome"),
+    "gradtome_hilbert":       (_patch_gradtome_hilbert,  "tome"),
 }
 VALID_ALGOS = ["none"] + list(ALGO_REGISTRY.keys())
 
@@ -87,7 +89,7 @@ from train.train import compute_iou, compute_boundary_iou
 # Token merging helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SPARSESAM_ALGOS = {"sparsesam", "sparsesam_pitome"}
+_SPARSESAM_ALGOS = {"sparsesam", "sparsesam_pitome", "sparsesam_random"}
 
 def apply_tome(encoder, algo: str, ratio: float, margin: float = 0.5,
                sparsity: float = 0.0):
@@ -119,14 +121,15 @@ def remove_tome(encoder):
     Handles all three patch variants (tome, sparsesam, gradtome).
     Needed when sweeping multiple algos/ratios on the same model instance.
     """
-    from algo.tome.patch.sam             import ToMeSAMBlock as _B_t,  ToMeSAMAttention as _A_t
-    from algo.sparsesam.patch.sam        import ToMeSAMBlock as _B_s,  ToMeSAMAttention as _A_s
-    from algo.gradtome.patch.sam         import ToMeSAMBlock as _B_g,  ToMeSAMAttention as _A_g
-    from algo.gradtome.patch.sam_hilbert import ToMeSAMBlock as _B_gh, ToMeSAMAttention as _A_gh
+    from algo.tome.patch.sam              import ToMeSAMBlock as _B_t,  ToMeSAMAttention as _A_t
+    from algo.sparsesam.patch.sam         import ToMeSAMBlock as _B_s,  ToMeSAMAttention as _A_s
+    from algo.sparsesam.patch.sam_random  import ToMeSAMBlockRandom as _B_sr, ToMeSAMAttentionRandom as _A_sr
+    from algo.gradtome.patch.sam          import ToMeSAMBlock as _B_g,  ToMeSAMAttention as _A_g
+    from algo.gradtome.patch.sam_hilbert  import ToMeSAMBlock as _B_gh, ToMeSAMAttention as _A_gh
     from segment_anything.modeling.image_encoder import Block, Attention
 
-    _patched_blocks = (_B_t, _B_s, _B_g, _B_gh)
-    _patched_attns  = (_A_t, _A_s, _A_g, _A_gh)
+    _patched_blocks = (_B_t, _B_s, _B_sr, _B_g, _B_gh)
+    _patched_attns  = (_A_t, _A_s, _A_sr, _A_g, _A_gh)
 
     for module in encoder.modules():
         if type(module) in _patched_blocks:
