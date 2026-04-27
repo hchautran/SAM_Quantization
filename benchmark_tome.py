@@ -332,7 +332,7 @@ def run_sweep(
     batch_sizes: List[int],
     num_samples: int,
     datasets_config: List[Dict],
-    dataset_idx: int,
+    dataset_indices: List[int],
     margin: float,
     diagonal_width: int = 1,
 ) -> List[Dict]:
@@ -373,36 +373,39 @@ def run_sweep(
         n_tokens = int(64 * 64 * ratio) if algo != "none" else 64 * 64
 
         for batch_size in batch_sizes:
-            label = f"{algo} r={ratio:.2f} bs={batch_size}"
-            print(f"\n── {label} ──")
+            for dataset_idx in dataset_indices:
+                ds_name = datasets_config[dataset_idx]["name"]
+                label = f"{algo} r={ratio:.2f} bs={batch_size} ds={ds_name}"
+                print(f"\n── {label} ──")
 
-            dataloader = build_dataloader(datasets_config, dataset_idx, batch_size)
-            result = run_one(predictor, batch_size, dataloader, num_samples, label=label)
-            del dataloader
+                dataloader = build_dataloader(datasets_config, dataset_idx, batch_size)
+                result = run_one(predictor, batch_size, dataloader, num_samples, label=label)
+                del dataloader
 
-            result.update({
-                'algo':            algo,
-                'ratio':           ratio,
-                'n_tokens_kept':   n_tokens,
-                'diagonal_width':  diagonal_width if algo in _SPARSESAM_ALGOS else 1,
-            })
-            all_results.append(result)
+                result.update({
+                    'algo':            algo,
+                    'ratio':           ratio,
+                    'dataset':         ds_name,
+                    'n_tokens_kept':   n_tokens,
+                    'diagonal_width':  diagonal_width if algo in _SPARSESAM_ALGOS else 1,
+                })
+                all_results.append(result)
 
-            # ── wandb log ────────────────────────────────────────────────────
-            prefix = f"{algo}_r{ratio:.2f}_bs{batch_size}"
-            wandb.log({
-                f'{prefix}/throughput':           result['throughput_imgs_per_sec'],
-                f'{prefix}/encoder_mean_ms':      result['encoder_batch_mean_ms'],
-                f'{prefix}/encoder_per_img_ms':   result['encoder_per_image_mean_ms'],
-                f'{prefix}/miou':                 result['miou'],
-                f'{prefix}/boundary_iou':         result['boundary_iou'],
-                f'{prefix}/peak_memory_mb':       result.get('peak_memory_allocated_mb', 0),
-            })
+                # ── wandb log ────────────────────────────────────────────────
+                prefix = f"{ds_name}/{algo}_r{ratio:.2f}_bs{batch_size}"
+                wandb.log({
+                    f'{prefix}/throughput':           result['throughput_imgs_per_sec'],
+                    f'{prefix}/encoder_mean_ms':      result['encoder_batch_mean_ms'],
+                    f'{prefix}/encoder_per_img_ms':   result['encoder_per_image_mean_ms'],
+                    f'{prefix}/miou':                 result['miou'],
+                    f'{prefix}/boundary_iou':         result['boundary_iou'],
+                    f'{prefix}/peak_memory_mb':       result.get('peak_memory_allocated_mb', 0),
+                })
 
-            print(f"  throughput={result['throughput_imgs_per_sec']:.2f} img/s  "
-                  f"enc/img={result['encoder_per_image_mean_ms']:.1f}ms  "
-                  f"mIoU={result['miou']:.4f}  "
-                  f"mem={result.get('peak_memory_allocated_mb', 0):.0f}MB")
+                print(f"  [{ds_name}] throughput={result['throughput_imgs_per_sec']:.2f} img/s  "
+                      f"enc/img={result['encoder_per_image_mean_ms']:.1f}ms  "
+                      f"mIoU={result['miou']:.4f}  "
+                      f"mem={result.get('peak_memory_allocated_mb', 0):.0f}MB")
 
     # restore encoder to clean state
     remove_tome(encoder)
@@ -412,26 +415,82 @@ def run_sweep(
 # Summary printing
 # ─────────────────────────────────────────────────────────────────────────────
 
-def print_summary(results: List[Dict]):
-    # Find baseline (algo=none) for each batch_size
-    baselines = {r['batch_size']: r for r in results if r['algo'] == 'none'}
+def plot_results(results: List[Dict], output_dir: str, ts: str) -> None:
+    """Per-dataset line plot: x=ratio, y=mIoU and Boundary IoU, one line per algo.
 
-    print(f"\n{'='*100}")
+    Baseline (algo=none, ratio=1.0) is drawn as a horizontal dashed reference.
+    """
+    import matplotlib.pyplot as plt
+
+    df = pd.DataFrame(results)
+    if df.empty:
+        return
+
+    datasets = sorted(df['dataset'].unique())
+    metrics  = [('miou', 'mIoU'), ('boundary_iou', 'Boundary IoU')]
+
+    for metric_key, metric_label in metrics:
+        n = len(datasets)
+        ncols = min(3, n)
+        nrows = (n + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 4.2 * nrows), squeeze=False)
+
+        for ax, ds in zip(axes.flat, datasets):
+            d_ds = df[df['dataset'] == ds]
+
+            baseline_val = None
+            base = d_ds[d_ds['algo'] == 'none']
+            if not base.empty:
+                baseline_val = float(base[metric_key].mean())
+
+            for algo in sorted(d_ds[d_ds['algo'] != 'none']['algo'].unique()):
+                d = (d_ds[d_ds['algo'] == algo]
+                     .groupby('ratio', as_index=False)[metric_key].mean()
+                     .sort_values('ratio'))
+                ax.plot(d['ratio'], d[metric_key], marker='o', label=algo)
+
+            if baseline_val is not None:
+                ax.axhline(baseline_val, ls='--', color='gray', label=f'baseline ({baseline_val:.4f})')
+
+            ax.set_title(ds)
+            ax.set_xlabel('keep ratio')
+            ax.set_ylabel(metric_label)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=8)
+
+        # hide unused subplots
+        for ax in axes.flat[len(datasets):]:
+            ax.axis('off')
+
+        fig.suptitle(f'{metric_label} vs keep ratio')
+        fig.tight_layout()
+        out = os.path.join(output_dir, f'tome_benchmark_{ts}_{metric_key}.png')
+        fig.savefig(out, dpi=140)
+        plt.close(fig)
+        print(f"Plot saved → {out}")
+
+
+def print_summary(results: List[Dict]):
+    # Find baseline (algo=none) for each (dataset, batch_size)
+    baselines = {(r.get('dataset', ''), r['batch_size']): r
+                 for r in results if r['algo'] == 'none'}
+
+    print(f"\n{'='*120}")
     print("SUMMARY — token merging vs baseline")
-    print(f"{'='*100}")
+    print(f"{'='*120}")
     print(
-        f"{'Algo':<8} {'Ratio':>6} {'BS':>4} | "
+        f"{'Dataset':<18} {'Algo':<10} {'Ratio':>6} {'BS':>4} | "
         f"{'Throughput':>12} {'Δspeedup':>10} | "
         f"{'Enc/img(ms)':>12} | "
         f"{'Mem(MB)':>9} | "
         f"{'mIoU':>8} {'ΔmIoU':>8} | "
         f"{'B-IoU':>8}"
     )
-    print("-" * 100)
+    print("-" * 120)
 
     for r in results:
         bs  = r['batch_size']
-        b   = baselines.get(bs)
+        b   = baselines.get((r.get('dataset', ''), bs))
         spd = r['throughput_imgs_per_sec']
         d_spd = (spd / b['throughput_imgs_per_sec'] - 1) * 100 if b else 0
         d_iou = r['miou'] - b['miou'] if b else 0
@@ -440,7 +499,7 @@ def print_summary(results: List[Dict]):
         sign_iou = "+" if d_iou >= 0 else ""
 
         print(
-            f"{r['algo']:<8} {r['ratio']:>6.2f} {bs:>4} | "
+            f"{r.get('dataset', ''):<18} {r['algo']:<10} {r['ratio']:>6.2f} {bs:>4} | "
             f"{spd:>12.2f} {sign_spd}{d_spd:>9.1f}% | "
             f"{r['encoder_per_image_mean_ms']:>12.2f} | "
             f"{r.get('peak_memory_allocated_mb', 0):>9.0f} | "
@@ -448,7 +507,7 @@ def print_summary(results: List[Dict]):
             f"{r['boundary_iou']:>8.4f}"
         )
 
-    print("=" * 100)
+    print("=" * 120)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -493,8 +552,11 @@ def main():
                              '(1 = exact diagonal, 3 = ±1 block). Only used for sparsesam[-pitome].')
 
     # Dataset
-    parser.add_argument('--dataset-idx', type=int, default=0,
-                        help='Index into get_default_datasets() list.')
+    parser.add_argument('--dataset-idx', type=int, nargs='+', default=None,
+                        help='Indices into get_default_datasets() list. '
+                             'Default: all datasets.')
+    parser.add_argument('--no-plot', action='store_true',
+                        help='Disable per-ratio line plots.')
 
     # Output
     parser.add_argument('--output-dir', type=str, default='./benchmark_results')
@@ -521,6 +583,7 @@ def main():
     predictor = SamPredictor(sam)
 
     datasets = get_default_datasets()
+    dataset_indices = args.dataset_idx if args.dataset_idx is not None else list(range(len(datasets)))
 
     # ── run sweep ─────────────────────────────────────────────────────────────
     results = run_sweep(
@@ -530,7 +593,7 @@ def main():
         batch_sizes     = args.batch_sizes,
         num_samples     = args.num_samples,
         datasets_config = datasets,
-        dataset_idx     = args.dataset_idx,
+        dataset_indices = dataset_indices,
         margin          = args.margin,
     )
 
@@ -543,6 +606,10 @@ def main():
 
     # ── summary ───────────────────────────────────────────────────────────────
     print_summary(results)
+
+    # ── plots ─────────────────────────────────────────────────────────────────
+    if not args.no_plot:
+        plot_results(results, args.output_dir, ts)
 
     wandb.log({'results_table': wandb.Table(dataframe=df)})
     wandb.finish()
