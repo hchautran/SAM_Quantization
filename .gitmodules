@@ -9,7 +9,7 @@
 	url = https://github.com/Dao-AILab/fast-hadamard-transform.git
 [submodule "SpargeAttn"]
 	path = SpargeAttn
-	url = https://github.com/thu-ml/SpargeAttn.git
+	url = git@github.com:NguyenHuuChi/SpargeAttn.git
 [submodule "SageAttention"]
 	path = SageAttention
 	url = https://github.com/thu-ml/SageAttention.git
@@ -28,3 +28,6 @@
 [submodule "Block-Sparse-Attention"]
 	path = Block-Sparse-Attention
 	url = git@github.com:hchautran/Block-Sparse-Attention.git
+[submodule "piecewise-sparse-attention"]
+	path = piecewise-sparse-attention
+	url = git@github.com:NguyenHuuChi/piecewise-sparse-attention.git
