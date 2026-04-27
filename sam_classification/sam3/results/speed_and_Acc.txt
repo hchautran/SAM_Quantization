@@ -1,0 +1,13 @@
+Model name: facebook/PE-Core-T16-384 | Processor: NONE | Inference time: 8.51 ms | Sparse percent: n/a | Top1 Acc: 61.82 | Top5 Acc: 86.78
+Model name: facebook/PE-Core-S16-384 | Processor: NONE | Inference time: 8.12 ms | Sparse percent: n/a | Top1 Acc: 72.31 | Top5 Acc: 93.20
+Model name: facebook/PE-Core-S16-384 | Processor: SPARGEATTN | Inference time: 14.99 ms | Sparse percent: 0.2500 | Top1 Acc: 17.43 | Top5 Acc: 35.66
+Model name: facebook/PE-Core-S16-384 | Processor: SPARGEATTN | Inference time: 14.71 ms | Sparse percent: 0.5000 | Top1 Acc: 47.01 | Top5 Acc: 73.05
+Model name: facebook/PE-Core-S16-384 | Processor: NONE | Inference time: 8.19 ms | Sparse percent: n/a | Top1 Acc: 72.31 | Top5 Acc: 93.20
+Model name: facebook/PE-Core-S16-384 | Processor: NONE | Inference time: 8.52 ms | Sparse percent: n/a | Top1 Acc: 72.31 | Top5 Acc: 93.20
+Model name: facebook/PE-Core-S16-384 | Processor: SPARSEATTN | Inference time: 14.98 ms | Sparse percent: 0.5000 | Top1 Acc: 47.01 | Top5 Acc: 73.05
+Model name: facebook/PE-Core-S16-384 | Processor: SPARSEATTN | Inference time: 16.27 ms | Sparse percent: 0.5000 | Top1 Acc: 47.01 | Top5 Acc: 73.05
+Model name: facebook/PE-Core-S16-384 | Processor: SPARSEATTN | Inference time: 15.18 ms | Sparse percent: 0.5000 | Top1 Acc: 47.01 | Top5 Acc: 73.05
+Model name: facebook/PE-Core-S16-384 | Processor: SPARSEATTN | Inference time: 15.34 ms | Sparse percent: 0.7500 | Top1 Acc: 61.75 | Top5 Acc: 85.70
+Model name: facebook/PE-Core-S16-384 | Processor: PIECEWISE | Inference time: 11.67 ms | Sparse percent: 0.7500 | Top1 Acc: 56.97 | Top5 Acc: 81.79
+Model name: facebook/PE-Core-S16-384 | Processor: PIECEWISE | Inference time: 11.50 ms | Sparse percent: 0.5000 | Top1 Acc: 44.72 | Top5 Acc: 69.98
+Model name: facebook/PE-Core-S16-384 | Processor: PIECEWISE | Inference time: 11.88 ms | Sparse percent: 0.2500 | Top1 Acc: 14.28 | Top5 Acc: 29.69
