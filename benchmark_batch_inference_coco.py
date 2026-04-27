@@ -6,6 +6,7 @@ import sys
 import argparse
 import datetime
 import os.path as osp
+import functools
 from typing import List, Dict
 import numpy as np
 import pandas as pd
@@ -39,6 +40,81 @@ from mmdet.utils import (build_ddp, build_dp, compat_cfg, get_device,
 from quant.configmmdet.det_observer_instance_sam_ import DetObserverInstanceSAM
 from mmdet.apis import multi_gpu_test, single_gpu_test
 from omegaconf import OmegaConf
+from prunning_rate.samprunediff_duo import image_encoder_monkey_patch_train_duo_diff
+from prunning_rate.sampruneduo import image_encoder_monkey_patch_train_duo
+
+
+class ImageEncoderCudaProfiler:
+    def __init__(self, warmup_calls: int = 10, max_profile_calls: int = None):
+        self.warmup_calls = max(0, warmup_calls)
+        self.max_profile_calls = max_profile_calls
+        self._event_pairs = []
+        self._wrapped = False
+
+    def wrap_forward(self, module: torch.nn.Module) -> None:
+        if self._wrapped:
+            return
+
+        original_forward = module.forward
+
+        @functools.wraps(original_forward)
+        def wrapped_forward(*args, **kwargs):
+            if (
+                self.max_profile_calls is not None
+                and len(self._event_pairs) >= self.max_profile_calls
+            ):
+                return original_forward(*args, **kwargs)
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            output = original_forward(*args, **kwargs)
+            end_event.record()
+            self._event_pairs.append((start_event, end_event))
+            return output
+
+        module.forward = wrapped_forward
+        self._wrapped = True
+
+    def summarize(self):
+        if not self._event_pairs:
+            return None
+
+        torch.cuda.synchronize()
+        elapsed_ms = np.array(
+            [start.elapsed_time(end) for start, end in self._event_pairs],
+            dtype=np.float64,
+        )
+        measured_ms = elapsed_ms[self.warmup_calls :]
+        if measured_ms.size == 0:
+            measured_ms = elapsed_ms
+
+        return {
+            "calls_total": int(elapsed_ms.size),
+            "warmup_skipped": min(self.warmup_calls, int(elapsed_ms.size)),
+            "calls_measured": int(measured_ms.size),
+            "total_ms": float(measured_ms.sum()),
+            "mean_ms": float(measured_ms.mean()),
+            "median_ms": float(np.median(measured_ms)),
+            "min_ms": float(measured_ms.min()),
+            "max_ms": float(measured_ms.max()),
+            "fps": float(1000.0 / measured_ms.mean()) if measured_ms.mean() > 0 else float("inf"),
+        }
+
+    @staticmethod
+    def format_summary(summary: Dict[str, float]) -> str:
+        return (
+            "\nImage Encoder CUDA Profile\n"
+            f"  Calls (total): {summary['calls_total']}\n"
+            f"  Warmup skipped: {summary['warmup_skipped']}\n"
+            f"  Calls (measured): {summary['calls_measured']}\n"
+            f"  Total: {summary['total_ms']:.3f} ms\n"
+            f"  Mean: {summary['mean_ms']:.3f} ms\n"
+            f"  Median: {summary['median_ms']:.3f} ms\n"
+            f"  Min: {summary['min_ms']:.3f} ms\n"
+            f"  Max: {summary['max_ms']:.3f} ms\n"
+            f"  Encoder-only FPS: {summary['fps']:.3f}\n"
+        )
+
 
 def setup_logger(path_log,state):
     if not os.path.exists(path_log):
@@ -100,6 +176,13 @@ def evaluate_loadptq4sam(predictor, config_ ):
                                  help='Enable encoder quantization')
     additional_parser.add_argument('--quantize-decoder', action='store_true',
                                  help='Enable decoder quantization')
+    additional_parser.add_argument('--checkpoint-path', type=str)
+    additional_parser.add_argument('--num-samples', type=int, default=None,
+                                 help='Profile using only the first N image encoder calls, then continue evaluation normally')
+    additional_parser.add_argument('--profile-image-encoder', action='store_true',
+                                 help='Profile SAM image encoder CUDA time during COCO eval')
+    additional_parser.add_argument('--profile-warmup-calls', type=int, default=10,
+                                 help='Number of initial image encoder calls to skip in the report')
     additional_args = additional_parser.parse_args(unknown_args)
     
     if args.detector == 'yolox':
@@ -277,16 +360,31 @@ def evaluate_loadptq4sam(predictor, config_ ):
     # move predictor to device
     model.predictor.model.to(cfg.device)
     model.to(cfg.device)
+
+    image_encoder_profiler = None
+    if additional_args.profile_image_encoder:
+        if not torch.cuda.is_available():
+            print("Skipping image encoder profiling because CUDA is not available.")
+        else:
+            max_profile_calls = None
+            if additional_args.num_samples is not None and additional_args.num_samples > 0:
+                max_profile_calls = additional_args.profile_warmup_calls + additional_args.num_samples
+            image_encoder_profiler = ImageEncoderCudaProfiler(
+                warmup_calls=additional_args.profile_warmup_calls,
+                max_profile_calls=max_profile_calls
+            )
+            image_encoder_profiler.wrap_forward(model.predictor.model.image_encoder)
     
     if not distributed:
+        model = build_dp(model, cfg.device, device_ids=cfg.gpu_ids)
         if args.show_dir is not None and 'gt' in args.show_dir:
             gt = True
+            outputs = single_gpu_test(model, data_loader, args.show, args.show_dir,
+                                    args.show_score_thr, gt=gt)
         else:
             gt = False
-        model = build_dp(model, cfg.device, device_ids=cfg.gpu_ids)
-        # ipdb.set_trace()
-        outputs = single_gpu_test(model, data_loader, args.show, args.show_dir,
-                                args.show_score_thr, gt=gt)
+            outputs = single_gpu_test(model, data_loader, args.show, args.show_dir,
+                                    args.show_score_thr, gt=gt)
     else:
         model = build_ddp(
             model,
@@ -306,6 +404,12 @@ def evaluate_loadptq4sam(predictor, config_ ):
 
     rank, _ = get_dist_info()
     if rank == 0:
+        if image_encoder_profiler is not None:
+            profile_summary = image_encoder_profiler.summarize()
+            if profile_summary is not None:
+                profile_report = image_encoder_profiler.format_summary(profile_summary)
+                print(profile_report)
+                logger.info(profile_report.strip())
         if args.out:
             print(f'\nwriting results to {args.out}')
             mmcv.dump(outputs, args.out)
@@ -350,7 +454,7 @@ def main():
 
     # Model parameters
     parser.add_argument('--processor', type=str, default='POSITIONAL_QUANT',
-                       choices=['BASE','POSITIONAL_PRUNE', 'POSITIONAL_QUANT', 'HEAD_PRUNE'],
+                       choices=['BASE','POSITIONAL_PRUNE', 'POSITIONAL_SPARGE', 'PIECE_WISE_ATTN', 'POSITIONAL_QUANT', 'PRUNE_RATE','HEAD_PRUNE','PRUNE_RATE_SPARSE',"PRUNE_RATE_DUO"],
                        help='Processor to use')
     parser.add_argument('--quantize-encoder', action='store_true',
                        help='Enable encoder quantization')
@@ -374,10 +478,15 @@ def main():
                        help='Decoder activation quantization method')
     parser.add_argument('--k-preserve', type=int, default=0,
                        help='Number of channels to preserve')
+    parser.add_argument("--checkpoint-path", type=str, default="./checkpoints/sam_vit_h_4b8939.pth")
 
     # Output
     parser.add_argument('--output-dir', type=str, default='./benchmark_results',
                        help='Output directory for results')
+    parser.add_argument('--profile-image-encoder', action='store_true',
+                       help='Profile SAM image encoder CUDA time during COCO eval')
+    parser.add_argument('--profile-warmup-calls', type=int, default=10,
+                       help='Number of initial image encoder calls to skip in the report')
 
     args = parser.parse_args()
 
@@ -408,31 +517,65 @@ def main():
 
     # Setup and calibrate
     print(f"Calibrating {args.processor}...")
-    encoder_processor, decoder_processor = engine.setup_and_calibrate_processors(
-        predictor,
-        num_calib_samples=args.num_calib_samples,
-        encoder_processor=enc_processor,
-        decoder_processor=DecoderDoNothingProcessor("DO_NOTHING"),
-        args_yaml=config,
-    )
+    if args.processor != "PRUNE_RATE_DUO":
+        encoder_processor, decoder_processor = engine.setup_and_calibrate_processors(
+            predictor,
+            num_calib_samples=args.num_calib_samples,
+            encoder_processor=enc_processor,
+            decoder_processor=DecoderDoNothingProcessor("DO_NOTHING"),
+            args_yaml=config,
+        )
 
-    # Apply quantization
-    encoder_config = {
-        'processor': encoder_processor,
-        'n_bits': args.n_bits,
-        'weight_quant': args.en_weight_quant,
-        'act_quant': args.en_act_quant,
-    } if args.quantize_encoder else None
+        # Apply quantization
+        encoder_config = {
+            'processor': encoder_processor,
+            'n_bits': args.n_bits,
+            'weight_quant': args.en_weight_quant,
+            'act_quant': args.en_act_quant,
+        } if args.quantize_encoder else None
 
-    decoder_config = {
-        'processor': decoder_processor,
-        'n_bits': args.n_bits,
-        'weight_quant': args.de_weight_quant,
-        'act_quant': args.de_act_quant,
-        'k_preserve': args.k_preserve
-    } if args.quantize_decoder else None
+        decoder_config = {
+            'processor': decoder_processor,
+            'n_bits': args.n_bits,
+            'weight_quant': args.de_weight_quant,
+            'act_quant': args.de_act_quant,
+            'k_preserve': args.k_preserve
+        } if args.quantize_decoder else None
 
-    engine.apply_quantization(predictor, encoder_config, decoder_config, config)
+    if args.processor == "PRUNE_RATE_SPARSE" or args.processor == "PRUNE_RATE":
+        
+        image_encoder_monkey_patch_train_duo_diff(
+                predictor.model,
+                processor=enc_processor,
+                args_yaml=config,
+                train = False,
+            )
+        checkpoint_path = args.checkpoint_path
+        # checkpoint_path= "/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/ckts/prune_rate/diffduo_sam_hq_epoch_torchnograd_distill_balance10_vit_h_reg-weight_0.5_lr0.02_lr_drop2.pth"
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+        predictor.model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
+        if config.quantization.use_percentage:
+            enc_processor.calculate_pruned_heads_per_layer_percent_based(predictor)
+    elif args.processor == "PRUNE_RATE_DUO" :
+        
+        enc_processor.set_params(config)
+        image_encoder_monkey_patch_train_duo(
+                predictor.model,
+                processor=enc_processor,
+                args_yaml= config,
+                train = False,
+            )
+        
+        checkpoint_path = args.checkpoint_path
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        predictor.model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
+
+        
+        if config.quantization.use_percentage:
+            enc_processor.calculate_pruned_heads_per_layer_percent_based(predictor)
+    else:
+        engine.apply_quantization(predictor, encoder_config, decoder_config, config)
     evaluate_loadptq4sam(predictor, config)
 if __name__ == '__main__':
     main()

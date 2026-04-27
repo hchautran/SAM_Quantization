@@ -42,7 +42,7 @@ from train.utils.dataloader import get_im_gt_name_dict, Resize
 from data_utils import OnlineDataset
 import train.utils.misc as misc
 from train.train import compute_iou, compute_boundary_iou
-
+from utils.utils import inference_image
 
 def custom_collate_fn(batch):
     """
@@ -115,16 +115,20 @@ class BatchEvaluator:
         # Transform images for encoder
         transformed_images = predictor.model.preprocess(images)
 
-        # Measure encoder time for the entire batch
-        torch.cuda.synchronize()
-        encoder_start = time.time()
+        # Measure encoder time for the entire batch using cuda events
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        start_event.record()
 
         with torch.no_grad():
-            features, interm_features = predictor.model.image_encoder(transformed_images)
+            features, interm_features = predictor.model.image_encoder(
+                transformed_images
+            )
 
+        end_event.record()
         torch.cuda.synchronize()
-        encoder_end = time.time()
-        encoder_time_ms = (encoder_end - encoder_start) * 1000
+        encoder_time_ms = start_event.elapsed_time(end_event)
 
         # Now process each image's decoder separately (SAM decoder doesn't support batching well)
         all_ious = []
@@ -160,7 +164,7 @@ class BatchEvaluator:
                 traceback.print_exc()
                 all_ious.append(torch.tensor(0.0, device=device))
                 all_boundary_ious.append(torch.tensor(0.0, device=device))
-
+            
         return {
             'encoder_time_ms': encoder_time_ms,
             'encoder_time_per_image_ms': encoder_time_ms / batch_size,
@@ -205,6 +209,9 @@ class BatchEvaluator:
         ious = []
         boundary_ious = []
         total_images = 0
+        e2e_total_ms = 0.0
+        e2e_count = 0
+        e2e_max_samples = 100
 
         # Calculate actual number of samples
         actual_num_samples = min(len(dataloader.dataset), num_samples)
@@ -237,6 +244,12 @@ class BatchEvaluator:
 
             # Process batch
             try:
+                measure_e2e = torch.cuda.is_available() and (e2e_count < e2e_max_samples)
+                if measure_e2e:
+                    torch.cuda.synchronize()
+                    e2e_start = torch.cuda.Event(enable_timing=True)
+                    e2e_end = torch.cuda.Event(enable_timing=True)
+                    e2e_start.record()
                 metrics = self.process_batch_images(
                     predictor,
                     images,
@@ -244,6 +257,14 @@ class BatchEvaluator:
                     labels_ori
                 )
 
+                if measure_e2e:
+                    e2e_end.record()
+                    e2e_end.synchronize()
+                    elapsed_ms = e2e_start.elapsed_time(e2e_end)
+                    per_image_ms = elapsed_ms / current_batch_size
+                    take = min(current_batch_size, e2e_max_samples - e2e_count)
+                    e2e_total_ms += per_image_ms * take
+                    e2e_count += take
                 encoder_times.append(metrics['encoder_time_ms'])
                 encoder_times_per_image.append(metrics['encoder_time_per_image_ms'])
                 ious.append(metrics['iou'])
@@ -268,6 +289,7 @@ class BatchEvaluator:
         encoder_times_per_image = np.array(encoder_times_per_image)
 
         throughput = total_images / overall_time
+        e2e_avg_ms = (e2e_total_ms / e2e_count) if e2e_count > 0 else None
 
         # Get memory stats
         memory_stats = {}
@@ -293,6 +315,8 @@ class BatchEvaluator:
             # Encoder per-image time (batch time / batch_size)
             'encoder_per_image_mean_ms': np.mean(encoder_times_per_image),
             'encoder_per_image_std_ms': np.std(encoder_times_per_image),
+            'e2e_per_image_mean_ms_first100': e2e_avg_ms,
+            'e2e_per_image_count': e2e_count,
 
             # Quality metrics
             'miou': np.mean(ious),
@@ -311,6 +335,8 @@ class BatchEvaluator:
         print(f"  Throughput: {throughput:.2f} images/sec")
         print(f"  Encoder time (batch): {np.mean(encoder_times):.2f} ± {np.std(encoder_times):.2f} ms")
         print(f"  Encoder time (per image): {np.mean(encoder_times_per_image):.2f} ± {np.std(encoder_times_per_image):.2f} ms")
+        if e2e_avg_ms is not None:
+            print("  E2E time (per image, first {}): {:.2f} ms".format(e2e_count, e2e_avg_ms))
         print(f"  Peak memory: {memory_stats.get('peak_memory_allocated_mb', 0):.2f} MB")
         print(f"  Peak reserved memory: {memory_stats.get('peak_memory_reserved_mb', 0):.2f} MB")
         print(f"  mIoU: {np.mean(ious):.4f} ± {np.std(ious):.4f}")
@@ -320,6 +346,8 @@ class BatchEvaluator:
         logger.info(f"  Throughput: {throughput:.2f} images/sec")
         logger.info(f"  Encoder time (batch): {np.mean(encoder_times):.2f} ± {np.std(encoder_times):.2f} ms")
         logger.info(f"  Encoder time (per image): {np.mean(encoder_times_per_image):.2f} ± {np.std(encoder_times_per_image):.2f} ms")
+        if e2e_avg_ms is not None:
+            logger.info("  E2E time (per image, first {}): {:.2f} ms".format(e2e_count, e2e_avg_ms))
         logger.info(f"  Peak memory: {memory_stats.get('peak_memory_allocated_mb', 0):.2f} MB")
         logger.info(f"  Peak reserved memory: {memory_stats.get('peak_memory_reserved_mb', 0):.2f} MB")
         logger.info(f"  mIoU: {np.mean(ious):.4f} ± {np.std(ious):.4f}")
@@ -329,20 +357,7 @@ class BatchEvaluator:
         logger.info(f"  Total time: {overall_time:.2f} seconds")
         logger.info(f"  Boundary IoU: {np.mean(boundary_ious):.4f} ± {np.std(boundary_ious):.4f}")
 
-        # Log to wandb
-        # wandb.log({
-        #     f'batch_{batch_size}/throughput_imgs_per_sec': throughput,
-        #     f'batch_{batch_size}/encoder_batch_mean_ms': np.mean(encoder_times),
-        #     f'batch_{batch_size}/encoder_batch_std_ms': np.std(encoder_times),
-        #     f'batch_{batch_size}/encoder_per_image_mean_ms': np.mean(encoder_times_per_image),
-        #     f'batch_{batch_size}/encoder_per_image_std_ms': np.std(encoder_times_per_image),
-        #     f'batch_{batch_size}/peak_memory_allocated_mb': memory_stats.get('peak_memory_allocated_mb', 0),
-        #     f'batch_{batch_size}/peak_memory_reserved_mb': memory_stats.get('peak_memory_reserved_mb', 0),
-        #     f'batch_{batch_size}/miou': np.mean(ious),
-        #     f'batch_{batch_size}/miou_std': np.std(ious),
-        #     f'batch_{batch_size}/boundary_iou': np.mean(boundary_ious),
-        #     f'batch_{batch_size}/boundary_iou_std': np.std(boundary_ious),
-        # })
+
 
         return result
 
@@ -357,7 +372,7 @@ class BatchEvaluator:
 
         all_results = dict()
 
-        for i in range(2,len(datasets_config)):
+        for i in range(2,6):
             logger.info(f"{'='*150}")
             dataname= datasets_config[i]["name"]
             print(f"Running benchmark for dataset {dataname}...")
@@ -384,7 +399,7 @@ class BatchEvaluator:
                     batch_size=batch_size,
                     shuffle=False,
                     drop_last=False,
-                    num_workers=2,
+                    num_workers=0,
                     pin_memory=True,
                     collate_fn=custom_collate_fn
                 )
@@ -474,12 +489,19 @@ def run_single_benchmark(args):
         states = "Manual_head_prune"
     elif args.processor == "SUB_IMAGE_PRUNE":
         states = "Manual_sub_image_prune"
+    elif args.processor == "POSITIONAL_SPARSE":
+        states = "Manual_positional_sparse"
+    elif args.processor == "POSITIONAL_SPARGE":
+        states = "Manual_positional_sparge"
+    elif args.processor == "PIECE_WISE_ATTN":
+        states = "Piece_wise_attn"
+    elif args.processor == "POSITIONAL_SPARSE_FUSED_POS":
+        states = "Manual_positional_sparse_fused_pos"
     logger = setup_logger("./logs", states)  # Use the states variable to create logger
     logger.info(f"{'='*250}")
-    logger.info(f"Local Percent : {args.percent}")
-    logger.info(f"Global Percent : {args.percent_global}")
-    logger.info(f"Prune High : {args.high_entropy}")
-    logger.info(f"Model type : {args.model_type}")
+    logger.info(f"Local percent: {args.percent}")
+    logger.info(f"Global percent: {args.percent_global}")
+    logger.info(f"Model type: {args.model_type}")
     # Get processor
     enc_processor = get_encoder_processor(args.processor)
 
@@ -517,10 +539,13 @@ def run_single_benchmark(args):
     print(f"Batch sizes: {args.batch_sizes}")
     print(f"Samples per batch: {args.num_samples}")
     print(f"{'='*80}\n")
-
+    
+    
     datasets = get_default_datasets()
     batch_evaluator = BatchEvaluator()
 
+    # inference_image(predictor,image_dir="/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/sam-hq/demo/input_imgs", show_image=True,example_idx =[0,1,2,3,4,5,6,7,8], save_path=f"/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/demo/paper/{states}" )
+    # exit()
     results = batch_evaluator.run_benchmark(
         predictor=predictor,
         batch_sizes=args.batch_sizes,
@@ -528,22 +553,24 @@ def run_single_benchmark(args):
         datasets_config=datasets,
         logger=logger
     )
+    flat_results = [item for dataset_results in results.values() for item in dataset_results] if isinstance(results, dict) else results
 
     # In the main run_single_benchmark function, after printing the summary, add:
+    csv_filename = 'result.csv'
     logger.info(f"\n{'='*80}")
     logger.info("BENCHMARK COMPLETE")
     logger.info(f"{'='*80}")
     logger.info(f"Results saved to: {csv_filename}")
 
     logger.info("Summary:")
-    for result in results:
-        logger.info(f"Batch Size {result['batch_size']}: "
-                    f"Throughput={result['throughput_imgs_per_sec']:.2f} imgs/sec, "
-                    f"Encoder/img={result['encoder_per_image_mean_ms']:.2f}ms, "
-                    f"Memory={result.get('peak_memory_allocated_mb', 0):.0f}MB, "
-                    f"mIoU={result['miou']:.4f}")
+    # for result in flat_results:
+    #     logger.info(f"Batch Size {result['batch_size']}: "
+    #                 f"Throughput={result['throughput_imgs_per_sec']:.2f} imgs/sec, "
+    #                 f"Encoder/img={result['encoder_per_image_mean_ms']:.2f}ms, "
+    #                 f"Memory={result.get('peak_memory_allocated_mb', 0):.0f}MB, "
+    #                 f"mIoU={result['miou']:.4f}")
 
-    best_throughput_result = max(results, key=lambda x: x['throughput_imgs_per_sec'])
+    best_throughput_result = max(flat_results, key=lambda x: x['throughput_imgs_per_sec'])
     logger.info(f"Best throughput: {best_throughput_result['throughput_imgs_per_sec']:.2f} imgs/sec "
                 f"at batch_size={best_throughput_result['batch_size']}")
 
@@ -554,7 +581,7 @@ def run_single_benchmark(args):
         f'batch_inference_results_{timestamp}.csv'
     )
 
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(flat_results)
 
     # Add configuration info
     df['processor'] = args.processor
@@ -578,7 +605,7 @@ def run_single_benchmark(args):
     print(f"{'Size':>6} | {'(imgs/sec)':>12} | {'(ms)':>12} | {'(MB)':>10} | {'':>8}")
     print("-" * 80)
 
-    for result in results:
+    for result in flat_results:
         print(f"{result['batch_size']:>6} | "
               f"{result['throughput_imgs_per_sec']:>12.2f} | "
               f"{result['encoder_per_image_mean_ms']:>12.2f} | "
@@ -587,7 +614,7 @@ def run_single_benchmark(args):
 
     print("-" * 80)
 
-    best_throughput_result = max(results, key=lambda x: x['throughput_imgs_per_sec'])
+    best_throughput_result = max(flat_results, key=lambda x: x['throughput_imgs_per_sec'])
     print(f"\n Best throughput: {best_throughput_result['throughput_imgs_per_sec']:.2f} imgs/sec "
           f"at batch_size={best_throughput_result['batch_size']}")
 
@@ -605,7 +632,7 @@ def run_single_benchmark(args):
     # # Finish wandb run
     # wandb.finish()
 
-    return results
+    return flat_results
 
 
 def run_parameter_sweep(args):
@@ -649,7 +676,7 @@ def run_parameter_sweep(args):
             successful_runs += 1
 
             # Collect sweep results
-            for result in results:
+            for result in flat_results:
                 result['sweep_percent'] = percent
                 result['sweep_percent_global'] = percent_global
                 all_sweep_results.append(result)
@@ -731,7 +758,7 @@ def main():
 
     # Model parameters
     parser.add_argument('--processor', type=str, default='POSITIONAL_PRUNE',
-                       choices=['BASE','POSITIONAL_PRUNE', 'POSITIONAL_QUANT', 'HEAD_PRUNE','SUB_IMAGE_PRUNE'],
+                       choices=['BASE','POSITIONAL_PRUNE', 'POSITIONAL_QUANT', 'HEAD_PRUNE','SUB_IMAGE_PRUNE', 'POSITIONAL_SPARSE','POSITIONAL_SPARGE','PIECE_WISE_ATTN', 'POSITIONAL_SPARSE_FUSED_POS'],
                        help='Processor to use')
     parser.add_argument('--quantize-encoder', action='store_true',
                        help='Enable encoder quantization')

@@ -1,65 +1,84 @@
-# CUDA_LAUNCH_BLOCKING=1 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=29519 benchmark_batch_inference_coco.py \
+#!/bin/bash
+export PYTHONPATH="/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/PTQ4SAM/projects/instance_segment_anything/ops:${PYTHONPATH:-}"
+# CUDA_LAUNCH_BLOCKING=1 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=29515 benchmark_batch_inference_coco.py \
 #     --config-file quant/config/coco/rtn.yaml \
 #     --quantize-encoder \
 #     --n-bits 16 \
 #     --num-calib-samples 16 \
-#     --processor POSITIONAL_QUANT \
-#     --detector yolox 
+#     --processor PRUNE_RATE_DUO \
+#     --detector dino \
+#     --checkpoint-path "/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/ckts/prune_rate/duo_sam_hq_epoch_torchnograd_distill10_vit_h_reg-weight_0.5_lr0.01_lr_drop2.pth"
+#     # --checkpoint-path ""/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/ckts/prune_rate/duo_sam_hq_epoch_torchnograd_distill_balance10_vit_l_reg-weight_0.5_lr0.01_lr_drop2.pth""
 #     # --num-samples 100 \
+
 
 
 
 # Configuration
 YAML_FILE="./quant/config/coco/rtn.yaml"
 PYTHON_SCRIPT="benchmark_batch_inference_coco.py"
-CUDA_DEVICE=0
-MASTER_PORT=29501
+CUDA_DEVICE=2
+MASTER_PORT=29507
 
-# Model types and corresponding HQ checkpoints
-MODEL_TYPES=("vit_b" "vit_l" "vit_h")
-HQ_CHECKPOINTS=("./ckts/sam_hq_vit_b.pth" "./ckts/sam_hq_vit_l.pth" "./ckts/sam_hq_vit_h.pth")
-PROCESSORS=("POSITIONAL_PRUNE" "POSITIONAL_QUANT")
-# Function to update YAML with model_type and hq_checkpoint
+MODEL_TYPES=( "vit_h" )
+HQ_CHECKPOINTS=( "./ckts/sam_hq_vit_h.pth" )
+DETECTORS=("dino" "hdetr" "yolox")
+# "dino" "hdetr"
+PERCENT=0.75
+TRAINING_METHOD="duo"
+
 update_yaml_model() {
     local model_type="$1"
     local hq_checkpoint="$2"
+    local training_method="$3"
+    local percent_entropy="$4"
 
-    # Escape special characters in the variables
-    escaped_model_type=$(printf '%s\n' "$model_type" | sed 's/[&/\]/\\&/g')
-    escaped_hq_checkpoint=$(printf '%s\n' "$hq_checkpoint" | sed 's/[&/\]/\\&/g')
+    local escaped_model_type
+    local escaped_hq_checkpoint
 
-    # Update model_type inside the model block
+    escaped_model_type=$(printf '%s\n' "$model_type" | sed 's/[&/\\]/\\&/g')
+    escaped_hq_checkpoint=$(printf '%s\n' "$hq_checkpoint" | sed 's/[&/\\]/\\&/g')
+
     sed -i -E "/^[[:space:]]*model:[[:space:]]*$/,/^[^[:space:]]/ \
 s/^([[:space:]]*model_type:[[:space:]]*).*/\1${escaped_model_type}/" "$YAML_FILE"
 
-    # Update hq_checkpoint inside the model block
     sed -i -E "/^[[:space:]]*model:[[:space:]]*$/,/^[^[:space:]]/ \
 s/^([[:space:]]*hq_checkpoint:[[:space:]]*).*/\1${escaped_hq_checkpoint}/" "$YAML_FILE"
 
-    echo "[YAML updated] model_type=${model_type}, hq_checkpoint=${hq_checkpoint}"
+    sed -i -E "/^[[:space:]]*train_prune_rate:[[:space:]]*$/,/^[^[:space:]]/ \
+s/^([[:space:]]*training_method:[[:space:]]*).*/\1${training_method}/" "$YAML_FILE"
+
+    sed -i -E "/^[[:space:]]*quantization:[[:space:]]*$/,/^[^[:space:]]/ \
+s/^([[:space:]]*percent_entropy:[[:space:]]*).*/\1${percent_entropy}/" "$YAML_FILE"
+
+    sed -i -E "/^[[:space:]]*quantization:[[:space:]]*$/,/^[^[:space:]]/ \
+s/^([[:space:]]*percent_entropy_global:[[:space:]]*).*/\1${percent_entropy}/" "$YAML_FILE"
+
+    echo "[YAML updated] model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, training_method=${training_method}, percent=${percent_entropy}"
 }
 
-# Iterate over all model types and HQ checkpoints
 for i in "${!MODEL_TYPES[@]}"; do
-    model_type="${MODEL_TYPES[$i]}"
-    hq_checkpoint="${HQ_CHECKPOINTS[$i]}"
+    for j in "${!DETECTORS[@]}"; do
+        model_type="${MODEL_TYPES[$i]}"
+        hq_checkpoint="${HQ_CHECKPOINTS[$i]}"
+        detector="${DETECTORS[$j]}"
 
-    # Update YAML file with current model_type and hq_checkpoint
-    update_yaml_model "$model_type" "$hq_checkpoint"
-    for j in "${!PROCESSORS[@]}"; do  # Use a different variable (e.g., j) for the inner loop
-        processor="${PROCESSORS[$j]}"
-        
-        # Run evaluation script
-        echo "Running evaluation with model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, processor=${processor}"
+        update_yaml_model "$model_type" "$hq_checkpoint" "$TRAINING_METHOD" "$PERCENT"
+
+        echo "Running evaluation with model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, detector=${detector}"
         CUDA_VISIBLE_DEVICES=$CUDA_DEVICE torchrun --nproc_per_node=1 --master_port=$MASTER_PORT $PYTHON_SCRIPT \
             --config-file $YAML_FILE \
             --quantize-encoder \
             --n-bits 16 \
-            --num-calib-samples 16 \
-            --processor "$processor" \
-            --detector dino
+            --num-calib-samples 1 \
+            --processor PIECE_WISE_ATTN \
+            --detector "$detector" \
+            --checkpoint-path "/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/ckts/prune_rate/duo_sam_hq_epoch_torchnograd_distill10_vit_b_reg-weight_5_lr0.05_lr_drop2.pth" \
+            --profile-image-encoder \
+            --num-samples 110 \
+            --profile-warmup-calls 10
 
-        echo "Evaluation completed for model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, processor=${processor}"
+        echo "Evaluation completed for model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, detector=${detector}"
     done
 done
 

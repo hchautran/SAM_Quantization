@@ -10,6 +10,12 @@ from .encoder import (
     EncoderAttentionProcessor,
     EncoderRecenterAttentionProcessor,
     PositionalPruneProcessor,
+    PositionalSparseProcessor,
+    PositionalSparseFusedPosProcessor,
+    PositionalSparseProcessorDiffDuo,
+    PositionalSparseProcessorDuo,
+    PositionalSpargeAttnProcessor,
+    PiecewiseAttnProcessor,
     EntropyValueCheck,
     AttentionMapCollector,
     PruneRateDuoProcessor,
@@ -23,6 +29,7 @@ from .encoder import (
     EncoderAttentionProcessorHighLow,
     EncoderAttentionProcessorSmoothLogQ,
     EncoderAttentionProcessorQuarot,
+    Mvitv2PiecewiseAttnProcessor,
 )
 
 # Decoder processors
@@ -80,8 +87,14 @@ def get_encoder_processor(name: str, **kwargs):
 register_encoder_processor("BASE")(EncoderAttentionProcessor)
 register_encoder_processor("RECENTER")(EncoderRecenterAttentionProcessor)
 register_encoder_processor("POSITIONAL_PRUNE")(PositionalPruneProcessor)
+register_encoder_processor("POSITIONAL_SPARSE")(PositionalSparseProcessor)
+register_encoder_processor("POSITIONAL_SPARSE_FUSED_POS")(PositionalSparseFusedPosProcessor)
+register_encoder_processor("POSITIONAL_SPARGE")(PositionalSpargeAttnProcessor)
 register_encoder_processor("PRUNE_RATE_DUO")(PruneRateDuoProcessor)
 register_encoder_processor("PRUNE_RATE")(PruneRateProcessor)
+register_encoder_processor("PRUNE_RATE_SPARSE")(PositionalSparseProcessorDiffDuo)
+register_encoder_processor("PRUNE_RATE_DUO_SPARSE")(PositionalSparseProcessorDuo)
+register_encoder_processor("PIECE_WISE_ATTN")(PiecewiseAttnProcessor)
 register_encoder_processor("ENTROPY_VALUE_CHECK")(EntropyValueCheck)
 register_encoder_processor("ATTN_MAP_COLLECTOR")(AttentionMapCollector)
 register_encoder_processor("SUB_IMAGE_PRUNE")(WholeSubImageProcessor)
@@ -93,7 +106,7 @@ register_encoder_processor("SMOOTH")(EncoderAttentionProcessorSmooth)
 register_encoder_processor("HIGH_LOW_ATTN_V")(EncoderAttentionProcessorHighLow)
 register_encoder_processor("SMOOTH_LOG_Q")(EncoderAttentionProcessorSmoothLogQ)
 register_encoder_processor("QUAROT")(EncoderAttentionProcessorQuarot)
-
+register_encoder_processor("MVITV2_PIECEWISE_ATTN")(Mvitv2PiecewiseAttnProcessor)
 
 __all__ = [
     # Base classes and utilities
@@ -106,7 +119,13 @@ __all__ = [
     "WholeSubImageProcessor",
     "HeadPruneProcessor",
     "PositionalPruneProcessor",
+    "PositionalSparseProcessor",
+    "PositionalSparseFusedPosProcessor",
+    "PositionalSpargeAttnProcessor",
     "PruneRateDuoProcessor",
+    "PositionalSparseProcessorDiffDuo",
+    "PositionalSparseProcessorDuo",
+    "PiecewiseAttnProcessor",
     "PruneRateProcessor",
     "EntropyValueCheck",
     "AttentionMapCollector",
@@ -117,6 +136,7 @@ __all__ = [
     "EncoderAttentionProcessorHighLow",
     "EncoderAttentionProcessorSmoothLogQ",
     "EncoderAttentionProcessorQuarot",
+    "Mvitv2PiecewiseAttnProcessor",
     # Decoder processors
     "DecoderSignProcessor",
     "DecoderDoNothingProcessor",

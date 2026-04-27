@@ -1,0 +1,7 @@
+Model name: hiera_huge_224.mae_in1k_ft_in1k | Processor: NONE | Inference time: 18.47 ms | Sparse percent: n/a | Top1 Acc: 86.83 | Top5 Acc: 98.02
+Model name: hiera_huge_224.mae_in1k_ft_in1k | Processor: PIECEWISE | Inference time: 30.53 ms | Sparse percent: 0.2500 | Top1 Acc: 83.89 | Top5 Acc: 96.89
+Model name: hiera_huge_224.mae_in1k_ft_in1k | Processor: PIECEWISE | Inference time: 30.13 ms | Sparse percent: 0.5000 | Top1 Acc: 86.04 | Top5 Acc: 97.67
+Model name: hiera_huge_224.mae_in1k_ft_in1k | Processor: PIECEWISE | Inference time: 30.92 ms | Sparse percent: 0.7500 | Top1 Acc: 86.74 | Top5 Acc: 97.95
+Model name: hiera_huge_224.mae_in1k_ft_in1k | Processor: SPARGEATTN | Inference time: 38.00 ms | Sparse percent: 0.7500 | Top1 Acc: 86.83 | Top5 Acc: 98.01
+Model name: hiera_huge_224.mae_in1k_ft_in1k | Processor: SPARGEATTN | Inference time: 37.76 ms | Sparse percent: 0.5000 | Top1 Acc: 86.68 | Top5 Acc: 97.91
+Model name: hiera_huge_224.mae_in1k_ft_in1k | Processor: SPARGEATTN | Inference time: 37.52 ms | Sparse percent: 0.2500 | Top1 Acc: 85.77 | Top5 Acc: 97.63
