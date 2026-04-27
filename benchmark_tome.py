@@ -44,6 +44,7 @@ import argparse
 import datetime
 from typing import List, Dict, Optional
 
+import cv2
 import numpy as np
 import pandas as pd
 import torch
@@ -65,6 +66,7 @@ from algo.gradtome.patch.sam          import apply_patch as _patch_gradtome
 from algo.gradtome.patch.sam_hilbert  import apply_patch as _patch_gradtome_hilbert
 
 # Maps benchmark algo name → (apply_patch_fn, internal algo arg passed to fn)
+# "hilbert_sparse" is handled specially in apply_tome (different param signature).
 ALGO_REGISTRY = {
     "tome":                   (_patch_tome,              "tome"),
     "pitome":                 (_patch_tome,              "pitome"),
@@ -95,13 +97,33 @@ def apply_tome(encoder, algo: str, ratio: float, margin: float = 0.5):
     """Patch encoder in-place using the algo specified in ALGO_REGISTRY.
 
     algo='none' or ratio>=1.0 are no-ops.
+    For 'hilbert_sparse'/'hilbert_sparse_mlp', ratio is interpreted as channel_ratio
+    (fraction of input channels kept for low-Sobel tokens); group_size sets Hilbert group size.
+    calib_images: preprocessed fp16 tensor (B,3,H,W) used for channel-sort calibration;
+                  falls back to random noise if None.
     """
     if algo == "none" or ratio >= 1.0:
         return
     if algo not in ALGO_REGISTRY:
         raise ValueError(f"Unknown algo {algo!r}. Valid choices: {VALID_ALGOS}")
+    if algo == "hilbert_sparse":
+        _patch_channel_sort_sam(encoder, calib_images=calib_images,
+                                sort_by="magnitude", inplace=True, apply_tome=False,
+                                mask_decoder=mask_decoder)
+        apply_hilbert_sparse_qkv(encoder, group_size=group_size, channel_ratio=ratio)
+        return
+    if algo == "hilbert_sparse_mlp":
+        _patch_channel_sort_sam(encoder, calib_images=calib_images,
+                                sort_by="magnitude", inplace=True, apply_tome=False,
+                                mask_decoder=mask_decoder)
+        apply_hilbert_sparse_mlp(encoder, group_size=group_size, channel_ratio=ratio)
+        return
     patch_fn, internal_algo = ALGO_REGISTRY[algo]
-    patch_fn(encoder, algo=internal_algo, ratio=ratio, margin=margin)
+    if algo == "sparsesam_sorted":
+        patch_fn(encoder, algo=internal_algo, ratio=ratio, margin=margin,
+                 apply_tome=True, mask_decoder=mask_decoder)
+    else:
+        patch_fn(encoder, algo=internal_algo, ratio=ratio, margin=margin)
 
 def update_ratio(encoder, ratio: float):
     """Update merge ratio without re-patching (works if already patched)."""
@@ -109,11 +131,12 @@ def update_ratio(encoder, ratio: float):
         encoder.tome_info['ratio'] = ratio
 
 
-def remove_tome(encoder):
+def remove_tome(encoder, mask_decoder=None):
     """
     Undo any token-merging patch by restoring original Block and Attention.
     Handles all three patch variants (tome, sparsesam, gradtome).
     Needed when sweeping multiple algos/ratios on the same model instance.
+    Pass mask_decoder to also undo any hilbert_sparse HQ-decoder permutation.
     """
     from algo.tome.patch.sam              import ToMeSAMBlock as _B_t,  ToMeSAMAttention as _A_t
     from algo.sparsesam.patch.sam         import ToMeSAMBlock as _B_s,  ToMeSAMAttention as _A_s
@@ -136,6 +159,22 @@ def remove_tome(encoder):
     # The patched forward is stored in the instance __dict__, not in the class,
     # so nn.Module.__delattr__ can't find it. Bypass it directly.
     encoder.__dict__.pop('forward', None)
+    # hilbert_sparse patches blk.forward on each block instance
+    for blk in encoder.blocks:
+        blk.__dict__.pop('forward', None)
+    # Undo hilbert_sparse channel-sort weight permutation so repeated sweep
+    # runs don't stack permutations.
+    if hasattr(encoder, 'channel_sort_info'):
+        from algo.sparsesam.patch.channel_sort_sam import (
+            _apply_channel_permutation, _apply_mlp_hidden_permutation,
+            _apply_hq_decoder_permutation,
+        )
+        inv_idx = encoder.channel_sort_info['inv_idx']
+        _apply_channel_permutation(encoder, inv_idx)
+        _apply_mlp_hidden_permutation(encoder, inv_idx)
+        if mask_decoder is not None:
+            _apply_hq_decoder_permutation(mask_decoder, inv_idx)
+        del encoder.channel_sort_info
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -338,7 +377,19 @@ def run_sweep(
 ) -> List[Dict]:
 
     encoder = predictor.model.image_encoder
+    mask_decoder = predictor.model.mask_decoder
     all_results = []
+
+    # ── calibration images for hilbert_sparse channel sort ───────────────────
+    calib_images: Optional[torch.Tensor] = None
+    if "hilbert_sparse" in algos:
+        print("Building calibration batch for hilbert_sparse channel sort …")
+        _calib_loader = build_dataloader(datasets_config, dataset_idx, batch_size=4)
+        _calib_batch  = next(iter(_calib_loader))
+        _calib_raw    = _calib_batch['image'].to('cuda')
+        calib_images  = predictor.model.preprocess(_calib_raw).half()  # (4,3,1024,1024)
+        del _calib_loader, _calib_batch, _calib_raw
+        print(f"  calib_images shape: {tuple(calib_images.shape)}")
 
     # ── build run list: (algo, ratio) pairs ──────────────────────────────────
     runs = []
@@ -366,9 +417,11 @@ def run_sweep(
 
     for algo, ratio in runs:
         # ── patch / unpatch encoder ──────────────────────────────────────────
-        remove_tome(encoder)
+        remove_tome(encoder, mask_decoder=mask_decoder)
         if algo != "none":
-            apply_tome(encoder, algo=algo, ratio=ratio, margin=margin)
+            apply_tome(encoder, algo=algo, ratio=ratio, margin=margin,
+                       mask_decoder=mask_decoder, group_size=group_size,
+                       calib_images=calib_images)
 
         n_tokens = int(64 * 64 * ratio) if algo != "none" else 64 * 64
 
@@ -408,7 +461,7 @@ def run_sweep(
                       f"mem={result.get('peak_memory_allocated_mb', 0):.0f}MB")
 
     # restore encoder to clean state
-    remove_tome(encoder)
+    remove_tome(encoder, mask_decoder=mask_decoder)
     return all_results
 
 # ─────────────────────────────────────────────────────────────────────────────

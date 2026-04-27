@@ -13,3 +13,6 @@
 [submodule "sam3"]
 	path = sam3
 	url = https://github.com/facebookresearch/sam3.git
+[submodule "lmms-eval"]
+	path = lmms-eval
+	url = https://github.com/EvolvingLMMs-Lab/lmms-eval.git

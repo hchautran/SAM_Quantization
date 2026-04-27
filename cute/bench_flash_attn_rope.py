@@ -18,7 +18,7 @@ import cutlass.torch as cutlass_torch
 import cuda.bindings.driver as cuda
 from cutlass.cute.runtime import from_dlpack
 
-from flash_attn import FlashAttentionForwardAmpere
+from flash_attn_rel_pos import FlashAttentionForwardAmpere
 
 
 # ---------------------------------------------------------------------------
