@@ -18,7 +18,7 @@ import cutlass.torch as cutlass_torch
 import cuda.bindings.driver as cuda
 from cutlass.cute.runtime import from_dlpack
 
-from flash_attn import FlashAttentionForwardAmpere
+from flash_attn_rel_pos import FlashAttentionForwardAmpere
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +261,7 @@ def run_benchmark(dtype_str, B, Sq, H, D, scale, m_block, n_block, threads,
 # SAM presets  (effective batch = B x num_windows, win=14 -> 25 windows)
 # ---------------------------------------------------------------------------
 SAM_CONFIGS = {
-    "sam_l": (5184, 16, 64),
+    "sam_l": (4096, 16, 64),
     # "sam_h": (14*14, 16, 80),
 }
 

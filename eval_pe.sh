@@ -9,19 +9,20 @@ python eval_pe_clip.py --list-models
 #     --dataset-root ./data/cifar10
 
 # Sweep several classification datasets in one run
-# python eval_pe_clip.py \
-#     --model PE-Core-L14-336\
-#     --dataset cifar10 cifar100 imagenetv2 objectnet \
-#     --dataset-root './data/{dataset}' \
-#     --batch-size 128
+python eval_pe_clip.py \
+    --model PE-Core-L14-336\
+    --dataset cifar10 cifar100 \
+    --dataset-root './data/{dataset}' \
+    --batch-size 128 \
+    # --algorithm flash_rope
 
 # Retrieval (e.g. COCO captions)
 python eval_pe_clip.py \
-    --model PE-Core-G14-448 \
+    --model PE-Core-L14-336 \
     --dataset mscoco_captions \
     --dataset-root ./data/coco \
-    --task zeroshot_retrieval\
-    --algorithm flash_rope
+    --task zeroshot_retrieval \
+    # --algorithm flash_rope
 
 # Local checkpoint, fp16
 # python eval_pe_clip.py --model PE-Core-G14-448 \

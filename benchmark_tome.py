@@ -419,9 +419,7 @@ def run_sweep(
         # ── patch / unpatch encoder ──────────────────────────────────────────
         remove_tome(encoder, mask_decoder=mask_decoder)
         if algo != "none":
-            apply_tome(encoder, algo=algo, ratio=ratio, margin=margin,
-                       mask_decoder=mask_decoder, group_size=group_size,
-                       calib_images=calib_images)
+            apply_tome(encoder, algo=algo, ratio=ratio, margin=margin)
 
         n_tokens = int(64 * 64 * ratio) if algo != "none" else 64 * 64
 
