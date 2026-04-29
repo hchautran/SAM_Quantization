@@ -24,7 +24,14 @@
       "Bash(awk '{print $2}')",
       "Bash(python3 -c ':*)",
       "Bash(python3 -c \"import json; nb=json.load\\(open\\('/media/volume/Chau/SAM_Quantization/notebook.ipynb'\\)\\); print\\(len\\(nb['cells']\\), 'cells'\\); [print\\(c['cell_type'], ':', c['source'][:80] if c['source'] else ''\\) for c in nb['cells'][:3]]\")",
-      "Bash(python3 -c \"from transformers import Sam2Model; print\\('Sam2Model ok'\\)\")"
+      "Bash(python3 -c \"from transformers import Sam2Model; print\\('Sam2Model ok'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python eval_coco.py --help)",
+      "Bash(sh -n eval_coco.sh)",
+      "Bash(dash -n eval_coco.sh)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('eval_hq44k.py'\\).read\\(\\)\\); print\\('parse OK'\\)\")",
+      "Bash(dash -n eval_hq44k.sh)",
+      "Bash(python eval_hq44k.py --help)"
     ],
     "additionalDirectories": [
       "/media/volume/Chau/SAM_Quantization/.git/modules/--force",

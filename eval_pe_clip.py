@@ -158,22 +158,40 @@ def evaluate_dataset(
 # PE algorithm registry — add entries here to plug in new patches
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _apply_flash_rope(model, args, dtype, img_size):
+def _apply_sparsesam(model, args, dtype, img_size, ratio: float = None):
     if args.dtype == "fp32" or args.device != "cuda":
-        print("[algorithm=flash_rope] requires CUDA + fp16/bf16; skipping patch.")
+        print("[algorithm=sparsesam] requires CUDA + fp16/bf16; skipping patch.")
         return
-    from PiToMe.algo.sparsesam.patch.pe import apply_pe_flash_rope_patch
-    # Warm up rope.freq once so the patched forward has cos/sin ready.
+    from PiToMe.algo.sparsesam.patch.pe import apply_pe_sparse_patch
     with torch.no_grad():
         dummy = torch.zeros(1, 3, img_size, img_size, device=args.device, dtype=dtype)
         model.encode_image(dummy)
-    apply_pe_flash_rope_patch(model)
+    apply_pe_sparse_patch(
+        model,
+        ratio=float(ratio if ratio is not None else args.ratio[0]),
+        group_size=args.group_size,
+    )
+
+
+def _apply_tome_like(algo_name: str):
+    def _apply(model, args, dtype, img_size, ratio: float = None):
+        if algo_name == "tome":
+            from PiToMe.algo.tome.patch.pe import apply_pe_tome_patch as _apply_patch
+        else:
+            from PiToMe.algo.gradtome.patch.pe import apply_pe_gradtome_patch as _apply_patch
+        _apply_patch(
+            model,
+            ratio=float(ratio if ratio is not None else args.ratio[0]),
+            prune_mlp=not args.no_mlp_prune,
+        )
+    return _apply
 
 
 PE_ALGORITHMS = {
-    "none":       lambda model, args, dtype, img_size: None,
-    "flash_rope": _apply_flash_rope,
-    # add more here, e.g. "pitome": _apply_pitome, "tome": _apply_tome, ...
+    "none":      lambda model, args, dtype, img_size: None,
+    "sparsesam": _apply_sparsesam,
+    "tome":      _apply_tome_like("tome"),
+    "gradtome":  _apply_tome_like("gradtome"),
 }
 
 
@@ -199,11 +217,19 @@ def main():
     p.add_argument("--dtype", default="fp16", choices=["fp32", "fp16", "bf16"])
     p.add_argument("--no-amp", action="store_true",
                    help="Disable autocast inside clip_benchmark (still uses --dtype for weights)")
-    p.add_argument("--algorithm", default="none",
-                   choices=["none", "flash_rope"],
-                   help="Optional PE patch to apply before evaluation. "
-                        "'flash_rope' = fused FlashAttention+RoPE cute kernel "
-                        "(needs CUDA + fp16/bf16). Add new entries to PE_ALGORITHMS to extend.")
+    p.add_argument("--algorithm", nargs="+", default=["none"],
+                   choices=["none", "sparsesam", "tome", "gradtome"],
+                   help="One or more PE patches to evaluate (sweep). "
+                        "'none' = baseline; "
+                        "'sparsesam' = block-sparse mask + Z-group permute + MLP prune; "
+                        "'tome'/'gradtome' = merge → attn(reduced) → unmerge, plus "
+                        "SAM-style post-attn MLP merge when --no-mlp-prune is not set.")
+    p.add_argument("--ratio", nargs="+", type=float, default=[0.5],
+                   help="Keep-bar / keep-fraction in (0, 1] to sweep; lower = more compression")
+    p.add_argument("--group-size", type=int, default=4,
+                   help="(sparsesam) Z-group size for tile-stride permute")
+    p.add_argument("--no-mlp-prune", action="store_true",
+                   help="Disable MLP token compression (attention-only mode)")
     p.add_argument("--output-dir", default="./benchmark_results")
     p.add_argument("--list-models", action="store_true")
     args = p.parse_args()
@@ -223,35 +249,65 @@ def main():
     )
     print(f"  image_size={img_size}, context_length={ctx_len}, dtype={args.dtype}")
 
-    if args.algorithm != "none":
-        print(f"Applying PE algorithm: {args.algorithm}")
-        PE_ALGORITHMS[args.algorithm](model, args, dtype, img_size)
-
     os.makedirs(args.output_dir, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # Build (algo, ratio) configs to sweep. 'none' ignores ratio (run once);
+    # the compression algos run once per ratio value.
+    RATIO_ALGOS = {"sparsesam", "tome", "gradtome"}
+    configs: List[tuple] = []
+    for algo in args.algorithm:
+        if algo in RATIO_ALGOS:
+            for r in args.ratio:
+                configs.append((algo, float(r)))
+        else:
+            configs.append((algo, None))
+
     all_results: List[Dict] = []
-    for ds_name in args.dataset:
-        print(f"\n=== {ds_name} ===")
-        t0 = time.perf_counter()
+    for algo, ratio in configs:
+        tag = f"{algo}" + (f"@r={ratio}" if ratio is not None else "")
+        print(f"\n############ config: {tag} ############")
+
+        # Reset to baseline forwards before applying the next patch.
         try:
-            metrics = evaluate_dataset(
-                model, transform, tokenizer,
-                dataset_name=ds_name, dataset_root=args.dataset_root,
-                split=args.split, task=args.task,
-                batch_size=args.batch_size, num_workers=args.num_workers,
-                device=args.device, amp=not args.no_amp,
-            )
-        except Exception as e:
-            print(f"  ERROR on {ds_name}: {repr(e)}")
-            import traceback; traceback.print_exc()
-            metrics = {"error": repr(e)}
-        elapsed = time.perf_counter() - t0
-        print(f"  took {elapsed:.1f}s  →  {json.dumps(metrics, default=str)}")
-        all_results.append({
-            "model": args.model, "dataset": ds_name, "split": args.split,
-            "elapsed_s": elapsed, **metrics,
-        })
+            from PiToMe.algo.sparsesam.patch.pe import remove_pe_sparse_patch
+            from PiToMe.algo.tome.patch.pe import remove_pe_tome_patch
+            from PiToMe.algo.gradtome.patch.pe import remove_pe_gradtome_patch
+            remove_pe_tome_patch(model)
+            remove_pe_gradtome_patch(model)
+            remove_pe_sparse_patch(model)
+        except Exception:
+            pass
+
+        if algo != "none":
+            print(f"Applying PE algorithm: {algo}" + (f" (ratio={ratio})" if ratio is not None else ""))
+            if algo in RATIO_ALGOS:
+                PE_ALGORITHMS[algo](model, args, dtype, img_size, ratio=ratio)
+            else:
+                PE_ALGORITHMS[algo](model, args, dtype, img_size)
+
+        for ds_name in args.dataset:
+            print(f"\n=== [{tag}] {ds_name} ===")
+            t0 = time.perf_counter()
+            try:
+                metrics = evaluate_dataset(
+                    model, transform, tokenizer,
+                    dataset_name=ds_name, dataset_root=args.dataset_root,
+                    split=args.split, task=args.task,
+                    batch_size=args.batch_size, num_workers=args.num_workers,
+                    device=args.device, amp=not args.no_amp,
+                )
+            except Exception as e:
+                print(f"  ERROR on {ds_name}: {repr(e)}")
+                import traceback; traceback.print_exc()
+                metrics = {"error": repr(e)}
+            elapsed = time.perf_counter() - t0
+            print(f"  took {elapsed:.1f}s  →  {json.dumps(metrics, default=str)}")
+            all_results.append({
+                "model": args.model, "algorithm": algo, "ratio": ratio,
+                "dataset": ds_name, "split": args.split,
+                "elapsed_s": elapsed, **metrics,
+            })
 
     # CSV dump
     csv_path = os.path.join(args.output_dir, f"pe_clip_{args.model}_{ts}.csv")
