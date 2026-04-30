@@ -35,11 +35,14 @@ from typing import Dict, List
 import torch
 from torch.utils.data import DataLoader
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-PM_ROOT = os.path.join(ROOT, "perception_models")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
+PM_ROOT = os.path.join(_REPO, "perception_models")
 PM_PE   = os.path.join(PM_ROOT, "apps", "pe")
-sys.path.insert(0, PM_ROOT)   # for `core.*`
-sys.path.insert(0, PM_PE)     # for `clip_benchmark.*`
+sys.path.insert(0, _REPO)                              # shared utils at repo root
+sys.path.insert(0, os.path.join(_REPO, "PiToMe"))      # PE algo registry
+sys.path.insert(0, PM_ROOT)                            # for `core.*`
+sys.path.insert(0, PM_PE)                              # for `clip_benchmark.*`
 
 import core.vision_encoder.pe as pe
 import core.vision_encoder.transforms as pe_transforms
@@ -47,6 +50,9 @@ import core.vision_encoder.transforms as pe_transforms
 from clip_benchmark.datasets.builder import (
     build_dataset, get_dataset_collate_fn, get_dataset_default_task,
 )
+from contextlib import suppress
+from tqdm import tqdm
+import torch.nn.functional as F
 from clip_benchmark.metrics import zeroshot_classification
 # zeroshot_retrieval imports audio-visual code (needs xformers); import lazily when used.
 
@@ -57,6 +63,57 @@ def _accuracy(output, target, topk=(1,)):
     n = len(target)
     return [correct[:k].reshape(-1).float().sum().item() / n for k in topk]
 zeroshot_classification.accuracy = _accuracy
+
+
+def _run_classification_with_acc_bar(model, classifier, dataloader, device,
+                                     video_dataset=False, amp=True, args=None,
+                                     desc="zeroshot"):
+    """Drop-in replacement for `zeroshot_classification.run_classification` that
+    updates a tqdm postfix with running top-1 (top-5 when ≥5 classes)."""
+    autocast = torch.cuda.amp.autocast if amp else suppress
+    pred_chunks, true_chunks = [], []
+    n_classes = classifier.shape[1] if classifier.ndim == 2 else 0
+    track_top5 = n_classes >= 5
+    seen, c1, c5 = 0, 0, 0
+
+    bar = tqdm(dataloader, desc=desc)
+    with torch.no_grad():
+        for images, target in bar:
+            if isinstance(images, torch.Tensor):
+                images = images.to(device, torch.float32)
+            elif isinstance(images, (list, tuple)):  # video frames
+                images = [x.to(device, torch.float32) for x in images]
+                images = torch.stack(images, dim=0).permute(1, 0, 2, 3, 4).contiguous()
+            else:
+                raise NotImplementedError
+            target = target.to(device)
+
+            with autocast():
+                if video_dataset:
+                    image_features = model.encode_video(images)
+                else:
+                    image_features = model.encode_image(images)
+                image_features = F.normalize(image_features, dim=-1)
+                logits = 100.0 * image_features @ classifier
+
+            # Running accuracy (skip if multi-label — shape (B, C) — since argmax/top-k aren't meaningful).
+            if target.ndim == 1:
+                k = 5 if track_top5 else 1
+                top = logits.topk(k, dim=1).indices
+                correct = top.eq(target.view(-1, 1))
+                c1 += correct[:, 0].sum().item()
+                if track_top5:
+                    c5 += correct.any(dim=1).sum().item()
+                seen += target.numel()
+                postfix = {"acc1": f"{c1/seen*100:.2f}"}
+                if track_top5:
+                    postfix["acc5"] = f"{c5/seen*100:.2f}"
+                bar.set_postfix(postfix)
+
+            true_chunks.append(target.cpu())
+            pred_chunks.append(logits.float().cpu())
+
+    return torch.cat(pred_chunks), torch.cat(true_chunks)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -117,9 +174,19 @@ def evaluate_dataset(
         templates  = dataset.templates if hasattr(dataset, "templates") else None
         if classnames is None or templates is None:
             raise RuntimeError(f"Dataset {dataset_name} did not expose classnames/templates")
-        metrics = zeroshot_classification.evaluate(
-            model, loader, tokenizer, classnames, templates, device, amp=amp, verbose=False,
+        # Swap upstream `run_classification` for one that surfaces running top-1/5
+        # via tqdm postfix. Restored after the call so other code paths are untouched.
+        from functools import partial as _partial
+        _orig_run = zeroshot_classification.run_classification
+        zeroshot_classification.run_classification = _partial(
+            _run_classification_with_acc_bar, desc=f"{dataset_name}",
         )
+        try:
+            metrics = zeroshot_classification.evaluate(
+                model, loader, tokenizer, classnames, templates, device, amp=amp, verbose=False,
+            )
+        finally:
+            zeroshot_classification.run_classification = _orig_run
     elif task == "zeroshot_retrieval":
         # zeroshot_retrieval imports core.audio_visual_encoder.PEAudioVisual just for
         # an `isinstance` check. That chain pulls in xformers (often ABI-broken vs torch).
@@ -155,44 +222,33 @@ def evaluate_dataset(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PE algorithm registry — add entries here to plug in new patches
+# PE algorithm dispatch — delegates to the central registry
+# (`PiToMe/algo/registry.py`). To add a new algorithm, register it there;
+# this module needs no changes.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _apply_sparsesam(model, args, dtype, img_size, ratio: float = None):
-    if args.dtype == "fp32" or args.device != "cuda":
-        print("[algorithm=sparsesam] requires CUDA + fp16/bf16; skipping patch.")
-        return
-    from PiToMe.algo.sparsesam.patch.pe import apply_pe_sparse_patch
+from PiToMe.algo.registry import (
+    PE_REGISTRY, algo_choices as _pe_choices,
+    apply_pe as _registry_apply_pe, remove_all_pe as _registry_remove_all,
+)
+
+
+def _warmup_rope(model, dummy):
+    """rope.freq is built lazily inside VisionTransformer.forward_features.
+    Run one dummy forward so cute kernels can pull cos/sin during patching."""
     with torch.no_grad():
-        dummy = torch.zeros(1, 3, img_size, img_size, device=args.device, dtype=dtype)
         model.encode_image(dummy)
-    apply_pe_sparse_patch(
-        model,
-        ratio=float(ratio if ratio is not None else args.ratio[0]),
-        group_size=args.group_size,
-    )
 
 
-def _apply_tome_like(algo_name: str):
-    def _apply(model, args, dtype, img_size, ratio: float = None):
-        if algo_name == "tome":
-            from PiToMe.algo.tome.patch.pe import apply_pe_tome_patch as _apply_patch
-        else:
-            from PiToMe.algo.gradtome.patch.pe import apply_pe_gradtome_patch as _apply_patch
-        _apply_patch(
-            model,
-            ratio=float(ratio if ratio is not None else args.ratio[0]),
-            prune_mlp=not args.no_mlp_prune,
-        )
-    return _apply
-
-
-PE_ALGORITHMS = {
-    "none":      lambda model, args, dtype, img_size: None,
-    "sparsesam": _apply_sparsesam,
-    "tome":      _apply_tome_like("tome"),
-    "gradtome":  _apply_tome_like("gradtome"),
-}
+def apply_pe_patch(model, algo, ratio, args, dummy):
+    """Apply a PE patch via the registry. Cute-kernel patches need rope.freq
+    populated upfront; we warm it up unconditionally before applying."""
+    if algo == "none":
+        return
+    if algo not in PE_REGISTRY:
+        raise ValueError(f"Unknown algo: {algo}. Choices: {_pe_choices()}")
+    _warmup_rope(model, dummy)
+    _registry_apply_pe(model, algo, args=args, ratio=ratio)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -218,18 +274,33 @@ def main():
     p.add_argument("--no-amp", action="store_true",
                    help="Disable autocast inside clip_benchmark (still uses --dtype for weights)")
     p.add_argument("--algorithm", nargs="+", default=["none"],
-                   choices=["none", "sparsesam", "tome", "gradtome"],
+                   choices=_pe_choices(),
                    help="One or more PE patches to evaluate (sweep). "
-                        "'none' = baseline; "
-                        "'sparsesam' = block-sparse mask + Z-group permute + MLP prune; "
-                        "'tome'/'gradtome' = merge → attn(reduced) → unmerge, plus "
-                        "SAM-style post-attn MLP merge when --no-mlp-prune is not set.")
+                        "Registered algorithms are listed automatically — see "
+                        "`PiToMe/algo/registry.py` and `docs/ADDING_PE.md`.")
     p.add_argument("--ratio", nargs="+", type=float, default=[0.5],
                    help="Keep-bar / keep-fraction in (0, 1] to sweep; lower = more compression")
+    # Stage-compression knobs (consumed by `_kw_compress`)
+    p.add_argument("--num-stages", type=int, default=4,
+                   help="(stage-compress) Number of stages; one merge step at each boundary.")
     p.add_argument("--group-size", type=int, default=4,
                    help="(sparsesam) Z-group size for tile-stride permute")
-    p.add_argument("--no-mlp-prune", action="store_true",
-                   help="Disable MLP token compression (attention-only mode)")
+    p.add_argument("--use-flash-rope", action="store_true",
+                   help="(stage-compress) Route attention through fused FA2+RoPE cute kernel.")
+    p.add_argument("--compress-at-blocks", nargs="+", type=int, default=None,
+                   help="(stage-compress) Explicit 0-indexed block indices after which "
+                        "compression fires; overrides --num-stages.")
+    # Partial knobs (consumed by `_kw_partial_basic` / `_kw_partial_sparsesam`)
+    p.add_argument("--partial-start-block", type=int, default=0,
+                   help="(partial) First block index at which the patch kicks in. "
+                        "Earlier blocks run stock SDPA + full MLP.")
+    p.add_argument("--sparse-ratio", type=float, default=None,
+                   help="(sparsesam_partial) keep-bar width inside the cute mask; "
+                        "defaults to --ratio.")
+    p.add_argument("--mlp-merge", dest="mlp_merge", action="store_true", default=True,
+                   help="(partial) Merge → MLP → unmerge sandwich (default ON).")
+    p.add_argument("--no-mlp-merge", dest="mlp_merge", action="store_false",
+                   help="(partial) Disable MLP merge — attention-only compression.")
     p.add_argument("--output-dir", default="./benchmark_results")
     p.add_argument("--list-models", action="store_true")
     args = p.parse_args()
@@ -252,39 +323,30 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Build (algo, ratio) configs to sweep. 'none' ignores ratio (run once);
-    # the compression algos run once per ratio value.
-    RATIO_ALGOS = {"sparsesam", "tome", "gradtome"}
+    # Build (algo, ratio) configs to sweep. Algos with `accepts_ratio=False`
+    # (e.g. flash_rope) run once; the rest run once per --ratio value.
     configs: List[tuple] = []
     for algo in args.algorithm:
-        if algo in RATIO_ALGOS:
+        spec = PE_REGISTRY.get(algo)
+        if algo == "none" or (spec is not None and not spec.accepts_ratio):
+            configs.append((algo, None))
+        else:
             for r in args.ratio:
                 configs.append((algo, float(r)))
-        else:
-            configs.append((algo, None))
+
+    dummy = torch.zeros(1, 3, img_size, img_size, device=args.device, dtype=dtype)
 
     all_results: List[Dict] = []
     for algo, ratio in configs:
         tag = f"{algo}" + (f"@r={ratio}" if ratio is not None else "")
         print(f"\n############ config: {tag} ############")
 
-        # Reset to baseline forwards before applying the next patch.
-        try:
-            from PiToMe.algo.sparsesam.patch.pe import remove_pe_sparse_patch
-            from PiToMe.algo.tome.patch.pe import remove_pe_tome_patch
-            from PiToMe.algo.gradtome.patch.pe import remove_pe_gradtome_patch
-            remove_pe_tome_patch(model)
-            remove_pe_gradtome_patch(model)
-            remove_pe_sparse_patch(model)
-        except Exception:
-            pass
+        # Reset to baseline before applying the next patch.
+        _registry_remove_all(model)
 
         if algo != "none":
             print(f"Applying PE algorithm: {algo}" + (f" (ratio={ratio})" if ratio is not None else ""))
-            if algo in RATIO_ALGOS:
-                PE_ALGORITHMS[algo](model, args, dtype, img_size, ratio=ratio)
-            else:
-                PE_ALGORITHMS[algo](model, args, dtype, img_size)
+            apply_pe_patch(model, algo=algo, ratio=ratio, args=args, dummy=dummy)
 
         for ds_name in args.dataset:
             print(f"\n=== [{tag}] {ds_name} ===")
