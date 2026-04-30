@@ -16,3 +16,6 @@
 [submodule "lmms-eval"]
 	path = lmms-eval
 	url = https://github.com/EvolvingLMMs-Lab/lmms-eval.git
+[submodule "SpargeAttn"]
+	path = SpargeAttn
+	url = https://github.com/NguyenHuuChi/SpargeAttn
