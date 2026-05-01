@@ -12,3 +12,5 @@ submitit>=1.5.1
 matplotlib>=3.9.1
 opencv-python>=4.7.0
 eva-decord>=0.6.1
+nvidia-cutlass-dsl
+cuda-python==12.9.0

@@ -48,7 +48,6 @@ pip install -e sam-hq
 pip install -e PiToMe
 pip install -e perception_models
 # only if you actually use SAM3 / SAM2:
-pip install sam2 sam3
 ```
 
 ### Optional / kernel deps
