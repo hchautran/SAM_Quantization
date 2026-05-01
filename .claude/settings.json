@@ -32,7 +32,8 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('eval_hq44k.py'\\).read\\(\\)\\); print\\('parse OK'\\)\")",
       "Bash(dash -n eval_hq44k.sh)",
       "Bash(python eval_hq44k.py --help)",
-      "Bash(git log *)"
+      "Bash(git log *)",
+      "Bash(python -c *)"
     ],
     "additionalDirectories": [
       "/media/volume/Chau/SAM_Quantization/.git/modules/--force",
