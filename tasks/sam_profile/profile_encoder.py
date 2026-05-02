@@ -525,7 +525,7 @@ def main():
     # ToMe / PiToMe comparison (SAM 1 only)
     parser.add_argument('--tome-algo',   type=str, default='none',
                         choices=['none', 'tome', 'pitome', 'sparsesam', 'sparsesam_pitome',
-                                 'sparsesam-dense'],
+                                 'sparsesam-dense', 'gradtome'],
                         help="Run a second pass with this algo and show comparison table.")
     parser.add_argument('--tome-ratio',  type=float, default=0.9,
                         help="Token-keep ratio for ToMe/PiToMe (0 < ratio < 1).")
