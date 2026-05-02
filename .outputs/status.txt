@@ -1,0 +1,91 @@
+[2026-05-02T15:28:32Z] === ORCHESTRATOR KICKOFF (pid=898932) ===
+[2026-05-02T15:28:32Z] GPU: NVIDIA A100-SXM4-40GB, 36606 MiB
+[2026-05-02T15:28:32Z] STEP 3.1 START — SAM baseline (algo=none)
+[2026-05-02T15:32:22Z] STEP 3.1 END (rc=0)  csvs=2
+[2026-05-02T15:32:22Z] STEP 3.2 START — SAM attn-only (--no-mlp-merge)
+[2026-05-02T16:06:55Z] STEP 3.2 END (rc=1)  csvs=0
+[2026-05-02T16:06:55Z] STEP 3.3 START — SAM attn+MLP (--mlp-merge)
+[2026-05-02T16:18:06Z] === ORCHESTRATOR-v2 KICKOFF (pid=911358) ===
+[2026-05-02T16:18:06Z] GPU: NVIDIA A100-SXM4-40GB, 40441 MiB
+[2026-05-02T16:18:06Z] STEP 3.2 START — SAM attn-only (per-cell)
+[2026-05-02T16:18:06Z]     SAM cell START algo=sparsesam ratio=0.75 mode=no-mlp
+[2026-05-02T16:22:08Z]     SAM cell END   algo=sparsesam ratio=0.75 mode=no-mlp rc=0
+[2026-05-02T16:22:08Z]     SAM cell START algo=sparsesam ratio=0.6 mode=no-mlp
+[2026-05-02T16:26:09Z]     SAM cell END   algo=sparsesam ratio=0.6 mode=no-mlp rc=0
+[2026-05-02T16:26:09Z]     SAM cell START algo=sparsesam ratio=0.5 mode=no-mlp
+[2026-05-02T16:30:01Z]     SAM cell END   algo=sparsesam ratio=0.5 mode=no-mlp rc=0
+[2026-05-02T16:30:01Z]     SAM cell START algo=sparsesam ratio=0.4 mode=no-mlp
+[2026-05-02T16:34:01Z]     SAM cell END   algo=sparsesam ratio=0.4 mode=no-mlp rc=0
+[2026-05-02T16:34:01Z]     SAM cell START algo=sparsesam ratio=0.3 mode=no-mlp
+[2026-05-02T16:37:55Z]     SAM cell END   algo=sparsesam ratio=0.3 mode=no-mlp rc=0
+[2026-05-02T16:37:55Z]     SAM cell START algo=sparsesam ratio=0.25 mode=no-mlp
+[2026-05-02T16:41:47Z]     SAM cell END   algo=sparsesam ratio=0.25 mode=no-mlp rc=0
+[2026-05-02T16:41:47Z]     SAM cell START algo=tome ratio=0.75 mode=no-mlp
+[2026-05-02T16:46:24Z]     SAM cell END   algo=tome ratio=0.75 mode=no-mlp rc=0
+[2026-05-02T16:46:24Z]     SAM cell START algo=tome ratio=0.6 mode=no-mlp
+[2026-05-02T16:50:45Z]     SAM cell END   algo=tome ratio=0.6 mode=no-mlp rc=0
+[2026-05-02T16:50:45Z]     SAM cell START algo=tome ratio=0.5 mode=no-mlp
+[2026-05-02T16:54:49Z]     SAM cell END   algo=tome ratio=0.5 mode=no-mlp rc=0
+[2026-05-02T16:54:49Z]     SAM cell START algo=tome ratio=0.4 mode=no-mlp
+[2026-05-02T16:58:53Z]     SAM cell END   algo=tome ratio=0.4 mode=no-mlp rc=0
+[2026-05-02T16:58:53Z]     SAM cell START algo=tome ratio=0.3 mode=no-mlp
+[2026-05-02T17:03:02Z]     SAM cell END   algo=tome ratio=0.3 mode=no-mlp rc=0
+[2026-05-02T17:03:02Z]     SAM cell START algo=tome ratio=0.25 mode=no-mlp
+[2026-05-02T17:07:05Z]     SAM cell END   algo=tome ratio=0.25 mode=no-mlp rc=0
+[2026-05-02T17:07:05Z]     SAM cell START algo=gradtome ratio=0.75 mode=no-mlp
+[2026-05-02T17:11:35Z]     SAM cell END   algo=gradtome ratio=0.75 mode=no-mlp rc=0
+[2026-05-02T17:11:35Z]     SAM cell START algo=gradtome ratio=0.6 mode=no-mlp
+[2026-05-02T17:15:59Z]     SAM cell END   algo=gradtome ratio=0.6 mode=no-mlp rc=0
+[2026-05-02T17:15:59Z]     SAM cell START algo=gradtome ratio=0.5 mode=no-mlp
+[2026-05-02T17:20:16Z]     SAM cell END   algo=gradtome ratio=0.5 mode=no-mlp rc=0
+[2026-05-02T17:20:16Z]     SAM cell START algo=gradtome ratio=0.4 mode=no-mlp
+[2026-05-02T17:24:33Z]     SAM cell END   algo=gradtome ratio=0.4 mode=no-mlp rc=0
+[2026-05-02T17:24:33Z]     SAM cell START algo=gradtome ratio=0.3 mode=no-mlp
+[2026-05-02T17:28:45Z]     SAM cell END   algo=gradtome ratio=0.3 mode=no-mlp rc=0
+[2026-05-02T17:28:45Z]     SAM cell START algo=gradtome ratio=0.25 mode=no-mlp
+[2026-05-02T17:32:55Z]     SAM cell END   algo=gradtome ratio=0.25 mode=no-mlp rc=0
+[2026-05-02T17:32:55Z] STEP 3.2 END   csvs=18
+[2026-05-02T17:32:55Z] STEP 3.3 START — SAM attn+MLP (per-cell)
+[2026-05-02T17:32:55Z]     SAM cell START algo=sparsesam ratio=0.75 mode=mlp
+[2026-05-02T17:36:49Z]     SAM cell END   algo=sparsesam ratio=0.75 mode=mlp rc=0
+[2026-05-02T17:36:49Z]     SAM cell START algo=sparsesam ratio=0.6 mode=mlp
+[2026-05-02T17:40:51Z]     SAM cell END   algo=sparsesam ratio=0.6 mode=mlp rc=0
+[2026-05-02T17:40:51Z]     SAM cell START algo=sparsesam ratio=0.5 mode=mlp
+[2026-05-02T17:44:42Z]     SAM cell END   algo=sparsesam ratio=0.5 mode=mlp rc=0
+[2026-05-02T17:44:42Z]     SAM cell START algo=sparsesam ratio=0.4 mode=mlp
+[2026-05-02T17:48:37Z]     SAM cell END   algo=sparsesam ratio=0.4 mode=mlp rc=0
+[2026-05-02T17:48:37Z]     SAM cell START algo=sparsesam ratio=0.3 mode=mlp
+[2026-05-02T17:52:36Z]     SAM cell END   algo=sparsesam ratio=0.3 mode=mlp rc=0
+[2026-05-02T17:52:36Z]     SAM cell START algo=sparsesam ratio=0.25 mode=mlp
+[2026-05-02T17:56:37Z]     SAM cell END   algo=sparsesam ratio=0.25 mode=mlp rc=0
+[2026-05-02T17:56:37Z]     SAM cell START algo=tome ratio=0.75 mode=mlp
+[2026-05-02T18:01:20Z]     SAM cell END   algo=tome ratio=0.75 mode=mlp rc=0
+[2026-05-02T18:01:20Z]     SAM cell START algo=tome ratio=0.6 mode=mlp
+[2026-05-02T18:05:40Z]     SAM cell END   algo=tome ratio=0.6 mode=mlp rc=0
+[2026-05-02T18:05:40Z]     SAM cell START algo=tome ratio=0.5 mode=mlp
+[2026-05-02T18:09:46Z]     SAM cell END   algo=tome ratio=0.5 mode=mlp rc=0
+[2026-05-02T18:09:46Z]     SAM cell START algo=tome ratio=0.4 mode=mlp
+[2026-05-02T18:13:54Z]     SAM cell END   algo=tome ratio=0.4 mode=mlp rc=0
+[2026-05-02T18:13:54Z]     SAM cell START algo=tome ratio=0.3 mode=mlp
+[2026-05-02T18:18:03Z]     SAM cell END   algo=tome ratio=0.3 mode=mlp rc=0
+[2026-05-02T18:18:03Z]     SAM cell START algo=tome ratio=0.25 mode=mlp
+[2026-05-02T18:22:06Z]     SAM cell END   algo=tome ratio=0.25 mode=mlp rc=0
+[2026-05-02T18:22:06Z]     SAM cell START algo=gradtome ratio=0.75 mode=mlp
+[2026-05-02T18:26:38Z]     SAM cell END   algo=gradtome ratio=0.75 mode=mlp rc=0
+[2026-05-02T18:26:38Z]     SAM cell START algo=gradtome ratio=0.6 mode=mlp
+[2026-05-02T18:31:01Z]     SAM cell END   algo=gradtome ratio=0.6 mode=mlp rc=0
+[2026-05-02T18:31:01Z]     SAM cell START algo=gradtome ratio=0.5 mode=mlp
+[2026-05-02T18:35:20Z]     SAM cell END   algo=gradtome ratio=0.5 mode=mlp rc=0
+[2026-05-02T18:35:20Z]     SAM cell START algo=gradtome ratio=0.4 mode=mlp
+[2026-05-02T18:39:35Z]     SAM cell END   algo=gradtome ratio=0.4 mode=mlp rc=0
+[2026-05-02T18:39:35Z]     SAM cell START algo=gradtome ratio=0.3 mode=mlp
+[2026-05-02T18:43:47Z]     SAM cell END   algo=gradtome ratio=0.3 mode=mlp rc=0
+[2026-05-02T18:43:47Z]     SAM cell START algo=gradtome ratio=0.25 mode=mlp
+[2026-05-02T18:48:00Z]     SAM cell END   algo=gradtome ratio=0.25 mode=mlp rc=0
+[2026-05-02T18:48:00Z] STEP 3.3 END   csvs=18
+[2026-05-02T18:48:00Z] STEP 3.4 START — PE baseline
+[2026-05-02T18:52:27Z] STEP 3.4 END (rc=0) csvs=1
+[2026-05-02T18:52:27Z] STEP 3.5 START — PE attn-only (per-algo)
+[2026-05-02T18:52:27Z]     PE attn-only START algo=sparsesam_partial
+[2026-05-02T19:11:02Z]     PE attn-only END   algo=sparsesam_partial rc=0
+[2026-05-02T19:11:02Z]     PE attn-only START algo=tome_partial

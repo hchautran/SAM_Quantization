@@ -10,7 +10,7 @@
 #                  gradtome_pitome gradtome_hilbert)
 #   RATIOS         per-block keep fractions
 #   BATCH_SIZES    space-separated batch sizes
-#   NUM_SAMPLES    images per dataset
+#   NUM_SAMPLES    images per dataset (0 = full val set)
 #   CKPT, MODEL    SAM-HQ checkpoint + arch (vit_l / vit_b / vit_h)
 #   MLP_MERGE      "yes" (default) or "no". Sparsesam family only:
 #                    yes → MLP runs on top floor(ratio·N) keep tokens
@@ -27,7 +27,7 @@ cd "$REPO_ROOT"
 ALGOS=${ALGOS:-"sparsesam gradtome tome"}
 RATIOS=${RATIOS:-"0.75 0.5 0.25"}
 BATCH_SIZES=${BATCH_SIZES:-"8"}
-NUM_SAMPLES=${NUM_SAMPLES:-470}
+NUM_SAMPLES=${NUM_SAMPLES:-0}
 CKPT=${CKPT:-./ckts/sam_hq_vit_l.pth}
 MODEL=${MODEL:-vit_l}
 MLP_MERGE=${MLP_MERGE:-yes}

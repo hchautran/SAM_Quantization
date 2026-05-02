@@ -1,0 +1,1 @@
+- [Python env](env_python.md) — use `/media/volume/Chau/miniconda3/envs/sam/bin/python`; `python` and `.venv` are wrong envs.

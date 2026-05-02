@@ -121,7 +121,10 @@ def process_batch(predictor, images, labels_boxes, labels_ori):
 
 def run_one(predictor, batch_size, dataloader, num_samples, label="", warmup_batches: int = 3) -> Dict:
     """Bench one (algo, ratio, batch_size). Warmup is critical: the first
-    patched config otherwise pays JIT-compile cost on the timed pass."""
+    patched config otherwise pays JIT-compile cost on the timed pass.
+
+    num_samples=None or <=0 means "run the full val set".
+    """
     reset_memory()
 
     device = predictor.device
@@ -138,17 +141,19 @@ def run_one(predictor, batch_size, dataloader, num_samples, label="", warmup_bat
     torch.cuda.synchronize()
     del warmup_iter
 
+    run_all = num_samples is None or num_samples <= 0
     enc_times, enc_per_img, ious, b_ious = [], [], [], []
     total_images = 0
+    pbar_total = len(dataloader) if run_all else min(len(dataloader), num_samples // batch_size)
     pbar = tqdm(
-        total=min(len(dataloader), num_samples // batch_size),
+        total=pbar_total,
         desc=label or f"bs={batch_size}",
         leave=False,
     )
     t_overall = time.perf_counter()
 
     for data_val in dataloader:
-        if total_images >= num_samples:
+        if not run_all and total_images >= num_samples:
             break
         images      = data_val['image']
         labels_val  = data_val['label']
@@ -287,16 +292,10 @@ def run_sweep(
     return all_results
 
 
-def plot_results(results: List[Dict], output_dir: str, ts: str) -> None:
-    """Per-dataset line plot: x=ratio, y=mIoU/B-IoU, one line per algo."""
+def _plot_tradeoff_throughput(df, datasets, metrics, output_dir, ts, bs_pick) -> None:
+    """y=quality, x=throughput. Baseline as a star marker; each algo a line
+    through its ratio points (annotated with the ratio)."""
     import matplotlib.pyplot as plt
-
-    df = pd.DataFrame(results)
-    if df.empty:
-        return
-
-    datasets = sorted(df['dataset'].unique())
-    metrics  = [('miou', 'mIoU'), ('boundary_iou', 'Boundary IoU')]
 
     for metric_key, metric_label in metrics:
         n = len(datasets)
@@ -307,10 +306,55 @@ def plot_results(results: List[Dict], output_dir: str, ts: str) -> None:
         for ax, ds in zip(axes.flat, datasets):
             d_ds = df[df['dataset'] == ds]
 
-            baseline_val = None
+            for algo in sorted(d_ds[d_ds['algo'] != 'none']['algo'].unique()):
+                d = d_ds[d_ds['algo'] == algo].sort_values('ratio')
+                ax.plot(d['throughput_imgs_per_sec'], d[metric_key],
+                        marker='o', label=algo)
+                for _, row in d.iterrows():
+                    ax.annotate(f"r={row['ratio']:.2f}",
+                                (row['throughput_imgs_per_sec'], row[metric_key]),
+                                textcoords='offset points', xytext=(4, 4),
+                                fontsize=7, alpha=0.7)
+
             base = d_ds[d_ds['algo'] == 'none']
             if not base.empty:
-                baseline_val = float(base[metric_key].mean())
+                base_x = float(base['throughput_imgs_per_sec'].mean())
+                base_y = float(base[metric_key].mean())
+                ax.scatter([base_x], [base_y],
+                           marker='*', s=200, color='black', zorder=5,
+                           label=f'baseline ({base_y:.4f})')
+
+            ax.set_title(ds)
+            ax.set_xlabel(f'throughput (img/s) @ bs={bs_pick}')
+            ax.set_ylabel(metric_label)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=8)
+
+        for ax in axes.flat[len(datasets):]:
+            ax.axis('off')
+
+        fig.suptitle(f'{metric_label} vs throughput tradeoff (bs={bs_pick})')
+        fig.tight_layout()
+        out = os.path.join(output_dir, f'tome_benchmark_{ts}_{metric_key}_tradeoff.png')
+        fig.savefig(out, dpi=140)
+        plt.close(fig)
+        print(f"Plot saved → {out}")
+
+
+def _plot_quality_vs_ratio(df, datasets, metrics, output_dir, ts) -> None:
+    """y=quality, x=keep ratio. Baseline shown as a horizontal dashed line
+    (ratio=1.0 by definition) so each algo's degradation curve is read
+    directly against it."""
+    import matplotlib.pyplot as plt
+
+    for metric_key, metric_label in metrics:
+        n = len(datasets)
+        ncols = min(3, n)
+        nrows = (n + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 4.2 * nrows), squeeze=False)
+
+        for ax, ds in zip(axes.flat, datasets):
+            d_ds = df[df['dataset'] == ds]
 
             for algo in sorted(d_ds[d_ds['algo'] != 'none']['algo'].unique()):
                 d = (d_ds[d_ds['algo'] == algo]
@@ -318,8 +362,11 @@ def plot_results(results: List[Dict], output_dir: str, ts: str) -> None:
                      .sort_values('ratio'))
                 ax.plot(d['ratio'], d[metric_key], marker='o', label=algo)
 
-            if baseline_val is not None:
-                ax.axhline(baseline_val, ls='--', color='gray', label=f'baseline ({baseline_val:.4f})')
+            base = d_ds[d_ds['algo'] == 'none']
+            if not base.empty:
+                base_y = float(base[metric_key].mean())
+                ax.axhline(base_y, ls='--', color='gray',
+                           label=f'baseline ({base_y:.4f})')
 
             ax.set_title(ds)
             ax.set_xlabel('keep ratio')
@@ -332,10 +379,28 @@ def plot_results(results: List[Dict], output_dir: str, ts: str) -> None:
 
         fig.suptitle(f'{metric_label} vs keep ratio')
         fig.tight_layout()
-        out = os.path.join(output_dir, f'tome_benchmark_{ts}_{metric_key}.png')
+        out = os.path.join(output_dir, f'tome_benchmark_{ts}_{metric_key}_vs_ratio.png')
         fig.savefig(out, dpi=140)
         plt.close(fig)
         print(f"Plot saved → {out}")
+
+
+def plot_results(results: List[Dict], output_dir: str, ts: str) -> None:
+    """Two figure families per metric (mIoU, B-IoU):
+      1. quality vs throughput tradeoff (filtered to largest batch size)
+      2. quality vs keep ratio (averaged across batch sizes)
+    Both put baseline + algos on the same axes."""
+    df = pd.DataFrame(results)
+    if df.empty:
+        return
+
+    datasets = sorted(df['dataset'].unique())
+    metrics  = [('miou', 'mIoU'), ('boundary_iou', 'Boundary IoU')]
+
+    bs_pick = int(df['batch_size'].max())
+    df_bs = df[df['batch_size'] == bs_pick]
+    _plot_tradeoff_throughput(df_bs, datasets, metrics, output_dir, ts, bs_pick)
+    _plot_quality_vs_ratio(df, datasets, metrics, output_dir, ts)
 
 
 def print_summary(results: List[Dict]):
@@ -394,7 +459,8 @@ def main():
                         default=[0.9, 0.8, 0.7])
     parser.add_argument('--batch-sizes', type=int, nargs='+',
                         default=[1, 2, 4, 8])
-    parser.add_argument('--num-samples', type=int, default=100)
+    parser.add_argument('--num-samples', type=int, default=0,
+                        help='Per-dataset image cap. 0 or negative = run the full val set.')
 
     parser.add_argument('--margin', type=float, default=0.5,
                         help='PiToMe energy margin.')
