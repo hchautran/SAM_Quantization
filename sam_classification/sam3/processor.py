@@ -9,14 +9,6 @@ from spas_sage_attn import spas_sage2_attn_meansim_topk_cuda
 
 
 SUPPORTED_PROCESSORS = {
-    "BASE",
-    "POSITIONAL_PRUNE",
-    "POSITIONAL_QUANT",
-    "HEAD_PRUNE",
-    "SUB_IMAGE_PRUNE",
-    "POSITIONAL_SPARSE",
-    "POSITIONAL_SPARGE",
-    "PIECE_WISE_ATTN",
     "PIECEWISE",
     "SPARSEATTN",
     "SPARGEATTN",

@@ -42,6 +42,7 @@ cuda-12.1.0/
 cuda/
 Block-Sparse-Attention/
 freesam/
+sam3/
 
 # Exclude Python cache files
 __pycache__/

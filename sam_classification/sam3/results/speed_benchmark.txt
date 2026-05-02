@@ -16,3 +16,4 @@ clip_zeroshot:PE-Core-S16-384:image_encoder Avg_Inference_Time_ms: 15.34
 clip_zeroshot:PE-Core-S16-384:image_encoder Avg_Inference_Time_ms: 11.67
 clip_zeroshot:PE-Core-S16-384:image_encoder Avg_Inference_Time_ms: 11.50
 clip_zeroshot:PE-Core-S16-384:image_encoder Avg_Inference_Time_ms: 11.88
+clip_zeroshot:PE-Core-S16-384:image_encoder Avg_Inference_Time_ms: 11.89

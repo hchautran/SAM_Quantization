@@ -4,14 +4,14 @@ model:
   checkpoint: ./pretrained_checkpoint/sam_vit_l.pth
   # model_type: 'vit_b'
   # hq_checkpoint: './ckts/sam_hq_vit_b.pth'
-  model_type: vit_l
-  hq_checkpoint: ./pretrained_checkpoint/sam_hq_vit_l.pth
+  model_type: vit_h
+  hq_checkpoint: ./ckts/sam_hq_vit_h.pth
   # model_type: vit_h
   # hq_checkpoint: ./pretrained/sam_hq_vit_h.pth
   
   device: cpu
 train_prune_rate:
-  training_method: diffduo
+  training_method: duo
   learning_rate: 5e-2
   lr_drop_epoch: 2
   start_epoch: 0
@@ -70,8 +70,8 @@ quantization:
   channel: False
   percent: 100
   centerQ: False
-  percent_entropy: 1
-  percent_entropy_global: 0.5
+  percent_entropy: 0.75
+  percent_entropy_global: 0.75
   high_entropy: True 
   prune_global: True 
   # this parameter for train prune rate

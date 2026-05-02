@@ -23,7 +23,7 @@
 #     # --svdq-checkpoint ./output/svdq_sam_vit_l_r32_lowmem.pth \
 
 # PERCENTS=".5" 
-processor="BASE"
+processor="PIECE_WISE_ATTN"
 cuda_device=0
 PERCENT="0.25 0.5 0.75"
 GLOBAL_PERCENT="0.1 0.25 0.3 0.4 0.5 0.6 0.75 0.8 0.9"

@@ -11,3 +11,4 @@ Model name: facebook/PE-Core-S16-384 | Processor: SPARSEATTN | Inference time: 1
 Model name: facebook/PE-Core-S16-384 | Processor: PIECEWISE | Inference time: 11.67 ms | Sparse percent: 0.7500 | Top1 Acc: 56.97 | Top5 Acc: 81.79
 Model name: facebook/PE-Core-S16-384 | Processor: PIECEWISE | Inference time: 11.50 ms | Sparse percent: 0.5000 | Top1 Acc: 44.72 | Top5 Acc: 69.98
 Model name: facebook/PE-Core-S16-384 | Processor: PIECEWISE | Inference time: 11.88 ms | Sparse percent: 0.2500 | Top1 Acc: 14.28 | Top5 Acc: 29.69
+Model name: facebook/PE-Core-S16-384 | Processor: PIECEWISE | Inference time: 11.89 ms | Sparse percent: 0.2500 | Top1 Acc: 14.28 | Top5 Acc: 29.69
