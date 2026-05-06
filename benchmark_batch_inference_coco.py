@@ -15,6 +15,12 @@ import torch
 # SAM imports
 from segment_anything import SamPredictor, sam_model_registry
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_HERE, "cute"))
+sys.path.insert(0, os.path.join(_HERE, "sam-hq"))
+sys.path.insert(0, os.path.join(_HERE, "PiToMe"))
+
 # Local imports
 from small_engine import Engine, override_args, get_default_datasets
 from processors import get_encoder_processor, DecoderDoNothingProcessor
@@ -23,6 +29,7 @@ from data_utils import OnlineDataset
 import train.utils.misc as misc
 from train.train import compute_iou, compute_boundary_iou
 from quant.configmmdet.utils_ import parse_argsptq4sam
+from PiToMe.algo.registry import apply_sam as apply_tome, remove_all_sam as remove_tome
 
 import mmcv
 from mmcv import Config, DictAction
@@ -42,6 +49,48 @@ from mmdet.apis import multi_gpu_test, single_gpu_test
 from omegaconf import OmegaConf
 from prunning_rate.samprunediff_duo import image_encoder_monkey_patch_train_duo_diff
 from prunning_rate.sampruneduo import image_encoder_monkey_patch_train_duo
+
+
+def _disable_sparse_cute_visualization():
+    try:
+        from flash_attn_rel_pos import FlashAttentionForwardAmpere
+    except Exception:
+        return
+
+    if not hasattr(FlashAttentionForwardAmpere, "_visualize_mma"):
+        FlashAttentionForwardAmpere._visualize_mma = lambda *args, **kwargs: None
+    if not hasattr(FlashAttentionForwardAmpere, "_visualize"):
+        FlashAttentionForwardAmpere._visualize = lambda *args, **kwargs: None
+    if not hasattr(FlashAttentionForwardAmpere, "_visualize_copy_tv"):
+        FlashAttentionForwardAmpere._visualize_copy_tv = lambda *args, **kwargs: None
+
+
+def _enable_half_image_encoder_for_predictor(predictor: SamPredictor) -> None:
+    predictor.model.image_encoder.half()
+    encoder_dtype = next(predictor.model.image_encoder.parameters()).dtype
+    decoder_dtype = next(predictor.model.mask_decoder.parameters()).dtype
+
+    @torch.no_grad()
+    def set_torch_image_half_encoder(transformed_image: torch.Tensor, original_image_size):
+        assert (
+            len(transformed_image.shape) == 4
+            and transformed_image.shape[1] == 3
+            and max(*transformed_image.shape[2:]) == predictor.model.image_encoder.img_size
+        ), f"set_torch_image input must be BCHW with long side {predictor.model.image_encoder.img_size}."
+        predictor.reset_image()
+
+        predictor.original_size = original_image_size
+        predictor.input_size = tuple(transformed_image.shape[-2:])
+        input_image = predictor.model.preprocess(transformed_image).to(dtype=encoder_dtype)
+        features, interm_features = predictor.model.image_encoder(input_image)
+        predictor.features = features.to(dtype=decoder_dtype)
+        predictor.interm_features = [
+            feat.to(dtype=decoder_dtype) if torch.is_floating_point(feat) else feat
+            for feat in interm_features
+        ]
+        predictor.is_image_set = True
+
+    predictor.set_torch_image = set_torch_image_half_encoder
 
 
 class ImageEncoderCudaProfiler:
@@ -183,6 +232,10 @@ def evaluate_loadptq4sam(predictor, config_ ):
                                  help='Profile SAM image encoder CUDA time during COCO eval')
     additional_parser.add_argument('--profile-warmup-calls', type=int, default=10,
                                  help='Number of initial image encoder calls to skip in the report')
+    additional_parser.add_argument('--percent', type=float, default=None,
+                                 help='SAM patch ratio override')
+    additional_parser.add_argument('--merge-mlp', action='store_true',
+                                 help='Whether to merge MLP layers in TOME variants')
     additional_args = additional_parser.parse_args(unknown_args)
     
     if args.detector == 'yolox':
@@ -197,6 +250,8 @@ def evaluate_loadptq4sam(predictor, config_ ):
     logger.info("Model type: %s", config_.model.model_type)
     logger.info("Processor: %s", args.processor)
     logger.info("Detector: %s", args.detector)
+    logger.info("Percent: %s", additional_args.percent)
+    logger.info("Merge mlp: %s", additional_args.merge_mlp)
     # args.* for the original parse_argsptq4sam arguments
     # additional_args.* for the new arguments
     
@@ -454,7 +509,7 @@ def main():
 
     # Model parameters
     parser.add_argument('--processor', type=str, default='POSITIONAL_QUANT',
-                       choices=['BASE','POSITIONAL_PRUNE', 'POSITIONAL_SPARGE', 'PIECE_WISE_ATTN', 'POSITIONAL_QUANT', 'PRUNE_RATE','HEAD_PRUNE','PRUNE_RATE_SPARSE',"PRUNE_RATE_DUO"],
+                       choices=['BASE','POSITIONAL_PRUNE', 'POSITIONAL_SPARGE', 'PIECE_WISE_ATTN', 'POSITIONAL_QUANT', 'PRUNE_RATE','HEAD_PRUNE','PRUNE_RATE_SPARSE',"PRUNE_RATE_DUO", 'SPARSE_PARTIAL', 'TOME_PARTIAL', 'GRAD_TOME'],
                        help='Processor to use')
     parser.add_argument('--quantize-encoder', action='store_true',
                        help='Enable encoder quantization')
@@ -479,6 +534,8 @@ def main():
     parser.add_argument('--k-preserve', type=int, default=0,
                        help='Number of channels to preserve')
     parser.add_argument("--checkpoint-path", type=str, default="./checkpoints/sam_vit_h_4b8939.pth")
+    parser.add_argument('--percent', type=float, default=None,
+                       help='SAM patch ratio override for SPARSE_PARTIAL / TOME_PARTIAL / GRAD_TOME')
 
     # Output
     parser.add_argument('--output-dir', type=str, default='./benchmark_results',
@@ -487,6 +544,9 @@ def main():
                        help='Profile SAM image encoder CUDA time during COCO eval')
     parser.add_argument('--profile-warmup-calls', type=int, default=10,
                        help='Number of initial image encoder calls to skip in the report')
+    
+    parser.add_argument('--merge-mlp', action='store_true',
+                       help='Whether to merge MLP layers in TOME variants')
 
     args = parser.parse_args()
 
@@ -497,6 +557,13 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
+    sam_patch_algos = {
+        "SPARSE_PARTIAL": "sparsesam",
+        "TOME_PARTIAL": "tome",
+        "GRAD_TOME": "gradtome",
+    }
+    use_sam_patch = args.processor in sam_patch_algos
+
     # Initialize model
     print("Loading SAM model...")
     
@@ -504,7 +571,6 @@ def main():
     checkpoint_path = config.model.hq_checkpoint
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to('cuda')
     predictor = SamPredictor(sam)
-
     # Initialize engine
     engine = Engine(
         'batch_benchmark',
@@ -513,11 +579,11 @@ def main():
     )
 
     # Get processor
-    enc_processor = get_encoder_processor(args.processor)
+    enc_processor = None if use_sam_patch else get_encoder_processor(args.processor)
 
     # Setup and calibrate
     print(f"Calibrating {args.processor}...")
-    if args.processor != "PRUNE_RATE_DUO":
+    if not use_sam_patch and args.processor != "PRUNE_RATE_DUO":
         encoder_processor, decoder_processor = engine.setup_and_calibrate_processors(
             predictor,
             num_calib_samples=args.num_calib_samples,
@@ -574,6 +640,22 @@ def main():
         
         if config.quantization.use_percentage:
             enc_processor.calculate_pruned_heads_per_layer_percent_based(predictor)
+    elif use_sam_patch:
+        # _enable_half_image_encoder_for_predictor(predictor)
+        ratio = args.percent
+        if ratio is None:
+            ratio = float(config.quantization.percent_entropy)
+        if args.processor == "SPARSE_PARTIAL":
+            _disable_sparse_cute_visualization()
+        remove_tome(predictor.model.image_encoder, mask_decoder=predictor.model.mask_decoder)
+        apply_tome(
+            predictor.model.image_encoder,
+            sam_patch_algos[args.processor],
+            args=args,
+            ratio=ratio,
+            mlp_merge=args.merge_mlp,
+        )
+
     else:
         engine.apply_quantization(predictor, encoder_config, decoder_config, config)
     evaluate_loadptq4sam(predictor, config)

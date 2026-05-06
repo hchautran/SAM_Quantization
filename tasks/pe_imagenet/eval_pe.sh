@@ -38,9 +38,7 @@ python eval_pe_clip.py --list-models
 # Local checkpoint, fp16
 python eval_pe_clip.py --model PE-Core-L14-336 \
     --dataset imagenet1k --dataset-root ./data/imagenet \
-    --dtype fp16 --algorithm sparsesam_partial tome_partial \
-    --ratio 0.75 0.5 0.25 \
-    # --no-mlp-prune
-
+    --dtype fp16 --algorithm piecewise sparge \
+    --ratio 0.75 0.5 0.25
 
 

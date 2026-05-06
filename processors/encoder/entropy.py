@@ -1649,5 +1649,3 @@ class PositionalSparseFusedPosProcessor(PositionalSparseProcessor):
         #######################################
         x = module.proj(x)
         return x
-
-

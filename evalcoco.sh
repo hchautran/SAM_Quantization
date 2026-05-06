@@ -1,5 +1,6 @@
 #!/bin/bash
 export PYTHONPATH="/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/PTQ4SAM/projects/instance_segment_anything/ops:${PYTHONPATH:-}"
+source /pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/.venv/bin/activate
 # CUDA_LAUNCH_BLOCKING=1 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=29515 benchmark_batch_inference_coco.py \
 #     --config-file quant/config/coco/rtn.yaml \
 #     --quantize-encoder \
@@ -17,14 +18,15 @@ export PYTHONPATH="/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/
 # Configuration
 YAML_FILE="./quant/config/coco/rtn.yaml"
 PYTHON_SCRIPT="benchmark_batch_inference_coco.py"
-CUDA_DEVICE=2
+CUDA_DEVICE=0
 MASTER_PORT=29507
 
-MODEL_TYPES=( "vit_h" )
-HQ_CHECKPOINTS=( "./ckts/sam_hq_vit_h.pth" )
-DETECTORS=("dino" "hdetr" "yolox")
-# "dino" "hdetr"
-PERCENT=0.75
+MODEL_TYPES=(  "vit_h"  )
+HQ_CHECKPOINTS=(  "./ckts/sam_hq_vit_h.pth"  )
+DETECTORS=(  "dino")
+PROCESSORS=(  "GRAD_TOME")
+# "dino" "hdetr" "TOME_PARTIAL" "GRAD_TOME" "SPARSE_PARTIAL"
+PERCENT=(0.75)
 TRAINING_METHOD="duo"
 
 update_yaml_model() {
@@ -57,28 +59,34 @@ s/^([[:space:]]*percent_entropy_global:[[:space:]]*).*/\1${percent_entropy}/" "$
     echo "[YAML updated] model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, training_method=${training_method}, percent=${percent_entropy}"
 }
 
-for i in "${!MODEL_TYPES[@]}"; do
-    for j in "${!DETECTORS[@]}"; do
-        model_type="${MODEL_TYPES[$i]}"
-        hq_checkpoint="${HQ_CHECKPOINTS[$i]}"
-        detector="${DETECTORS[$j]}"
+for k in "${!PERCENT[@]}"; do
+    PERCENT="${PERCENT[$k]}"
+    for i in "${!MODEL_TYPES[@]}"; do
+        for j in "${!DETECTORS[@]}"; do
+            for processor in "${PROCESSORS[@]}"; do
+                model_type="${MODEL_TYPES[$i]}"
+                hq_checkpoint="${HQ_CHECKPOINTS[$i]}"
+                detector="${DETECTORS[$j]}"
 
-        update_yaml_model "$model_type" "$hq_checkpoint" "$TRAINING_METHOD" "$PERCENT"
+                update_yaml_model "$model_type" "$hq_checkpoint" "$TRAINING_METHOD" "$PERCENT"
 
-        echo "Running evaluation with model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, detector=${detector}"
-        CUDA_VISIBLE_DEVICES=$CUDA_DEVICE torchrun --nproc_per_node=1 --master_port=$MASTER_PORT $PYTHON_SCRIPT \
-            --config-file $YAML_FILE \
-            --quantize-encoder \
-            --n-bits 16 \
-            --num-calib-samples 1 \
-            --processor PIECE_WISE_ATTN \
-            --detector "$detector" \
-            --checkpoint-path "/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/SAM_Quantization/ckts/prune_rate/duo_sam_hq_epoch_torchnograd_distill10_vit_b_reg-weight_5_lr0.05_lr_drop2.pth" \
-            --profile-image-encoder \
-            --num-samples 110 \
-            --profile-warmup-calls 10
+                echo "Running evaluation with model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, detector=${detector}, processor=${processor}"
+                CUDA_VISIBLE_DEVICES=$CUDA_DEVICE torchrun --nproc_per_node=1 --master_port=$MASTER_PORT $PYTHON_SCRIPT \
+                    --config-file $YAML_FILE \
+                    --quantize-encoder \
+                    --n-bits 16 \
+                    --num-calib-samples 1 \
+                    --processor "$processor" \
+                    --percent "$PERCENT" \
+                    --detector "$detector" \
+                    --profile-image-encoder \
+                    --num-samples 110 \
+                    --profile-warmup-calls 10 \
+                    --merge-mlp
 
-        echo "Evaluation completed for model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, detector=${detector}"
+                echo "Evaluation completed for model_type=${model_type}, hq_checkpoint=${hq_checkpoint}, detector=${detector}, processor=${processor}"
+            done
+        done
     done
 done
 
