@@ -31,20 +31,26 @@ Usage:
 import argparse
 import os
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import torch
+from piecewise_attn import piecewise_sparse_attention_pos
+from spas_sage_attn import spas_sage2_attn_meansim_topk_cuda_pos
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
+sys.path.insert(0, REPO_ROOT)
 
 # ── SAM 1 import ──────────────────────────────────────────────────────────────
-SAM1_PATH = os.path.join(os.path.dirname(__file__), 'sam-hq')
+SAM1_PATH = os.path.join(REPO_ROOT, 'sam-hq')
 sys.path.insert(0, SAM1_PATH)
 
 # ── SAM 2 import ──────────────────────────────────────────────────────────────
-SAM2_PATH = os.path.join(os.path.dirname(__file__), 'sam-hq', 'sam-hq2')
+SAM2_PATH = os.path.join(SAM1_PATH, 'sam-hq2')
 sys.path.insert(0, SAM2_PATH)
 
 # ── ToMe import ───────────────────────────────────────────────────────────────
-PITOME_PATH = os.path.join(os.path.dirname(__file__), 'PiToMe')
+PITOME_PATH = os.path.join(REPO_ROOT, 'PiToMe')
 sys.path.insert(0, PITOME_PATH)
 
 
@@ -311,34 +317,179 @@ def print_report_sam3(timers, n_runs, model_id, batch_size, vision_enc=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ToMe helpers
+# SAM1 patch helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def apply_tome_patch(encoder, algo, ratio, margin):
-    from algo.sparsesam.patch.sam import apply_patch
-    apply_patch(encoder, algo=algo, ratio=ratio, margin=margin)
+SAM1_REGISTRY_ALGOS = {
+    "tome",
+    "pitome",
+    "sparsesam",
+    "sparsesam_pitome",
+    "sparsesam_random",
+    "gradtome",
+    "gradtome_pitome",
+    "gradtome_hilbert",
+}
+SAM1_KERNEL_ALGOS = {"piecewise", "sparge"}
 
 
-def remove_tome_patch(encoder):
-    from algo.sparsesam.patch.sam import ToMeSAMBlock, ToMeSAMAttention
-    from segment_anything.modeling.image_encoder import Block, Attention
-    for m in encoder.modules():
-        if type(m) is ToMeSAMBlock:
-            m.__class__ = Block
-        elif type(m) is ToMeSAMAttention:
-            m.__class__ = Attention
-    encoder.__dict__.pop('forward',    None)
-    encoder.__dict__.pop('tome_info',  None)
+def disable_sparse_cute_visualization():
+    try:
+        from flash_attn_rel_pos import FlashAttentionForwardAmpere
+    except Exception:
+        return
+
+    if not hasattr(FlashAttentionForwardAmpere, "_visualize_mma"):
+        FlashAttentionForwardAmpere._visualize_mma = lambda *args, **kwargs: None
+    if not hasattr(FlashAttentionForwardAmpere, "_visualize"):
+        FlashAttentionForwardAmpere._visualize = lambda *args, **kwargs: None
+    if not hasattr(FlashAttentionForwardAmpere, "_visualize_copy_tv"):
+        FlashAttentionForwardAmpere._visualize_copy_tv = lambda *args, **kwargs: None
+
+
+def _kernel_get_decomposed_rel_pos(q, rel_pos_h, rel_pos_w, q_size, k_size):
+    from segment_anything.modeling.image_encoder import get_rel_pos
+
+    q_h, q_w = q_size
+    k_h, k_w = k_size
+    Rh = get_rel_pos(q_h, k_h, rel_pos_h)
+    Rw = get_rel_pos(q_w, k_w, rel_pos_w)
+
+    B = q.shape[0]
+    r_q = q.reshape(B, q_h, q_w, -1)
+    rel_h = torch.einsum("bhwc,hkc->bhwk", r_q, Rh)
+    rel_w = torch.einsum("bhwc,wkc->bhwk", r_q, Rw)
+    return (
+        (rel_h[:, :, :, :, None] + rel_w[:, :, :, None, :])
+        .flatten(1, 2)
+        .flatten(2, 3)
+    )
+
+
+def _reshape_attn_output(x, B, num_heads, H, W):
+    return x.view(B, num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+
+
+def _run_sparse_kernel_attn(module, x, algo, ratio, global_ratio):
+    
+
+    B, H, W, _ = x.shape
+    qkv = module.qkv(x).reshape(B, H * W, 3, module.num_heads, -1).permute(2, 0, 3, 1, 4)
+    q, k, v = qkv.reshape(3, B, module.num_heads, H * W, -1).unbind(0)
+
+    if not module.use_rel_pos:
+        raise RuntimeError(f"{algo} profiling patch requires relative position attention")
+
+    topk = ratio if (H * W) <= 196 else global_ratio
+    pos = _kernel_get_decomposed_rel_pos(
+        q.reshape(B * module.num_heads, H * W, -1),
+        module.rel_pos_h,
+        module.rel_pos_w,
+        (H, W),
+        (H, W),
+    ).reshape(B, module.num_heads, H * W, -1)
+
+    if algo == "piecewise":
+        x = piecewise_sparse_attention_pos(q, k, v, pos, density=topk)
+    elif algo == "sparge":
+        x = spas_sage2_attn_meansim_topk_cuda_pos(
+            q, k, v, pos, module.scale, topk=topk, is_causal=False
+        )
+    else:
+        raise KeyError(f"Unsupported kernel algorithm: {algo}")
+
+    x = x.reshape(B * module.num_heads, H * W, -1)
+    x = _reshape_attn_output(x, B, module.num_heads, H, W)
+    x = x.to(module.proj.weight.dtype)
+    return module.proj(x)
+
+
+def _make_profile_kernel_attention():
+    from segment_anything.modeling.image_encoder import Attention
+
+    class ProfileKernelAttention(Attention):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return _run_sparse_kernel_attn(
+                self,
+                x,
+                algo=self._profile_algo,
+                ratio=self._profile_ratio,
+                global_ratio=self._profile_global_ratio,
+            )
+
+    return ProfileKernelAttention, Attention
+
+
+ProfileKernelAttention, BaseSAMAttention = _make_profile_kernel_attention()
+
+
+def apply_kernel_patch(encoder, algo, ratio, global_ratio):
+    for module in encoder.modules():
+        if type(module) is BaseSAMAttention:
+            module.__class__ = ProfileKernelAttention
+            module._profile_algo = algo
+            module._profile_ratio = float(ratio)
+            module._profile_global_ratio = float(global_ratio)
+
+
+def remove_kernel_patch(encoder):
+    for module in encoder.modules():
+        if type(module) is ProfileKernelAttention:
+            module.__class__ = BaseSAMAttention
+            module.__dict__.pop("_profile_algo", None)
+            module.__dict__.pop("_profile_ratio", None)
+            module.__dict__.pop("_profile_global_ratio", None)
+
+
+def apply_sam_registry_patch(encoder, algo, ratio, margin, mlp_merge):
+    from PiToMe.algo.registry import apply_sam as apply_tome
+
+    if algo.startswith("sparsesam"):
+        disable_sparse_cute_visualization()
+    args = SimpleNamespace(margin=float(margin), mlp_merge=bool(mlp_merge))
+    apply_tome(encoder, algo, args=args, ratio=float(ratio), mlp_merge=bool(mlp_merge))
+
+
+def remove_sam_registry_patch(encoder):
+    from PiToMe.algo.registry import remove_all_sam as remove_tome
+
+    remove_tome(encoder)
+
+
+def apply_profile_patch(encoder, algo, ratio, margin, mlp_merge, global_ratio):
+    if algo in SAM1_KERNEL_ALGOS:
+        apply_kernel_patch(encoder, algo=algo, ratio=ratio, global_ratio=global_ratio)
+        return
+    if algo in SAM1_REGISTRY_ALGOS:
+        apply_sam_registry_patch(
+            encoder,
+            algo=algo,
+            ratio=ratio,
+            margin=margin,
+            mlp_merge=mlp_merge,
+        )
+        return
+    raise KeyError(f"Unsupported SAM1 profiling algorithm: {algo}")
+
+
+def remove_profile_patch(encoder, algo):
+    if algo in SAM1_KERNEL_ALGOS:
+        remove_kernel_patch(encoder)
+        return
+    if algo in SAM1_REGISTRY_ALGOS:
+        remove_sam_registry_patch(encoder)
+        return
+    raise KeyError(f"Unsupported SAM1 profiling algorithm: {algo}")
 
 
 def apply_fa2_patch(encoder):
     """Patch attention with FlashAttentionForwardAmpere; ratio=1.0 disables token merging."""
-    from algo.sparsesam.patch.sam import apply_patch
+    from algo.sparsesam.sam import apply_patch
     apply_patch(encoder, algo='tome', ratio=1.0)
 
 
-# remove_fa2_patch is identical to remove_tome_patch (same classes)
-remove_fa2_patch = remove_tome_patch
+def remove_fa2_patch(encoder):
+    remove_sam_registry_patch(encoder)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -522,18 +673,25 @@ def main():
     parser.add_argument('--img-size',   type=int, default=1024)
     parser.add_argument('--batch-size', type=int, default=8)
 
-    # ToMe / PiToMe comparison (SAM 1 only)
-    parser.add_argument('--tome-algo',   type=str, default='none',
+    # SAM1 patch comparison
+    parser.add_argument('--algo', '--tome-algo', dest='algo', type=str, default='none',
                         choices=['none', 'tome', 'pitome', 'sparsesam', 'sparsesam_pitome',
-                                 'sparsesam-dense'],
+                                 'sparsesam_random', 'gradtome', 'gradtome_pitome',
+                                 'gradtome_hilbert', 'piecewise', 'sparge'],
                         help="Run a second pass with this algo and show comparison table.")
     parser.add_argument('--tome-ratio',  type=float, default=0.9,
-                        help="Token-keep ratio for ToMe/PiToMe (0 < ratio < 1).")
+                        help="Patch ratio / kernel density for the comparison run (0 < ratio <= 1).")
     parser.add_argument('--tome-margin', type=float, default=0.5,
                         help="PiToMe energy margin.")
+    parser.add_argument('--global-ratio', type=float, default=0.5,
+                        help="Global-attention density for piecewise/sparge; local windows use --tome-ratio.")
     parser.add_argument('--diagonal-width', type=int, default=1,
                         help="Diagonal band width for block-sparse attention "
                              "(1=exact diagonal, 3=±1 block). Only used for sparsesam[-pitome].")
+    parser.add_argument('--merge-mlp', action='store_true', default=True,
+                        help="Keep MLP merge enabled for registry-based SAM patches.")
+    parser.add_argument('--no-merge-mlp', action='store_false', dest='merge_mlp',
+                        help="Disable MLP merge for registry-based SAM patches.")
 
     # FA2 comparison (SAM 1 only)
     parser.add_argument('--fa2', action='store_true',
@@ -575,14 +733,14 @@ def main():
     t_base = _run_profile(encoder, attach_fn, dummy, args.n_warmup, args.n_runs, "baseline",
                           pixel_values=pixel_values)
 
-    want_tome = args.tome_algo != 'none' and args.version == 'sam1'
+    want_patch = args.algo != 'none' and args.version == 'sam1'
     want_fa2  = args.fa2 and args.version == 'sam1'
 
-    if (args.tome_algo != 'none' or args.fa2) and args.version != 'sam1':
-        print("Note: --tome-algo and --fa2 are only supported for SAM1; ignoring.")
+    if (args.algo != 'none' or args.fa2) and args.version != 'sam1':
+        print("Note: --algo/--tome-algo and --fa2 are only supported for SAM1; ignoring.")
 
 
-    if not want_tome and not want_fa2:
+    if not want_patch and not want_fa2:
         report_fn(t_base, args.n_runs)
         return
 
@@ -604,20 +762,32 @@ def main():
             patched_label="fa2",
         )
 
-    # ── ToMe / PiToMe pass (SAM 1 only) ──────────────────────────────────────
-    if want_tome:
-        print(f"\n── {args.tome_algo.upper()} ratio={args.tome_ratio} ──")
-        apply_tome_patch(encoder, algo=args.tome_algo,
-                         ratio=args.tome_ratio, margin=args.tome_margin)
-        t_tome = _run_profile(encoder, attach_fn, dummy, args.n_warmup, args.n_runs,
-                              f"{args.tome_algo} r={args.tome_ratio}")
-        remove_tome_patch(encoder)
+    # ── Algorithm pass (SAM 1 only) ──────────────────────────────────────────
+    if want_patch:
+        print(f"\n── {args.algo.upper()} ratio={args.tome_ratio} ──")
+        apply_profile_patch(
+            encoder,
+            algo=args.algo,
+            ratio=args.tome_ratio,
+            margin=args.tome_margin,
+            mlp_merge=args.merge_mlp,
+            global_ratio=args.global_ratio,
+        )
+        t_patch = _run_profile(
+            encoder,
+            attach_fn,
+            dummy,
+            args.n_warmup,
+            args.n_runs,
+            f"{args.algo} r={args.tome_ratio}",
+        )
+        remove_profile_patch(encoder, args.algo)
 
         print_comparison_sam1(
-            t_base, t_tome,
+            t_base, t_patch,
             model_type=args.model_type,
             batch_size=args.batch_size,
-            algo=args.tome_algo,
+            algo=args.algo,
             ratio=args.tome_ratio,
             n_runs=args.n_runs,
             encoder=encoder,

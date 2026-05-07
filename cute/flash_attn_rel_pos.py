@@ -198,7 +198,7 @@ class FlashAttentionForwardAmpere:
             permutation_mnk=(self._num_threads // 32 * 16, 16, 16),
         )
 
-        self._visualize_mma(tiled_mma, tile_mnk=tiled_mma.shape_mnk, output_file='tiledmma.svg')
+        # self._visualize_mma(tiled_mma, tile_mnk=tiled_mma.shape_mnk, output_file='tiledmma.svg')
         
 
         # grid: (m_blocks, batch, heads)
