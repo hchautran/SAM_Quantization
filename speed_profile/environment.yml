@@ -1,0 +1,38 @@
+# conda env create -f speed_profile/environment.yml
+# Creates the `speed_profile` env used by bench_encoder_speed.py.
+#
+# Deliberately minimal: no dataset libraries (pycocotools, etc.) — the
+# benchmark feeds synthetic noise, so nothing here depends on COCO or HQ44K.
+name: speed_profile
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      # --- torch (CUDA 12.8 wheels) -------------------------------------
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.10.0
+      - torchvision==0.25.0
+
+      # --- SparseSAM block-sparse cute kernel ---------------------------
+      - nvidia-cutlass-dsl==4.5.0.dev0
+      - cuda-python==12.9.4
+
+      # --- model code deps ----------------------------------------------
+      - timm==1.0.15          # MobileSAM TinyViT
+      - omegaconf             # efficientvit config loading
+      - numpy==2.1.2
+      - pyyaml
+      - requests
+      - tqdm
+
+      # --- FastSAM's vendored ultralytics --------------------------------
+      - setuptools<81         # vendored ultralytics needs pkg_resources, dropped in 81
+      - opencv-python-headless
+      - matplotlib
+      - pandas
+      - seaborn
+      - scipy
+      - psutil
+      - py-cpuinfo
